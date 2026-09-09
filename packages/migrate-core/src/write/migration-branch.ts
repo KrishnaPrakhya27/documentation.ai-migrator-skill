@@ -29,7 +29,7 @@ function git(dir: string, args: string[]): string {
 }
 
 export function remoteOrg(remote: string): { host: string; org: string } | null {
-  const scp = remote.match(/^git@([^:]+):([^/]+)\/[^/]+?(?:\.git)?$/);
+  const scp = remote.match(/^[\w.-]+@([^:/]+):([^/]+)\/.+?(?:\.git)?\/?$/);
   if (scp) return { host: scp[1], org: scp[2] };
   try {
     const u = new URL(remote);
@@ -44,7 +44,9 @@ export function remoteOrg(remote: string): { host: string; org: string } | null 
 export function assertRemoteAllowed(remote: string, allowedOrgs: string[]): void {
   const r = remoteOrg(remote);
   if (!r) throw new Error(`cannot parse remote ${remote}`);
-  if (!allowedOrgs.map((o) => o.toLowerCase()).includes(r.org.toLowerCase())) {
+  // Allowlist entries are host/org pairs ("github.com/acme-docs"); a bare org implies github.com.
+  const allowed = allowedOrgs.map((o) => (o.includes('/') ? o : `github.com/${o}`).toLowerCase());
+  if (!allowed.includes(`${r.host}/${r.org}`.toLowerCase())) {
     throw new Error(`remote org "${r.org}" is not in the allowed list [${allowedOrgs.join(', ')}]. Migrations land in the customer's org or the demo org, never a personal account.`);
   }
 }

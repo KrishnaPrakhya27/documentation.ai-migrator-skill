@@ -20,6 +20,23 @@ export interface MarkdownAdapterOptions {
   pageId: string;
   title?: string;
   frontmatter?: Partial<Frontmatter>;
+  /** Resolve a snippet import path (e.g. "/snippets/intro.mdx") to its MDX body; undefined leaves the import unresolved (quarantined). */
+  resolveSnippet?: (importPath: string) => string | undefined;
+}
+
+/** Sentinel wrapped around a custom heading id ({#id}) so it survives parsing and is lifted into heading.sourceId. */
+const ANCHOR_OPEN = '\uE000';
+const ANCHOR_CLOSE = '\uE001';
+const SNIPPET_IMPORT = /^\s*import\s+([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+\.(?:mdx?|jsx))["'];?\s*$/;
+
+/** Snippet imports and their usages, from the ESM nodes of a document. */
+function snippetImports(tree: any): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const node of tree.children ?? []) {
+    if (node.type !== 'mdxjsEsm') continue;
+    for (const line of String(node.value ?? '').split('\n')) { const m = line.match(SNIPPET_IMPORT); if (m) out.set(m[1], m[2]); }
+  }
+  return out;
 }
 
 function splitFrontmatter(source: string): { data: Record<string, unknown>; body: string } {
@@ -47,8 +64,19 @@ function liquidAttrs(raw: string): string {
 }
 
 /** Convert block syntaxes that micromark intentionally treats as plain text. */
+/** Apply `fn` only to text outside fenced and inline code, so documentation *about* a syntax is never rewritten. */
+function outsideCode(source: string, fn: (segment: string) => string): string {
+  const parts = source.split(/(^ {0,3}(?:`{3,}|~{3,})[^\n]*\n[\s\S]*?\n {0,3}(?:`{3,}|~{3,})[ \t]*$|`[^`\n]+`)/m);
+  return parts.map((p, i) => (i % 2 === 1 ? p : fn(p))).join('');
+}
+
 export function preprocessPlatformMarkdown(source: string, platform: string): string {
-  let out = source.replace(/\{\{\s*snippet\.([^}]+?)\s*\}\}/g, (_, token) => `<snippetRef token="${quoteAttr(String(token).trim())}" />`);
+  return outsideCode(source, (segment) => preprocessSegment(segment, platform));
+}
+
+function preprocessSegment(source: string, platform: string): string {
+  let out = source.replace(/^(#{1,6}\s+.*?)\s*\{#([A-Za-z][\w:.-]*)\}\s*$/gm, (_, heading, id) => `${heading} ${ANCHOR_OPEN}${id}${ANCHOR_CLOSE}`);
+  out = out.replace(/\{\{\s*snippet\.([^}]+?)\s*\}\}/g, (_, token) => `<snippetRef token="${quoteAttr(String(token).trim())}" />`);
   if (platform === 'gitbook') {
     out = out.replace(/^\s*\{%\s*(hint|tabs|tab|content-ref|stepper|step)\b([^%]*)%\}\s*$/gm, (_, name, attrs) => `<${name}${liquidAttrs(attrs)}>`);
     out = out.replace(/^\s*\{%\s*end(hint|tabs|tab|content-ref|stepper|step)\s*%\}\s*$/gm, (_, name) => `</${name}>`);
@@ -87,6 +115,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     return typeof start === 'number' && typeof end === 'number' ? prepared.slice(start, end) : String(node.value ?? node.type);
   };
   const idOf = (node: any, path: number[]) => nodeId(opts.file, path, sourceSlice(node));
+  const imports = snippetImports(tree);
   const srcOf = (node: any) => ({ file: opts.file, line: node.position?.start?.line, col: node.position?.start?.column });
 
   const inline = (nodes: any[], path: number[]): Inline[] => nodes.flatMap((node, index): Inline[] => {
@@ -146,12 +175,42 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     };
   };
 
-  const blocks = (nodes: any[], path: number[]): Block[] => nodes.flatMap((node, index): Block[] => {
+  const INLINE_TYPES = new Set(['text', 'strong', 'emphasis', 'delete', 'inlineCode', 'link', 'image', 'break', 'html', 'mdxTextExpression', 'mdxJsxTextElement']);
+  /** JSX flow elements may hold inline nodes directly (<Note>text</Note>); wrap each run of them in a synthetic paragraph so no text is lost. */
+  const groupInline = (nodes: any[]): any[] => {
+    const out: any[] = []; let run: any[] = [];
+    const flush = () => { if (run.length) { const text = run.map((n) => n.value ?? '').join('').trim(); if (text || run.some((n) => n.type !== 'text')) out.push({ type: 'paragraph', children: run, position: run[0].position }); run = []; } };
+    for (const n of nodes) { if (INLINE_TYPES.has(n.type)) run.push(n); else { flush(); out.push(n); } }
+    flush();
+    return out;
+  };
+
+  const blocks = (rawNodes: any[], path: number[]): Block[] => groupInline(rawNodes).flatMap((node, index): Block[] => {
     const p = [...path, index];
     const base = { id: idOf(node, p), src: srcOf(node) };
     switch (node.type) {
-      case 'paragraph': return [{ ...base, type: 'paragraph', children: inline(node.children ?? [], p) }];
-      case 'heading': return [{ ...base, type: 'heading', depth: node.depth, children: inline(node.children ?? [], p) }];
+      case 'paragraph': {
+        // <Note>text</Note> on a single line parses as an inline JSX element wrapped in a paragraph; that is a block component
+        const meaningful = (node.children ?? []).filter((c: any) => !(c.type === 'text' && !String(c.value).trim()));
+        if (meaningful.length === 1 && meaningful[0].type === 'mdxJsxTextElement' && meaningful[0].name) {
+          const el = { ...meaningful[0], type: 'mdxJsxFlowElement' };
+          const c = component(el, p);
+          return [c];
+        }
+        return [{ ...base, type: 'paragraph', children: inline(node.children ?? [], p) }];
+      }
+      case 'heading': {
+        let sourceId: string | undefined;
+        const children = inline(node.children ?? [], p).flatMap((n): Inline[] => {
+          if (n.type !== 'text') return [n];
+          const m = n.value.match(new RegExp(`\\s*${ANCHOR_OPEN}([^${ANCHOR_CLOSE}]+)${ANCHOR_CLOSE}`));
+          if (!m) return [n];
+          sourceId = m[1];
+          const value = n.value.replace(m[0], '');
+          return value ? [{ ...n, value }] : [];
+        });
+        return [{ ...base, type: 'heading', depth: node.depth, children, sourceId }];
+      }
       case 'code': return [{ ...base, type: 'code', lang: node.lang ?? undefined, meta: node.meta ?? undefined, value: node.value ?? '' }];
       case 'blockquote': {
         const children = blocks(node.children ?? [], p);
@@ -181,12 +240,26 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       case 'thematicBreak': return [{ ...base, type: 'thematicBreak' }];
       case 'html': return [{ ...base, type: 'html', value: node.value ?? '' }];
       case 'mdxJsxFlowElement': {
+        const importPath = node.name ? imports.get(node.name) : undefined;
+        if (importPath && /\.mdx?$/.test(importPath) && !(node.attributes ?? []).length && opts.resolveSnippet) {
+          const body = opts.resolveSnippet(importPath);
+          if (body !== undefined) {
+            // inline the snippet's blocks; ids are derived from the snippet file so they are stable and distinct
+            const sub = markdownToIr(body, { ...opts, file: `${opts.file}::${importPath}`, resolveSnippet: opts.resolveSnippet });
+            return sub.children;
+          }
+        }
         const c = component(node, p);
         if (c.name === 'snippetRef') return [{ id: c.id, src: c.src, type: 'snippetRef', token: String(c.props.token ?? ''), platform: opts.platform }];
         return [c];
       }
+      case 'mdxjsEsm': {
+        const lines = String(node.value ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+        const onlyResolvedImports = lines.length > 0 && lines.every((l) => { const m = l.match(SNIPPET_IMPORT); return !!m && /\.mdx?$/.test(m[2]) && opts.resolveSnippet?.(m[2]) !== undefined; });
+        if (onlyResolvedImports) return [];
+        return [{ ...base, type: 'component', name: 'esm', platform: opts.platform, props: { contentHash: idOf(node, p) }, children: [], styleDeps: ['expression:executable'] }];
+      }
       case 'mdxFlowExpression':
-      case 'mdxjsEsm':
         return [{ ...base, type: 'component', name: node.type === 'mdxjsEsm' ? 'esm' : 'expression', platform: opts.platform, props: { contentHash: idOf(node, p) }, children: [], styleDeps: ['expression:executable'] }];
       default:
         return node.children ? blocks(node.children, p) : [];

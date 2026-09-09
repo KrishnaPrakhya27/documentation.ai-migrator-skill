@@ -1,55 +1,52 @@
 # Implementation status
 
-Last updated 9 September 2026 after the architecture hardening pass.
+Last updated 9 September 2026 after the platform-adapter pass. Verified by `npm run typecheck`, 61 tests, and end-to-end CLI runs over the synthetic Document360 export and the Mintlify fixture repository.
 
 ## Implemented and verified
 
-- Portable Codex/Claude plugin manifests and 13 operator skills, validated by the Codex plugin validator.
-- External `0700` migration workspaces, resumable stage state, stable page/node identities, redacted decision logs, editable plans pinned by hash, and deterministic output hashing.
-- Content-contract extraction and reconciliation data for Documentation.AI components, props, navigation and source-syntax restrictions.
-- Source support for Document360 export ZIPs/directories (HTML and Markdown articles), generic local Markdown/MDX/HTML repositories, and frozen live sites acquired by the local fetcher or Firecrawl.
-- Markdown/MDX parsing with GFM, literal-only MDX props, supported GitBook Liquid preprocessing, ReadMe emoji callouts, and no JavaScript evaluation.
-- HTML-to-IR and IR-to-MDX conversion, component clustering, declarative T0–T7 rules, per-block dispositions, quarantine, snippet blocking, safe raw-HTML handling and deterministic navigation/redirect/anchor planning.
-- Asset byte preservation and hash deduplication. Releases are blocked while an asset failed, remains external, or lacks its final ingested URL.
-- Security controls: DNS/redirect SSRF checks, host allowlists, origin-bound credentials, robots handling, request throttling/retry/size caps, ZIP path/size/count/ratio/symlink controls, unsafe URL stripping plus a blocking gate, safe YAML/frontmatter and MDX code-fence serialization, remote-organization allowlists, and isolated Git worktrees that preserve the operator checkout.
-- Release gates for plan integrity, page/ledger coverage, attributed exclusions, unsafe URLs, asset readiness, prose, code and table parity, contract/navigation validity, internal links, unresolved blocks, redirects, review completion, deterministic reruns, preview contract version and rendered heading/legacy anchors in headless Chrome.
-- Safe preview workflow: two local verification runs must pass every non-preview gate before the migration branch can be pushed; final release still requires all rendered-preview gates.
-- Reports: `gates.json`, `review-queue.md`, `summary.md`, redirects, anchors and aggregated platform gaps.
-- Automated verification: TypeScript typecheck, 38 unit/integration tests, real local Git writer integration, crafted ZIP and binary-asset tests, and a two-page CLI/browser smoke migration.
+- Portable Codex/Claude plugin manifests and 13 operator skills whose text matches the code.
+- External `0700` workspaces, resumable stage state, stable page and node identities, redacted decision logs, plans pinned by hash, convert-level determinism (two converts over identical inputs must hash identically).
+- Content contract extracted from the product repos and reconciled by decision (`packages/content-contract`), with a strict validator (editor-only nodes, unknown components, invalid enum props, expressions, ESM, residual source syntax, multi-line evasion folded).
+- **Sources**
+  - Document360 export ZIP or directory (HTML and Markdown articles, hardened extraction, snippet tokens with `blocked` mode).
+  - **Mintlify repository**: `docs.json`/`mint.json` recursive navigation (versions, languages, tabs, anchors, dropdowns, products, groups, pages), redirects (exact now, trailing wildcards as `:splat` candidates), group-level `openapi` copied and attached, `snippets/*.mdx` imports inlined, `{#custom-id}` headings, site name/colors/favicon.
+  - **GitBook Git Sync repository**: `.gitbook.yaml` root, structure and redirects; `SUMMARY.md` sections and nesting; missing and unlisted files reported; Liquid `hint`, `tabs`, `embed`, `content-ref`, `stepper` outside code.
+  - **ReadMe**: sync repository (`docs/<category>/*.md`, frontmatter `title`, `slug`, `excerpt`, `hidden`, `order`, `parentDocSlug`) and API v2 client (paginated categories, guides and reference with bodies; wired into `discover` when `README_API_KEY` is set).
+  - Generic local Markdown/MDX/HTML repositories, and live sites via discovery (sitemap ∪ sidebar ∪ recursive same-origin links ∪ optional Firecrawl map) with the SSRF-guarded fetcher or Firecrawl batch scrape.
+- Component definitions scanned from `snippets/`, `components/`, `src/components/`, `custom-blocks/` and attached to signatures, so custom components cluster per definition.
+- Markdown/MDX parsing with GFM, literal-only props, no JavaScript evaluation; single-line JSX elements promoted to block components; inline runs under flow elements kept as paragraphs.
+- Component Conversion Engine: declarative mappings per platform, T0–T4 deterministic, T5 static only, T7 sanitised fragment or quarantine, `drop` rules with subtree ledger marks, per-cluster plan decisions honoured (approve, exclude, quarantine).
+- Assets: download, hash dedupe, SVG sanitisation, `s3` provider (tested with an injected client), `dai-api` provider (wired to the presign/confirm endpoints; blocked until the platform accepts API-key credentials there), failed entries retried.
+- Verification: 18 release gates including block-level ledger coverage, prose and code/table parity, contract validation, navigation, links, redirects, plan pinning, gates bound to the output hash, convert-level determinism, preview contract version, rendered anchors in headless Chrome with resolver pinning.
+- Git writer: `refs/heads/migration/<session>`, isolated worktree, host-bound org allowlist (GitHub and GitLab, subgroups), no force-push, protected-branch refusal.
+- Reports: gates, review queue, summary, redirects, anchors, platform gaps, cutover runbook, sitemap list, search canary.
 
-## Important current boundaries
+## Boundaries
 
-- ReadMe and GitBook API clients are not implemented.
-- `docs.json`, `mint.json`, `SUMMARY.md`, `.gitbook.yaml`, ReadMe categories/versions and similar source navigation configs are not parsed; repository discovery derives a provisional tree from file paths that must be reviewed.
-- OpenAPI/reference migration, recipe/variable/glossary import, snippet-import resolution and custom component definition loading are not implemented.
-- Live discovery unions sitemaps, links on the seed page and optional Firecrawl mapping. Recursive local link-graph crawling, sidebar reconstruction and `/llms.txt` discovery are not implemented.
-- `dai-api` and S3 asset providers are not implemented. The core downloads originals but intentionally blocks release until final hosted URLs exist.
-- Preview deployment is created by the product's branch workflow; this plugin does not call a preview-deployment API. The preview contract version is supplied to verification because the product does not expose it through a public migration endpoint yet.
-- Customer HTML/PDF reports, CSV annexes, screenshots, performance scoring, external-link checks and post-release search canaries remain future work.
-- T6 AI rule proposal/promotion remains future work; operators can add and approve declarative rules manually.
+- GitBook API export (`format=markdown`) and variants/sections from `gitbook-docs.yaml` are not implemented; map them in `plan/tree.yaml`.
+- ReadMe: OpenAPI uploads, variables/glossary substitution and Changelog → Update are not implemented; Recipes convert only when the body is present.
+- Mintlify: `.jsx` snippets and snippets used with props remain source components for review; SDK reference generation is not implemented.
+- `dai-api` asset ingestion targets session-authenticated endpoints and fails cleanly until the platform ships a migration credential path; `assets-ready` keeps release blocked.
+- Preview deployments are created by the product's branch workflow; the preview contract version must be supplied until the product exposes it.
+- Customer PDF renderer and annexes, screenshots and performance scoring, external-link checks, and T6 AI rule proposals remain future work.
 
 ## Verified command sequence
 
 ```bash
-npm install
-npm run typecheck
-npm test
+npm install && npm run typecheck && npm test
 
-npm run dai-migrate -- init --workspace /tmp/dai-run --source /path/to/source --target demo-org --platform mintlify --allowed-orgs your-github-org
-npm run dai-migrate -- fingerprint --workspace /tmp/dai-run
-npm run dai-migrate -- discover --workspace /tmp/dai-run
-npm run dai-migrate -- acquire --workspace /tmp/dai-run        # URL sources only
-npm run dai-migrate -- inventory --workspace /tmp/dai-run
-npm run dai-migrate -- plan --workspace /tmp/dai-run
-# Review plan/tree.yaml, component-plan.yaml, urls.yaml, assets.yaml and snippets.json.
-npm run dai-migrate -- assets --workspace /tmp/dai-run
-npm run dai-migrate -- convert --workspace /tmp/dai-run
-npm run dai-migrate -- nav --workspace /tmp/dai-run
-npm run dai-migrate -- verify --workspace /tmp/dai-run         # records canonical hash
-npm run dai-migrate -- verify --workspace /tmp/dai-run         # proves deterministic rerun
-npm run dai-migrate -- write --workspace /tmp/dai-run --repo /path/to/target-repo --remote https://github.com/your-github-org/docs.git --push
-npm run dai-migrate -- verify --workspace /tmp/dai-run --preview-url https://preview.example --preview-contract-version 0.1.0
-npm run dai-migrate -- report --workspace /tmp/dai-run
+# repository sources (Mintlify, GitBook, ReadMe sync repo, generic)
+npx tsx packages/migrate-core/src/cli.ts init --workspace /secure/ws --source /path/repo --repo /path/repo --target demo-org --platform mintlify --allowed-orgs your-github-org
+# ReadMe API: --source https://<subdomain>.readme.io --platform readme with README_API_KEY set
+npx tsx packages/migrate-core/src/cli.ts discover  --workspace /secure/ws   # ⏸ plan/tree.yaml, inventory/platform-meta.json
+npx tsx packages/migrate-core/src/cli.ts inventory --workspace /secure/ws
+npx tsx packages/migrate-core/src/cli.ts plan      --workspace /secure/ws   # ⏸ plan/*.yaml, inventory/snippets.json
+npx tsx packages/migrate-core/src/cli.ts assets    --workspace /secure/ws --provider s3|none
+npx tsx packages/migrate-core/src/cli.ts convert   --workspace /secure/ws
+npx tsx packages/migrate-core/src/cli.ts convert   --workspace /secure/ws   # determinism
+npx tsx packages/migrate-core/src/cli.ts nav       --workspace /secure/ws   # ⏸ documentation.json, redirects
+npx tsx packages/migrate-core/src/cli.ts verify    --workspace /secure/ws
+npx tsx packages/migrate-core/src/cli.ts write     --workspace /secure/ws --repo /path/target --remote https://github.com/your-org/docs.git --push
+npx tsx packages/migrate-core/src/cli.ts verify    --workspace /secure/ws --preview-url https://preview... --preview-contract-version 0.1.0
+npx tsx packages/migrate-core/src/cli.ts report    --workspace /secure/ws
 ```
-
-Headless verification rejects private preview hosts and uses an isolated temporary Chrome profile. For an intentional local test server only, set `DAI_ALLOW_LOCAL_PREVIEW=1`.

@@ -8,8 +8,8 @@ import type { GateResult } from '../verify/gates.js';
 import type { ClusterEntry } from '../components/signature.js';
 import type { Decision } from '../log/decisions.js';
 
-export function writeGates(workspace: string, gates: GateResult[]): void {
-  writeFileSync(join(workspace, 'report', 'gates.json'), JSON.stringify({ at: new Date().toISOString(), pass: gates.every((g) => g.status === 'pass'), gates }, null, 2), { mode: 0o600 });
+export function writeGates(workspace: string, gates: GateResult[], outputHash?: string): void {
+  writeFileSync(join(workspace, 'report', 'gates.json'), JSON.stringify({ at: new Date().toISOString(), outputHash, pass: gates.every((g) => g.status === 'pass'), gates }, null, 2), { mode: 0o600 });
 }
 
 export function readDecisions(workspace: string): Decision[] {

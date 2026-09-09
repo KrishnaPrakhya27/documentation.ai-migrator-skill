@@ -39,12 +39,17 @@ export async function chromeDump(url: string): Promise<string> {
   const parsed = new URL(url);
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('preview URL must use HTTP or HTTPS');
   const localPreview = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
-  if (!(localPreview && process.env.DAI_ALLOW_LOCAL_PREVIEW === '1')) await assertPublicHost(parsed);
+  // Pin the preview host to the address we validated and make every other hostname unresolvable,
+  // so a redirect to another host (including link-local metadata endpoints) fails closed in Chrome.
+  const resolverRules = localPreview && process.env.DAI_ALLOW_LOCAL_PREVIEW === '1'
+    ? undefined
+    : `MAP * ~NOTFOUND, MAP ${parsed.hostname} ${await assertPublicHost(parsed)}`;
   const profile = mkdtempSync(join(tmpdir(), 'dai-chrome-profile-'));
   try {
     const { stdout } = await execFileAsync(chrome, [
       '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--disable-extensions',
       '--disable-sync', '--no-first-run', '--incognito', `--user-data-dir=${profile}`,
+      ...(resolverRules ? [`--host-resolver-rules=${resolverRules}`] : []),
       '--dump-dom', parsed.toString(),
     ], { timeout: 45_000, maxBuffer: 20 * 1024 * 1024 });
     return stdout;
@@ -63,7 +68,7 @@ function routeUrl(base: string, path: string): string {
 
 function hasAnchor(html: string, id: string): boolean {
   const escaped = id.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&');
-  return new RegExp(`(?:id|name)=["']${escaped}["']`).test(html);
+  return new RegExp(`(?:^|[\\s"'])(?:id|name)=["']${escaped}["']`).test(html);
 }
 
 export async function runBrowserFragmentGate(

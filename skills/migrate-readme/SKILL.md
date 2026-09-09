@@ -1,16 +1,19 @@
 ---
 name: migrate-readme
-description: "Migrate ReadMe Markdown from a sync repository or hosted Markdown-suffix pages, including emoji callouts and declarative ReadMe-to-Documentation.AI component mappings."
+description: Migrate a ReadMe project onto Documentation.AI from the bi-directional sync repository (docs/<category>/*.md with ReadMe frontmatter) or the API v2 (guides, reference, categories), then scrape-readme. Emoji callouts, Accordion, Cards, Columns, Image props and embeds map by rule.
 ---
 # Migrate ReadMe
 
-Implemented source preference: **sync repository Markdown/MDX/HTML files** → hosted `.md` suffix → HTML acquisition. ReadMe API v2, OpenAPI/reference generation, recipes, variables/glossary and custom-component definition loading are not implemented automatically.
+Implemented source preference: **sync repository** (`docs/<category>/*.md`, frontmatter `title`, `slug`, `excerpt`, `hidden`, `order`) → **API v2** (`README_API_KEY`; `/branches/{branch}/guides|reference|categories`, bodies from `content.body`) → live URL acquisition with the ReadMe scrape profile (`.md` suffix first, then `.rm-Markdown.markdown-body`).
+
+## What the adapters do
+- Sync repo: category folders become groups, `hidden: true` pages are skipped and listed, `order` is respected, `parentDocSlug` nests.
+- API v2: paginated lists, per-page bodies, hidden pages excluded, tree grouped by section (Guides, Reference) and category.
+- Markdown adapter with `platform: readme`: `> 📘 / 👍 / 🚧 / ❗` blockquotes become `Callout` kinds; `mappings/readme.yaml` covers Accordion → Expandable, Cards → Columns + Card, Columns, Image prop drops, Tabs, embeds, Recipes (when the body is present).
 
 ## Procedure
-1. `dai-migrate discover --repo <path>` discovers content files and derives provisional groups from paths. For hosted docs use `discover --url`, then `acquire --profile readme`. ⏸ Reconcile categories, order and versions manually in `plan/tree.yaml`.
-2. `dai-migrate inventory`: Accordion, Callout (component and emoji-blockquote forms), Cards/Card, Columns/Column, Image, Tabs/Tab, embeds, Recipes, variables/glossary, custom `custom-blocks/` components (definition hash recorded), marketplace components.
-3. `dai-migrate plan`: apply `mappings/readme.yaml`; unknown recipes, variables and custom components remain blocking review/quarantine items. Executable output is never available.
-4. Migrate OpenAPI files separately and validate endpoint/field parity outside this core until the OpenAPI command exists.
-5. `assets` → `convert` → `nav` → local `verify` twice → push the migration branch for preview → rendered-preview `verify` → `report`.
+1. `dai-migrate init ... --repo <sync-repo> --platform readme` (or `--source https://<subdomain>.readme.io` for API or scrape).
+2. `dai-migrate discover` ⏸ review `plan/tree.yaml`; hidden pages are in `inventory/platform-meta.json`.
+3. `inventory` → `plan` ⏸ (variables, glossary terms, Recipes without bodies and marketplace components need a decision) → `assets` (rehost off `files.readme.io`) → `convert` → `convert` → `nav` ⏸ → `verify` → `write` → preview `verify` → `report`.
 
-Mapping table: `mappings/readme.yaml`. Automatic Font Awesome-to-Lucide conversion is not implemented.
+Not implemented: API reference generation from ReadMe's OpenAPI uploads (export the spec and use the Mintlify-style group-level `openapi` in `documentation.json` manually), variables and glossary substitution, Changelog → Update conversion.

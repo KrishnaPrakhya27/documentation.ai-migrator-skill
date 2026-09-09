@@ -95,7 +95,18 @@ export function splitFrontmatter(mdx: string): { frontmatter: string | null; bod
 
 /** Remove fenced code and inline code so tag scanning does not see examples. */
 function stripCode(body: string): string {
-  return body.replace(/```[\s\S]*?```/g, (s) => s.replace(/[^\n]/g, ' ')).replace(/`[^`\n]*`/g, (s) => ' '.repeat(s.length));
+  // fences count only at line start (a mid-line ``` must not hide the rest of the document)
+  return body
+    .replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n {0,3}\1[ \t]*$/gm, (s) => s.replace(/[^\n]/g, ' '))
+    .replace(/`[^`\n]*`/g, (s) => ' '.repeat(s.length));
+}
+
+/** Multi-line tags, expressions and import statements are folded onto one line so line-based checks cannot be split around. */
+function foldMultiline(scan: string): string {
+  return scan
+    .replace(/<[A-Za-z][^<>]*>/g, (s) => s.replace(/\n/g, ' '))
+    .replace(/\{[^{}]*\}/g, (s) => s.replace(/\n/g, ' '))
+    .replace(/^(\s*(?:import|export)\s)[^;\n]*(?:\n[^;\n]*)*?(?=;|\n\s*\n|$)/gm, (s) => s.replace(/\n/g, ' '));
 }
 
 /** Strictly validate one MDX document against the contract. */
@@ -105,7 +116,7 @@ export function validateMdx(mdx: string, contract = loadContract()): ValidationI
   if (frontmatter === null) issues.push({ severity: 'error', code: 'frontmatter-missing', message: 'frontmatter block is required for migrated pages' });
   else if (!/^title:\s*\S/m.test(frontmatter)) issues.push({ severity: 'error', code: 'frontmatter-title-missing', message: 'frontmatter.title is required' });
 
-  const scan = stripCode(body);
+  const scan = foldMultiline(stripCode(body));
   const emittable = new Set(contract.emittable);
   const editorOnly = new Set(contract.components.filter((c) => c.notes.some((n) => n.startsWith('editor-only'))).map((c) => c.name));
 
@@ -137,7 +148,7 @@ export function validateMdx(mdx: string, contract = loadContract()): ValidationI
         }
       }
     }
-    if (/^\s*(import|export)\s/.test(line) && !/from\s+["']\/snippets\//.test(line)) issues.push({ severity: 'error', code: 'esm', message: 'ESM is not allowed except snippet default imports', line: ln });
+    if (/^\s*(import|export)\s/.test(line) && !/^\s*import\s+[A-Za-z_$][\w$]*\s+from\s+["']\/snippets\/(?!.*\.\.)[\w./-]+\.(?:mdx?|jsx)["'];?\s*$/.test(line)) issues.push({ severity: 'error', code: 'esm', message: 'ESM is not allowed except snippet default imports', line: ln });
     for (const em of line.matchAll(/\{([^}]*)\}/g)) {
       const inner = em[1].trim();
       if (!inner) continue;

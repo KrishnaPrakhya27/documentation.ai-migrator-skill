@@ -38,11 +38,11 @@ describe('checkCss', () => {
 
 describe('redact', () => {
   it('masks bearer tokens, api keys, jwts and signed urls', () => {
-    const s = 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456 api_key=sk_live_1234567890abcdefghij eyJhbGciOi.eyJzdWIiOiIx.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c https://b.example/o?X-Amz-Signature=abc';
+    const s = 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456 api_key=sk_live_1234567890abcdefghij eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c https://b.example/o?X-Amz-Signature=abc';
     const r = redact(s);
     expect(r).not.toContain('abcdefghijklmnopqrstuvwxyz123456');
     expect(r).not.toContain('sk_live_');
-    expect(r).not.toContain('eyJhbGciOi.');
+    expect(r).not.toContain('eyJhbGciOiJIUzI1NiIs');
     expect(r).toContain('<redacted-signed-url>');
     expect(looksSecret(s)).toBe(true);
     expect(looksSecret('plain prose about migration')).toBe(false);

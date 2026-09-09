@@ -45,7 +45,7 @@ export function listMdx(dir: string, out: string[] = []): string[] {
 /** Normalised prose segments: paragraphs, list items, headings, table cells. */
 export function proseSegments(doc: DocIR): string[] {
   const segs: string[] = [];
-  const norm = (s: string) => s.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim().toLowerCase();
+  const norm = (s: string) => normaliseMdxText(s).trim();
   walkBlocks(doc.children, (b) => {
     if (b.type === 'paragraph' || b.type === 'heading') { const t = norm(inlineText(b.children)); if (t.length >= 12) segs.push(t); }
     else if (b.type === 'table') for (const r of b.children) for (const c of r.children) { const t = norm(inlineText(c.children)); if (t.length >= 12) segs.push(t); }
@@ -58,6 +58,7 @@ export function normaliseMdxText(mdx: string): string {
     .replace(/^---[\s\S]*?---\n/, '')
     .replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1\s*$/gm, ' ')
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, ' ')
+    .replace(/\{[^{}\n]*\}/g, ' ')
     .replace(/<Image\b[^>]*\balt="([^"]*)"[^>]*\/?>/gi, ' $1 ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
@@ -77,7 +78,8 @@ export function codeBlocks(doc: DocIR): string[] {
 }
 
 export function mdxCodeBlocks(mdx: string): string[] {
-  return [...mdx.matchAll(/^(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\1\s*$/gm)].map((m) => m[2].replace(/\n$/, '').replace(/\s+$/gm, ''));
+  // fences may be indented (children of components and list items); dedent captured lines by the fence's own indent
+  return [...mdx.matchAll(/^( {0,8})(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\1\2[ \t]*$/gm)].map((m) => m[3].split('\n').map((l) => (m[1] && l.startsWith(m[1]) ? l.slice(m[1].length) : l)).join('\n').replace(/\n$/, '').replace(/\s+$/gm, ''));
 }
 
 function tableCellText(value: string): string {
@@ -103,7 +105,7 @@ function splitTableRow(line: string): string[] {
 export function mdxTableSignatures(mdx: string): string[] {
   const lines = mdx.split(/\r?\n/);
   const out: string[] = [];
-  const separator = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/;
+  const separator = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)*\s*:?-{3,}:?\s*\|?\s*$/; // one or more columns
   for (let i = 0; i + 1 < lines.length; i++) {
     if (!lines[i].includes('|') || !separator.test(lines[i + 1])) continue;
     const rows = [splitTableRow(lines[i])];
@@ -125,7 +127,9 @@ export interface GateInput {
   quarantinedPages: Set<string>;
   excludedPages: Set<string>;
   unreviewed: number;
+  /** Hash of the last convert and of the convert before it over identical inputs; both are convert-time hashes. */
   previousCanonicalHash?: string;
+  convertOutputHash?: string;
   previewUrl?: string;
   pinnedContractVersion: string;
   previewContractVersion?: string;
@@ -173,8 +177,8 @@ export function runGates(input: GateInput): GateResult[] {
   gates.push({ id: 'no-unsafe-urls', status: unsafeUrls ? 'fail' : 'pass', detail: `${unsafeUrls} unsafe link or asset URLs were stripped`, count: unsafeUrls, samples: unsafeSamples });
 
   const assets = readManifest(input.workspace);
-  const unresolvedAssets = Object.values(assets.entries).filter((e) => e.status === 'failed' || e.status === 'kept-external' || !e.finalUrl);
-  gates.push({ id: 'assets-ready', status: unresolvedAssets.length ? 'fail' : 'pass', detail: `${unresolvedAssets.length} assets failed, remain external, or lack a final ingested URL`, count: unresolvedAssets.length, samples: unresolvedAssets.slice(0, 5).flatMap((e) => e.sourceUrls.slice(0, 1)) });
+  const unresolvedAssets = Object.values(assets.entries).filter((e) => e.status === 'failed' || (assets.provider !== 'none' && (e.status === 'kept-external' || !e.finalUrl)));
+  gates.push({ id: 'assets-ready', status: unresolvedAssets.length ? 'fail' : 'pass', detail: assets.provider === 'none' ? `${Object.values(assets.entries).filter((e) => e.status === 'kept-external').length} assets intentionally remain on source hosts (provider none)` : `${unresolvedAssets.length} assets failed, remain external, or lack a final ingested URL`, count: unresolvedAssets.length, samples: unresolvedAssets.slice(0, 5).flatMap((e) => e.sourceUrls.slice(0, 1)) });
 
   // 3. prose match + code blocks + tables
   let unmatched = 0; const unmatchedSamples: string[] = [];
@@ -237,8 +241,10 @@ export function runGates(input: GateInput): GateResult[] {
 
   // 10. determinism
   const hash = canonicalHash(input.outputDir);
-  if (input.previousCanonicalHash) gates.push({ id: 'deterministic-rerun', status: input.previousCanonicalHash === hash ? 'pass' : 'fail', detail: `canonical hash ${hash.slice(0, 12)} vs previous ${input.previousCanonicalHash.slice(0, 12)}` });
-  else gates.push({ id: 'deterministic-rerun', status: 'not-run', detail: `first run; canonical hash ${hash.slice(0, 12)} recorded` });
+  // compare convert against convert: the live output also contains nav artefacts written after convert
+  const current = input.convertOutputHash ?? hash;
+  if (input.previousCanonicalHash) gates.push({ id: 'deterministic-rerun', status: input.previousCanonicalHash === current ? 'pass' : 'fail', detail: `convert output ${current.slice(0, 12)} vs previous convert ${input.previousCanonicalHash.slice(0, 12)} over identical inputs` });
+  else gates.push({ id: 'deterministic-rerun', status: 'not-run', detail: `no second convert over identical inputs yet; run convert again (hash ${hash.slice(0, 12)})` });
 
   // 11. preview-based gates
   if (input.previewUrl) {

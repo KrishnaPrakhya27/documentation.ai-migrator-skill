@@ -1,0 +1,21 @@
+{
+  "name": "Acme Docs",
+  "colors": { "primary": "#16A34A" },
+  "navigation": {
+    "versions": [
+      { "version": "v2", "default": true,
+        "tabs": [
+          { "tab": "Guides", "groups": [
+            { "group": "Get started", "pages": ["introduction", "guides/setup", "guides/missing-page"] }
+          ] },
+          { "tab": "API", "groups": [ { "group": "Endpoints", "openapi": "api-reference/openapi.yaml", "pages": ["api-reference/overview"] } ] }
+        ] },
+      { "version": "v1", "pages": ["introduction"] }
+    ]
+  },
+  "redirects": [
+    { "source": "/old/intro", "destination": "/introduction" },
+    { "source": "/legacy/:slug*", "destination": "/guides/:slug*", "permanent": false },
+    { "source": "/mid/*/x", "destination": "/y" }
+  ]
+}

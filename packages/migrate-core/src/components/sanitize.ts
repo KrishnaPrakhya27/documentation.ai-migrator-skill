@@ -50,6 +50,8 @@ function ser(n: Dom, opts: SanitizeOptions): string {
     const allowed = (opts.iframeHosts ?? ['www.youtube.com', 'youtube.com', 'player.vimeo.com', 'www.loom.com']).some((h) => host === h || host.endsWith('.' + h));
     if (!allowed) return '';
   }
+  const IFRAME_ATTRS = new Set(['src', 'title', 'width', 'height', 'loading', 'allowfullscreen']);
+  if (name === 'iframe') for (const k of Object.keys(n.attribs)) if (!IFRAME_ATTRS.has(k.toLowerCase())) delete n.attribs[k]; // srcdoc, sandbox, allow, csp, referrerpolicy never survive
   const attrs: string[] = [];
   for (const [k0, v] of Object.entries(n.attribs)) {
     const k = k0.toLowerCase();

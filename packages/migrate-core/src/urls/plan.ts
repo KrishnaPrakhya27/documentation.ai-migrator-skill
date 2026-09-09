@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Tree, TreePage } from '../nav/tree.js';
 import { pathFromTree } from '../nav/tree.js';
-import { legalisePath, headingSlug } from './slugger.js';
+import { legalisePath, headingSlug, slugify } from './slugger.js';
 import { classifyRedirect } from '@dai/content-contract';
 import GithubSlugger from 'github-slugger';
 
@@ -39,6 +39,10 @@ export function defaultUrlPlan(tree: Tree, opts: { mode?: UrlPlan['mode']; strip
       candidate = 'index';
       reason += '; root route -> index';
     }
+    // versions and locales other than the default live under a prefix (documentation.json dimensions route them)
+    const prefix = [p.locale && p.locale !== tree.defaultLocale ? slugify(p.locale) : '', p.version && p.version !== tree.defaultVersion ? slugify(p.version) : ''].filter(Boolean).join('/');
+    if (prefix && !candidate.startsWith(prefix + '/')) { candidate = `${prefix}/${candidate}`; reason += `; ${prefix} prefix`; }
+    if (!candidate) { candidate = 'index'; reason += '; root page → index'; }
     let final = candidate; let n = 2;
     while (used.has(final)) final = `${candidate}-${n++}`;
     if (final !== candidate) reason += `; collision → ${final}`;

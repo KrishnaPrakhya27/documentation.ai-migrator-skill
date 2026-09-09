@@ -4,8 +4,9 @@
  * Providers: none (keep source URL, flagged), local (copy into the workspace
  * for later ingestion), dai-api (platform dependency G7), s3 (BYO).
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
+import sanitizeHtml from 'sanitize-html';
 import type { DocIR, Block, Inline } from '../ir/types.js';
 import { walkBlocks } from '../ir/types.js';
 import { sha256 } from '../session/ids.js';
@@ -13,6 +14,8 @@ import type { Fetcher } from '../scrape/fetcher.js';
 
 export interface AssetEntry {
   hash: string;
+  /** Hash of the exact source bytes; differs from hash only when SVG was sanitised. */
+  sourceHash?: string;
   sourceUrls: string[];
   localPath?: string;
   bytes?: number;
@@ -22,6 +25,7 @@ export interface AssetEntry {
   status: 'pending' | 'downloaded' | 'ingested' | 'kept-external' | 'failed';
   error?: string;
   altMissing: number;
+  sanitized?: boolean;
 }
 
 export interface AssetManifest { provider: string; entries: Record<string, AssetEntry>; byUrl: Record<string, string> }
@@ -48,12 +52,43 @@ function collectImageUrls(doc: DocIR): Array<{ url: string; alt: string }> {
 
 export interface AssetSource { kind: 'url' | 'file'; resolve: (url: string) => string | undefined }
 
+const SVG_TAGS = ['svg', 'g', 'defs', 'symbol', 'use', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text', 'tspan', 'title', 'desc', 'clipPath', 'mask', 'pattern', 'linearGradient', 'radialGradient', 'stop', 'filter', 'feGaussianBlur', 'feOffset', 'feColorMatrix', 'feBlend', 'feMerge', 'feMergeNode'];
+const SVG_ATTRS = ['id', 'class', 'xmlns', 'viewBox', 'width', 'height', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'fill', 'fill-rule', 'fill-opacity', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-opacity', 'opacity', 'transform', 'preserveAspectRatio', 'role', 'aria-label', 'aria-labelledby', 'focusable', 'clip-path', 'mask', 'offset', 'stop-color', 'stop-opacity', 'gradientUnits', 'gradientTransform', 'patternUnits', 'filter', 'href', 'xlink:href'];
+
+/** Strip executable SVG content before it can be copied to a public origin. */
+export function sanitizeSvgBytes(input: Buffer): Buffer {
+  const source = input.toString('utf8');
+  if (/<!DOCTYPE|<!ENTITY/i.test(source)) throw new Error('SVG with DOCTYPE or ENTITY is refused');
+  const clean = sanitizeHtml(source, {
+    allowedTags: SVG_TAGS,
+    allowedAttributes: { '*': SVG_ATTRS },
+    allowedSchemes: ['data'],
+    allowProtocolRelative: false,
+    parser: { lowerCaseTags: false, lowerCaseAttributeNames: false },
+    transformTags: {
+      '*': (tagName, attribs) => {
+        const safe: Record<string, string> = {};
+        for (const [key, value] of Object.entries(attribs)) {
+          if (/^on/i.test(key) || key.toLowerCase() === 'style') continue;
+          if ((key === 'href' || key === 'xlink:href') && !value.startsWith('#') && !/^data:image\/(?:png|gif|jpe?g|webp);base64,/i.test(value)) continue;
+          safe[key] = value;
+        }
+        return { tagName, attribs: safe };
+      },
+    },
+  }).trim();
+  if (!/^<svg(?:\s|>)/i.test(clean)) throw new Error('asset is not a valid standalone SVG');
+  return Buffer.from(clean + '\n', 'utf8');
+}
+
 /** Download every referenced asset (from the export's Media dir or the web), hash, dedupe. */
 export async function collectAssets(docs: DocIR[], workspace: string, opts: { fetcher?: Fetcher; localResolver?: (url: string) => string | undefined; provider?: string }): Promise<AssetManifest> {
   const m = readManifest(workspace);
   m.provider = opts.provider ?? m.provider;
-  const dir = join(workspace, 'assets-original');
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const originalDir = join(workspace, 'assets-original');
+  const readyDir = join(workspace, 'assets-ready');
+  mkdirSync(originalDir, { recursive: true, mode: 0o700 });
+  mkdirSync(readyDir, { recursive: true, mode: 0o700 });
   const urls = new Map<string, number>();
   for (const d of docs) for (const { url, alt } of collectImageUrls(d)) if (url) urls.set(url, (urls.get(url) ?? 0) + (alt ? 0 : 1));
   for (const [url, altMissing] of urls) {
@@ -68,12 +103,17 @@ export async function collectAssets(docs: DocIR[], workspace: string, opts: { fe
         buf = page.bodyBase64 ? Buffer.from(page.bodyBase64, 'base64') : Buffer.from(page.body, 'utf8'); contentType = page.contentType;
       }
       if (!buf) { m.byUrl[url] = url; m.entries[url] = { hash: url, sourceUrls: [url], status: 'kept-external', altMissing, error: 'no local file and no fetcher' }; continue; }
-      const hash = sha256(buf);
       const candidateExt = extname(url.split('?')[0]);
       const ext = /^\.[A-Za-z0-9]{1,10}$/.test(candidateExt) ? candidateExt.toLowerCase() : '.bin';
-      const localPath = join(dir, `${hash}${ext}`);
-      if (!existsSync(localPath)) writeFileSync(localPath, buf, { mode: 0o600 });
-      const e = m.entries[hash] ?? { hash, sourceUrls: [], localPath, bytes: buf.length, contentType, status: 'downloaded' as const, altMissing: 0 };
+      const sourceHash = sha256(buf);
+      const originalPath = join(originalDir, `${sourceHash}${ext}`);
+      if (!existsSync(originalPath)) writeFileSync(originalPath, buf, { mode: 0o600 });
+      const isSvg = ext === '.svg' || /^image\/svg\+xml(?:;|$)/i.test(contentType ?? '');
+      const ready = isSvg ? sanitizeSvgBytes(buf) : buf;
+      const hash = sha256(ready);
+      const localPath = join(readyDir, `${hash}${ext}`);
+      if (!existsSync(localPath)) writeFileSync(localPath, ready, { mode: 0o600 });
+      const e = m.entries[hash] ?? { hash, sourceHash, sourceUrls: [], localPath, bytes: ready.length, contentType: contentType || (isSvg ? 'image/svg+xml' : undefined), status: 'downloaded' as const, altMissing: 0, sanitized: isSvg };
       e.sourceUrls.push(url); e.altMissing += altMissing;
       m.entries[hash] = e; m.byUrl[url] = hash;
     } catch (e) {

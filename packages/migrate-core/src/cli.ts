@@ -17,22 +17,29 @@ import { assertOutsidePlugin, ensureWorkspace, readSession, writeSession, markSt
 import { newMigrationId, pageIdFromPlatform, sha256 } from './session/ids.js';
 import { preflight } from './session/preflight.js';
 import { fingerprint } from './scrape/fingerprint.js';
-import { Fetcher, sitemapUrls, type FetchOptions } from './scrape/fetcher.js';
-import { Firecrawl } from './scrape/firecrawl.js';
+import { Fetcher, type FetchOptions } from './scrape/fetcher.js';
+import { Firecrawl, type FirecrawlOptions } from './scrape/firecrawl.js';
 import { getProfile } from './scrape/profiles.js';
-import { htmlToIr, parseHtml, findAll } from './ir/from-html.js';
+import { discoverLiveSite } from './scrape/discovery.js';
+import { htmlToIr } from './ir/from-html.js';
 import { markdownToIr } from './ir/from-markdown.js';
 import { extractIfZip, readD360Export, d360ArticleToIr, type D360Export } from './adapters/document360.js';
-import { writeTree, readTree, buildNavigation, type Tree, type TreePage } from './nav/tree.js';
+import { readMintlifyRepo, mintlifySnippetResolver } from './adapters/mintlify.js';
+import { readGitbookRepo } from './adapters/gitbook.js';
+import { readReadmeRepo, ReadmeApi, readmeApiTree } from './adapters/readme.js';
+import { scanComponentDefinitions, attachDefinitions } from './adapters/definitions.js';
+import { writeTree, readTree, buildNavigation, attachGroupOpenapi, type Tree, type TreePage } from './nav/tree.js';
 import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap } from './urls/plan.js';
 import { RulesEngine, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
 import { Ledger } from './ledger/dispositions.js';
 import { DecisionLog } from './log/decisions.js';
+import { redact } from './log/redact.js';
 import { docToMdx } from './ir/to-dai-mdx.js';
 import type { DocIR } from './ir/types.js';
 import { walkBlocks, inlineText } from './ir/types.js';
 import { collectAssets, readManifest, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';
+import { ingestAssets, type AssetProviderOptions } from './assets/providers.js';
 import { runGates, canonicalHash, previewPushBlockers, type GateResult } from './verify/gates.js';
 import { runBrowserFragmentGate, type BrowserAnchor } from './verify/browser.js';
 import { writeMigrationBranch } from './write/migration-branch.js';
@@ -47,11 +54,11 @@ const HELP = `dai-migrate <command> [options]
 Commands (run in order; ⏸ = review the written plan file before continuing):
   init         --workspace <dir> --source <url|path> --target customer-org|demo-org [--platform p] [--export <zip|dir>] [--allowed-orgs a,b] [--customer-authorised]
   fingerprint  [--url <u>] [--export <zip|dir>] [--repo <dir>]     → plan/fingerprint.json
-  discover     [--export <zip|dir>] [--url <u>]                     → plan/tree.yaml ⏸
+  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] → plan/tree.yaml ⏸
   acquire      [--fetcher local|firecrawl] [--profile p] [--urls file] [--proxy url] [--headers-file json] [--cookies-file file] → source-cache/acquired/
   inventory                                                         → snapshot/, inventory/*.json
   plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml ⏸
-  assets       [--provider none|local]                              → plan/assets.json, assets-original/
+  assets       [--provider none|local|s3|dai-api]                   → plan/assets.json, assets-original/
   convert                                                           → output/, ledger/, quarantine/
   nav                                                               → output/documentation.json, report/redirects.*.json, report/anchors.json ⏸
   write        --repo <dir> [--remote <url>] [--push]               → refs/heads/migration/<session>
@@ -68,7 +75,11 @@ const { values: v, positionals } = parseArgs({
     'allowed-orgs': { type: 'string', default: process.env.MIGRATION_ALLOWED_ORGS ?? '' },
     'customer-authorised': { type: 'boolean', default: false },
     mode: { type: 'string' }, 'strip-prefix': { type: 'string' }, case: { type: 'string' },
-    provider: { type: 'string', default: 'local' }, fetcher: { type: 'string', default: 'local' }, profile: { type: 'string' }, urls: { type: 'string' },
+    provider: { type: 'string', default: process.env.MIGRATION_ASSET_PROVIDER }, fetcher: { type: 'string', default: 'local' }, profile: { type: 'string' }, urls: { type: 'string' },
+    'discovery-limit': { type: 'string', default: process.env.MIGRATION_DISCOVERY_LIMIT ?? '5000' },
+    'firecrawl-proxy': { type: 'string', default: process.env.FIRECRAWL_PROXY_MODE ?? 'auto' },
+    'max-concurrency': { type: 'string', default: process.env.FIRECRAWL_MAX_CONCURRENCY },
+    'zero-data-retention': { type: 'boolean', default: process.env.FIRECRAWL_ZERO_DATA_RETENTION === '1' },
     proxy: { type: 'string', default: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY },
     'headers-file': { type: 'string', default: process.env.MIGRATION_HEADERS_FILE }, 'cookies-file': { type: 'string', default: process.env.MIGRATION_COOKIES_FILE }, 'auth-origin': { type: 'string', default: process.env.MIGRATION_AUTH_ORIGINS },
     remote: { type: 'string' }, push: { type: 'boolean', default: false },
@@ -85,7 +96,7 @@ function ws(): string {
   if (!v.workspace) throw new Error('--workspace is required (or MIGRATION_WORKSPACE)');
   return resolve(v.workspace);
 }
-function fail(msg: string): never { console.error(`✖ ${msg}`); process.exit(1); }
+function fail(msg: string): never { console.error(`✖ ${redact(msg)}`); process.exit(1); }
 function ok(msg: string) { console.log(`✔ ${msg}`); }
 function readJson<T>(p: string): T { return JSON.parse(readFileSync(p, 'utf8')) as T; }
 function writeJson(p: string, o: unknown) { mkdirSync(dirname(p), { recursive: true, mode: 0o700 }); writeFileSync(p, JSON.stringify(o, null, 2) + '\n', { mode: 0o600 }); }
@@ -130,6 +141,17 @@ function networkOptions(workspace: string, session: Session, allowHosts?: string
   const extraOrigins = (v['auth-origin'] ?? '').split(',').map((x) => x.trim()).filter(Boolean).map((x) => new URL(x).origin);
   const credentialOrigins = [...new Set([sourceOrigin, ...extraOrigins].filter((x): x is string => !!x))];
   return { workspace, customerAuthorised: session.customerAuthorisedCrawl, allowHosts, proxy: v.proxy, headers: requestHeaders(), cookieJar: requestCookieJar(), credentialOrigins };
+}
+async function firecrawlOptions(workspace: string, session: Session, targetUrl: string): Promise<FirecrawlOptions> {
+  const net = networkOptions(workspace, session, [new URL(targetUrl).hostname]);
+  const headers = { ...(net.headers ?? {}) };
+  const cookie = await net.cookieJar?.getCookieString(targetUrl);
+  if (cookie) headers.cookie = cookie;
+  const proxy = v['firecrawl-proxy'];
+  if (proxy !== 'basic' && proxy !== 'enhanced' && proxy !== 'auto') fail('--firecrawl-proxy must be basic, enhanced, or auto');
+  const maxConcurrency = v['max-concurrency'] ? Number(v['max-concurrency']) : undefined;
+  if (maxConcurrency !== undefined && (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 100)) fail('--max-concurrency must be an integer from 1 to 100');
+  return { apiKey: process.env.FIRECRAWL_API_KEY!, workspace, proxy: proxy as FirecrawlOptions['proxy'], maxConcurrency, zeroDataRetention: !!v['zero-data-retention'], headers: Object.keys(headers).length ? headers : undefined };
 }
 function requireStages(session: Session, ...stages: string[]): void {
   const missing = stages.filter((stage) => session.stages[stage]?.status !== 'done');
@@ -239,7 +261,7 @@ async function main() {
       const workspace = ws(); const s = readSession(workspace);
       let html: string | undefined; let paths: string[] | undefined;
       const src = v.url ?? v.export ?? v.repo ?? s.source.location;
-      if (/^https?:\/\//.test(src)) { const f = new Fetcher({ workspace, customerAuthorised: s.customerAuthorisedCrawl }); html = (await f.get(src)).body; }
+      if (/^https?:\/\//.test(src)) { const f = new Fetcher(networkOptions(workspace, s, [new URL(src).hostname])); html = (await f.get(src)).body; }
       else if (existsSync(src)) { const root = await extractIfZip(src, join(workspace, 'source-cache', 'export')); const walk = (d: string, out: string[] = []): string[] => { for (const f of readdirSync(d, { withFileTypes: true })) { const p = join(d, f.name); if (f.isDirectory()) { if (out.length < 5000) walk(p, out); } else out.push(p.slice(root.length + 1)); } return out; }; paths = walk(root); }
       const fp = fingerprint({ html, paths });
       writeJson(join(workspace, 'plan', 'fingerprint.json'), fp);
@@ -268,38 +290,61 @@ async function main() {
       } else {
         const url = v.url ?? s.source.location;
         if (!/^https?:\/\//.test(url) && existsSync(url)) {
-          tree = repoTree(resolve(url), platform ?? 'generic');
-          ok(`${tree.pages.length} Markdown, MDX, and HTML pages discovered in the source repository`);
-        } else {
-          const origin = new URL(url).origin;
-          const host = new URL(url).hostname;
-          const f = new Fetcher({ workspace, customerAuthorised: s.customerAuthorisedCrawl, allowHosts: [host] });
-          const reasons = new Map<string, Set<string>>();
-          const add = (u: string, reason: string) => {
-            try {
-              const parsed = new URL(u, origin);
-              if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol)) return;
-              parsed.hash = '';
-              const clean = parsed.toString();
-              if (!reasons.has(clean)) reasons.set(clean, new Set());
-              reasons.get(clean)!.add(reason);
-            } catch { /* malformed discovery URL */ }
-          };
-          (await sitemapUrls(f, origin)).forEach((u) => add(u, 'sitemap'));
-          const seed = await f.get(url);
-          for (const a of findAll(parseHtml(seed.body), 'a[href]')) if (a.attribs.href) add(a.attribs.href, 'seed-link');
-          if (v.fetcher === 'firecrawl' && process.env.FIRECRAWL_API_KEY) {
-            const fc = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY, workspace });
-            (await fc.map(url)).forEach((u) => add(u, 'firecrawl-map'));
+          const root = resolve(url);
+          const meta: Record<string, unknown> = { platform: platform ?? 'generic', root };
+          if ((platform === 'mintlify' || !platform) && (existsSync(join(root, 'docs.json')) || existsSync(join(root, 'mint.json')))) {
+            const r = readMintlifyRepo(root);
+            tree = r.tree;
+            Object.assign(meta, { platform: 'mintlify', configFile: r.configFile, name: r.name, colors: r.colors, logo: r.logo, favicon: r.favicon, redirects: r.redirects, openapi: r.openapi, missing: r.missing });
+            ok(`${tree.pages.length} pages from ${r.configFile} (${[...new Set(tree.pages.map((p) => p.version).filter(Boolean))].length || 1} version(s)); ${r.missing.length} listed pages missing; ${r.redirects.exact.length} exact + ${r.redirects.wildcard.length} wildcard redirects; ${r.openapi.length} openapi group(s)`);
+          } else if ((platform === 'gitbook' || !platform) && existsSync(join(root, 'SUMMARY.md')) || existsSync(join(root, '.gitbook.yaml'))) {
+            const r = readGitbookRepo(root);
+            tree = r.tree;
+            Object.assign(meta, { platform: 'gitbook', redirects: { exact: r.redirects, wildcard: [] }, missing: r.missing, unlisted: r.unlisted });
+            ok(`${tree.pages.length} pages from SUMMARY.md; ${r.missing.length} missing, ${r.unlisted.length} unlisted files (review plan/tree.yaml)`);
+          } else if (platform === 'readme' || (!platform && existsSync(join(root, 'docs')) && sourceFiles(join(root, 'docs')).some((f) => /^---[\s\S]*?^(slug|excerpt):/m.test(readFileSync(f, 'utf8'))))) {
+            const r = readReadmeRepo(root);
+            tree = r.tree;
+            Object.assign(meta, { platform: 'readme', hidden: r.hidden });
+            ok(`${tree.pages.length} pages from the ReadMe sync repository; ${r.hidden.length} hidden pages skipped`);
+          } else {
+            tree = repoTree(root, platform ?? 'generic');
+            ok(`${tree.pages.length} Markdown, MDX, and HTML pages discovered in the source repository (provisional groups from paths)`);
           }
-          add(url, 'seed');
-          const pages: TreePage[] = [...reasons.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([u, why], i) => {
+          if (!s.source.platform && meta.platform !== 'generic') { s.source.platform = String(meta.platform); writeSession(workspace, s); }
+          writeJson(join(workspace, 'inventory', 'platform-meta.json'), meta);
+        } else if ((platform === 'readme') && process.env.README_API_KEY) {
+          // Native source: ReadMe API v2. Bodies are stored as acquired pages so inventory needs no scraping.
+          const api = new ReadmeApi({ apiKey: process.env.README_API_KEY, branch: process.env.README_BRANCH });
+          const pages = [...(await api.pages('guides')), ...(await api.pages('reference'))];
+          tree = readmeApiTree(pages);
+          const bodies = new Map(pages.map((p) => [`${p.kind}:${p.slug}`, p]));
+          mkdirSync(join(workspace, 'source-cache', 'acquired'), { recursive: true, mode: 0o700 });
+          for (const t of tree.pages) {
+            const p = bodies.get(t.source.replace('readme-api://', '').replace('/', ':'))!;
+            const acquired: AcquiredPage = p.bodyType === 'markdown' ? { url: t.source, markdown: p.body, title: p.title } : { url: t.source, body: p.body, contentType: 'text/html', title: p.title };
+            writeJson(acquiredPath(workspace, t.id), acquired);
+          }
+          markStage(workspace, 'acquire', 'done', 'readme-api');
+          ok(`${tree.pages.length} pages from the ReadMe API (guides + reference), bodies acquired; ${pages.filter((p) => p.hidden).length} hidden pages skipped`);
+        } else {
+          const host = new URL(url).hostname;
+          const f = new Fetcher(networkOptions(workspace, s, [host]));
+          let fc: Firecrawl | undefined;
+          if (v.fetcher === 'firecrawl' && process.env.FIRECRAWL_API_KEY) {
+            fc = new Firecrawl(await firecrawlOptions(workspace, s, url));
+          }
+          const limit = Number(v['discovery-limit']);
+          if (!Number.isInteger(limit) || limit < 1 || limit > 50_000) fail('--discovery-limit must be an integer from 1 to 50000');
+          const discovery = await discoverLiveSite({ seedUrl: url, fetcher: f, profile: getProfile(v.profile ?? platform ?? 'generic'), limit, map: fc ? (u, n) => fc!.map(u, { limit: n }) : undefined });
+          writeJson(join(workspace, 'inventory', 'discovery-failures.json'), discovery.failures);
+          const pages: TreePage[] = discovery.pages.sort((a, b) => a.url.localeCompare(b.url)).map(({ url: u, reasons, title }, i) => {
             const parsed = new URL(u);
             const parts = parsed.pathname.split('/').filter(Boolean);
-            return { id: pageIdFromPlatform(platform ?? 'generic', u), title: decodeURIComponent(parts.at(-1) ?? 'index').replace(/[-_]+/g, ' '), source: u, group: parts.slice(0, -1).map((x) => decodeURIComponent(x).replace(/[-_]+/g, ' ')), order: i, oldPath: parsed.pathname, migrate: true, reason: [...why].sort().join('+') };
+            return { id: pageIdFromPlatform(platform ?? 'generic', u), title: title ?? decodeURIComponent(parts.at(-1) ?? 'index').replace(/[-_]+/g, ' '), source: u, group: parts.slice(0, -1).map((x) => decodeURIComponent(x).replace(/[-_]+/g, ' ')), order: i, oldPath: parsed.pathname, migrate: true, reason: reasons.join('+') };
           });
           tree = { scope: 'full', platform: platform ?? 'generic', pages };
-          ok(`${pages.length} unique URLs from sitemap, seed link graph, and configured map sources`);
+          ok(`${pages.length} unique URLs from recursive links, sidebars, sitemaps and configured map sources; ${discovery.failures.length} fetch failures${discovery.truncated ? '; limit reached' : ''}`);
         }
       }
       writeTree(workspace, tree);
@@ -321,7 +366,7 @@ async function main() {
       const dir = join(workspace, 'source-cache', 'acquired'); mkdirSync(dir, { recursive: true, mode: 0o700 });
       if (v.fetcher === 'firecrawl') {
         if (!process.env.FIRECRAWL_API_KEY) fail('FIRECRAWL_API_KEY is required for --fetcher firecrawl');
-        const fc = new Firecrawl({ apiKey: process.env.FIRECRAWL_API_KEY, workspace });
+        const fc = new Firecrawl(await firecrawlOptions(workspace, s, s.source.location));
         const got = await fc.batchScrape(pages.map((p) => p.source));
         const byUrl = new Map(got.map((p) => [p.url.replace(/\/$/, ''), p]));
         for (const page of pages) {
@@ -331,7 +376,7 @@ async function main() {
         }
       } else {
         const host = new URL(s.source.location).hostname;
-        const fetcher = new Fetcher({ workspace, customerAuthorised: s.customerAuthorisedCrawl, allowHosts: [host] });
+        const fetcher = new Fetcher(networkOptions(workspace, s, [host]));
         for (const page of pages) {
           let result;
           if (profile.mdSuffix) {
@@ -369,11 +414,13 @@ async function main() {
         for (const p of inScope) { const article = byId.get(p.id); if (article) docs.push(d360ArticleToIr(article, exp.root)); }
       } else if (s.source.kind === 'repo') {
         const profile = getProfile(tree.platform);
+        const definitions = scanComponentDefinitions(root);
+        if (definitions.length) writeJson(join(workspace, 'inventory', 'component-definitions.json'), definitions);
         for (const p of inScope) {
           const file = resolve(root, p.source);
           if (file !== root && !file.startsWith(root + '/')) fail(`source page escapes repository: ${p.source}`);
           const raw = readFileSync(file, 'utf8');
-          if (/\.mdx?$/i.test(file)) docs.push(markdownToIr(raw, { platform: tree.platform, file: p.source, pageId: p.id, title: p.title }));
+          if (/\.mdx?$/i.test(file)) docs.push(attachDefinitions(markdownToIr(raw, { platform: tree.platform, file: p.source, pageId: p.id, title: p.title, resolveSnippet: tree.platform === 'mintlify' ? mintlifySnippetResolver(root) : undefined }), definitions));
           else {
             const ir = htmlToIr(raw, { platform: tree.platform, file: p.source, articleSelector: profile.articleSelector, removeSelectors: profile.removeSelectors, recognisers: profile.recognisers });
             docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title: p.title }, children: ir.children });
@@ -444,7 +491,8 @@ async function main() {
       writeUrlPlan(workspace, urlPlan);
       const assetsPlan = { provider: v.provider ?? 'local', generateAlt: false, iframeHosts: ['www.youtube.com', 'youtube.com', 'youtu.be', 'player.vimeo.com', 'www.loom.com'] };
       const ap = join(workspace, 'plan', 'assets.yaml'); if (!existsSync(ap)) writeFileSync(ap, toYaml(assetsPlan), { mode: 0o600 });
-      s.hashes.componentPlan = fileHash(planPath); s.hashes.urlPlan = fileHash(join(workspace, 'plan', 'urls.yaml')); writeSession(workspace, s);
+      // plans are pinned again by convert; a plan edit invalidates any verified output
+      s.hashes.componentPlan = fileHash(planPath); s.hashes.urlPlan = fileHash(join(workspace, 'plan', 'urls.yaml')); s.hashes.canonicalOutput = undefined; writeSession(workspace, s);
       markStage(workspace, 'plan', 'done');
       const needs = components.filter((c) => c.status === 'needs-review').length;
       ok(`component plan: ${components.length} clusters, ${needs} need review; url plan: ${urlPlan.pages.length} pages (${urlPlan.mode})`);
@@ -455,18 +503,44 @@ async function main() {
       const workspace = ws(); const s = readSession(workspace);
       requireStages(s, 'inventory');
       const docs = loadSnapshot(workspace);
-      const fetcher = new Fetcher({ workspace, customerAuthorised: s.customerAuthorisedCrawl });
+      const assetPlanPath = join(workspace, 'plan', 'assets.yaml');
+      const assetPlan = existsSync(assetPlanPath) ? (parseYaml(readFileSync(assetPlanPath, 'utf8')) as { provider?: string }) : {};
+      const provider = v.provider ?? assetPlan.provider ?? 'local';
+      if (!['none', 'local', 's3', 'dai-api'].includes(provider)) fail(`unsupported asset provider ${provider}`);
+      // Asset CDNs are often cross-host. The Fetcher still rejects private
+      // addresses and never sends source credentials across origins.
+      const fetcher = new Fetcher(networkOptions(workspace, s));
       let localResolver: ((url: string) => string | undefined) | undefined;
       if (s.source.kind === 'export' && (s.source.platform === 'document360' || readTree(workspace).platform === 'document360')) {
         const root = join(workspace, 'source-cache', 'export');
         const exp = readD360Export(existsSync(root) ? root : s.source.location);
         localResolver = d360MediaResolver(exp.mediaDir);
       }
-      const m = await collectAssets(docs, workspace, { fetcher, localResolver, provider: v.provider });
+      let m = await collectAssets(docs, workspace, { fetcher, localResolver, provider });
+      const providerOptions: AssetProviderOptions = {
+        workspace,
+        provider: provider as AssetProviderOptions['provider'],
+        s3: provider === 's3' ? {
+          bucket: process.env.MIGRATION_S3_BUCKET ?? process.env.MIGRATION_R2_BUCKET ?? '',
+          region: process.env.MIGRATION_S3_REGION ?? 'auto',
+          prefix: process.env.MIGRATION_S3_PREFIX,
+          publicBase: process.env.MIGRATION_ASSET_PUBLIC_BASE ?? '',
+          endpoint: process.env.MIGRATION_S3_ENDPOINT ?? process.env.MIGRATION_R2_ENDPOINT,
+          accessKeyId: process.env.MIGRATION_S3_ACCESS_KEY_ID ?? process.env.MIGRATION_R2_ACCESS_KEY_ID,
+          secretAccessKey: process.env.MIGRATION_S3_SECRET_ACCESS_KEY ?? process.env.MIGRATION_R2_SECRET_ACCESS_KEY,
+        } : undefined,
+        dai: provider === 'dai-api' ? {
+          baseUrl: process.env.DAI_API_BASE ?? '', token: process.env.DAI_API_KEY ?? '',
+          organizationId: process.env.DAI_ORGANIZATION_ID ?? '', documentationId: process.env.DAI_DOCUMENTATION_ID ?? '',
+        } : undefined,
+      };
+      if (provider === 's3' && (!providerOptions.s3!.bucket || !providerOptions.s3!.publicBase)) fail('s3 provider requires MIGRATION_S3_BUCKET and MIGRATION_ASSET_PUBLIC_BASE');
+      if (provider === 'dai-api' && Object.values(providerOptions.dai!).some((x) => !x)) fail('dai-api provider requires DAI_API_BASE, DAI_API_KEY, DAI_ORGANIZATION_ID and DAI_DOCUMENTATION_ID');
+      m = await ingestAssets(m, providerOptions);
       const entries = Object.values(m.entries);
       markStage(workspace, 'assets', 'done');
-      ok(`${entries.length} assets: ${entries.filter((e) => e.status === 'downloaded').length} downloaded, ${entries.filter((e) => e.status === 'kept-external').length} kept external, ${entries.filter((e) => e.status === 'failed').length} failed; ${entries.reduce((n, e) => n + e.altMissing, 0)} references without alt`);
-      if (v.provider === 'local' || !v.provider) console.log('· provider local: final URLs are assigned when the dai-api ingestion (G7) or an s3 provider is configured; output keeps source URLs until then');
+      ok(`${entries.length} assets via ${provider}: ${entries.filter((e) => e.status === 'ingested').length} ingested, ${entries.filter((e) => e.status === 'downloaded').length} local, ${entries.filter((e) => e.status === 'kept-external').length} kept external, ${entries.filter((e) => e.status === 'failed').length} failed; ${entries.reduce((n, e) => n + e.altMissing, 0)} references without alt`);
+      if (provider === 'local') console.log('· provider local: release remains blocked until dai-api or s3 assigns final URLs');
       break;
     }
     case 'convert': {
@@ -514,6 +588,11 @@ async function main() {
       s.hashes.assetPlan = fileHash(join(workspace, 'plan', 'assets.yaml'));
       s.hashes.canonicalOutput = undefined;
       writeSession(workspace, s);
+      // determinism is proven by re-converting the same frozen inputs, not by re-reading the same files
+      const outputHash = canonicalHash(outDir);
+      const inputsKey = sha256([s.hashes.snapshot ?? '', s.hashes.componentPlan ?? '', s.hashes.urlPlan ?? '', s.hashes.assetPlan ?? '', existsSync(join(workspace, 'plan', 'assets.json')) ? fileHash(join(workspace, 'plan', 'assets.json')) : ''].join('|'));
+      s.hashes.previousConvertOutput = s.hashes.convertInputs === inputsKey ? s.hashes.convertOutput : undefined;
+      s.hashes.convertInputs = inputsKey; s.hashes.convertOutput = outputHash; writeSession(workspace, s);
       markStage(workspace, 'convert', 'done', `${converted} converted, ${blocked} blocked`);
       ok(`${converted} pages written to output/, ${blocked} pages held (blocked snippet tokens)`);
       break;
@@ -521,14 +600,29 @@ async function main() {
     case 'nav': {
       const workspace = ws(); const s = readSession(workspace); requireStages(s, 'convert');
       const tree = applyUrlPlan(readTree(workspace), readUrlPlan(workspace) ?? defaultUrlPlan(readTree(workspace)));
-      const nav = buildNavigation(tree.pages.filter((p) => existsSync(join(workspace, 'output', `${p.newPath}.mdx`))));
+      const nav = buildNavigation(tree.pages.filter((p) => existsSync(join(workspace, 'output', `${p.newPath}.mdx`))), { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale });
       const docJsonPath = join(workspace, 'output', 'documentation.json');
       const existing = existsSync(docJsonPath) ? readJson<Record<string, unknown>>(docJsonPath) : { name: 'Documentation', initialRoute: `/${tree.pages.find((p) => p.migrate && p.newPath)?.newPath ?? ''}` };
-      writeJson(docJsonPath, { ...existing, ...nav });
+      const metaPath = join(workspace, 'inventory', 'platform-meta.json');
+      const meta = existsSync(metaPath) ? readJson<{ name?: string; colors?: Record<string, string>; logo?: unknown; favicon?: string; redirects?: { exact: any[]; wildcard: any[] }; openapi?: Array<{ groupPath: string[]; spec: string }>; root?: string }>(metaPath) : {};
+      let navigation = nav;
+      const copiedSpecs: string[] = [];
+      for (const o of meta.openapi ?? []) {
+        const src = meta.root ? join(meta.root, o.spec) : undefined;
+        if (!src || !existsSync(src)) { console.log(`· openapi spec ${o.spec} not found in the source repo; group left without openapi`); continue; }
+        const dst = join(workspace, 'output', o.spec); mkdirSync(dirname(dst), { recursive: true, mode: 0o700 }); writeFileSync(dst, readFileSync(src), { mode: 0o600 }); copiedSpecs.push(o.spec);
+        try { navigation = attachGroupOpenapi(navigation, o.groupPath, o.spec, (o as any).version, (o as any).locale); } catch (e) { console.log(`· ${(e as Error).message}`); }
+      }
+      const site = { ...(meta.name ? { name: meta.name } : {}), ...(meta.colors ? { colors: meta.colors } : {}), ...(meta.favicon ? { favicon: meta.favicon } : {}) };
+      writeJson(docJsonPath, { ...existing, ...site, ...navigation });
       const plan = readUrlPlan(workspace)!;
       const r = redirectMaps(plan);
+      const platformExact = (meta.redirects?.exact ?? []).filter((x) => !r.exact.some((e) => e.source === x.source));
+      const platformWildcard = (meta.redirects?.wildcard ?? []).filter((x) => !r.wildcard.some((e) => e.source === x.source));
+      r.exact.push(...platformExact); r.wildcard.push(...platformWildcard);
       writeJson(join(workspace, 'report', 'redirects.exact.json'), r.exact);
       writeJson(join(workspace, 'report', 'redirects.wildcard.json'), r.wildcard);
+      if (copiedSpecs.length) console.log(`· copied ${copiedSpecs.length} OpenAPI spec(s) into output and attached them to their groups`);
       const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }> }>>(join(workspace, 'inventory', 'anchors.json')) : [];
       const links = existsSync(join(workspace, 'inventory', 'links.json')) ? readJson<Array<{ pageId: string; url: string }>>(join(workspace, 'inventory', 'links.json')) : [];
       const inbound = new Map<string, number>();
@@ -556,7 +650,8 @@ async function main() {
         ] as const;
         const stalePlans = pinnedPlans.filter(([file, expected]) => !expected || !existsSync(join(workspace, 'plan', file)) || fileHash(join(workspace, 'plan', file)) !== expected).map(([file]) => file);
         if (stalePlans.length) fail(`--push refused: plan changed after conversion (${stalePlans.join(', ')}); rerun convert and verify`);
-        const gateReport = readJson<{ pass: boolean; gates: GateResult[] }>(gateFile);
+        const gateReport = readJson<{ pass: boolean; outputHash?: string; gates: GateResult[] }>(gateFile);
+        if (gateReport.outputHash !== currentOutputHash) fail('--push refused: report/gates.json does not belong to the current output; rerun verify');
         const blockers = previewPushBlockers(gateReport.gates);
         if (blockers.length) fail(`--push refused: non-preview gates must pass first (${blockers.map((g) => g.id).join(', ')})`);
         if (!gateReport.pass) console.log('· pushing the migration branch to create a preview; rendered-preview gates remain required before release');
@@ -582,7 +677,7 @@ async function main() {
         workspace, outputDir: join(workspace, 'output'),
         sourceDocs: docs.map((doc) => ({ doc, outputFile: byId.get(doc.pageId)?.newPath ? join(workspace, 'output', `${byId.get(doc.pageId)!.newPath}.mdx`) : undefined })),
         treePages: tree.pages, quarantinedPages: quarantined, excludedPages: new Set(), unreviewed,
-        previousCanonicalHash: s.hashes.canonicalOutput, previewUrl: v['preview-url'], pinnedContractVersion: s.versions.contentContract, previewContractVersion: v['preview-contract-version'],
+        previousCanonicalHash: s.hashes.previousConvertOutput, convertOutputHash: s.hashes.convertOutput, previewUrl: v['preview-url'], pinnedContractVersion: s.versions.contentContract, previewContractVersion: v['preview-contract-version'],
       });
       if (v['preview-url']) {
         const anchorFile = join(workspace, 'report', 'anchors.json');
@@ -598,7 +693,7 @@ async function main() {
       ] as const;
       const changedPlans = pinnedPlans.filter(([file, expected]) => !expected || !existsSync(join(workspace, 'plan', file)) || fileHash(join(workspace, 'plan', file)) !== expected).map(([file]) => file);
       gates.unshift({ id: 'plans-pinned', status: changedPlans.length ? 'fail' : 'pass', detail: changedPlans.length ? `plan changed after conversion: ${changedPlans.join(', ')}; rerun convert` : 'component, URL and asset plans match the converted snapshot', count: changedPlans.length, samples: changedPlans });
-      writeGates(workspace, gates);
+      writeGates(workspace, gates, canonicalHash(join(workspace, 'output')));
       const clusters = existsSync(join(workspace, 'inventory', 'components.json')) ? readJson<ClusterEntry[]>(join(workspace, 'inventory', 'components.json')) : [];
       writeReviewQueue(workspace, gates, clusters, Object.fromEntries(Object.entries(plan).map(([k, c]) => [k, c.status ?? 'auto'])));
       if (!s.hashes.canonicalOutput) { s.hashes.canonicalOutput = canonicalHash(join(workspace, 'output')); writeSession(workspace, s); }

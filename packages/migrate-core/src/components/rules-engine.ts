@@ -63,7 +63,7 @@ export interface EngineOptions {
 type Handler = (node: ComponentNode, rule: MappingRule, ctx: EngineOptions) => Block[];
 
 /** Resolve "$prop", "$map(prop)", "$count", literal. */
-function resolveProp(v: string | number | boolean, node: ComponentNode, target: string, contract = loadContract()): string | number | boolean | null {
+function resolveProp(v: string | number | boolean, node: ComponentNode, target: string, targetProp: string, contract = loadContract()): string | number | boolean | null {
   if (typeof v !== 'string' || !v.startsWith('$')) return v;
   const m = v.match(/^\$(\w+)(?:\((\w+)\))?$/);
   if (!m) return v;
@@ -71,7 +71,8 @@ function resolveProp(v: string | number | boolean, node: ComponentNode, target: 
   if (fn === 'count') return node.children.length;
   if (fn === 'map' && arg) {
     const raw = node.props[arg];
-    const map = contract.valueMaps[target]?.[arg] ?? {};
+    // the value map is keyed by the target component and target prop (e.g. Callout.kind), whatever the source prop was called
+    const map = contract.valueMaps[target]?.[targetProp] ?? contract.valueMaps[target]?.[arg] ?? {};
     if (raw === null || raw === undefined) return null;
     const s = String(raw).toLowerCase();
     return map[s] ?? s;
@@ -183,8 +184,10 @@ export class RulesEngine {
     for (const b of blocks) {
       if (b.type === 'component') {
         // children first so nested source components are resolved before the parent rule sees them
+        // the plan was keyed on the raw signature at inventory time, so compute it before children are resolved
+        const sig = signatureOf(b);
         const withKids: ComponentNode = { ...b, children: this.resolveBlocks(b.children, pageId) };
-        out.push(...this.resolveComponent(withKids, pageId));
+        out.push(...this.resolveComponent(withKids, pageId, sig, b));
       } else if (b.type === 'list') {
         this.opts.ledger.identical(pageId, b.id);
         out.push({ ...b, children: b.children.map((li) => { this.opts.ledger.identical(pageId, li.id); return { ...li, children: this.resolveBlocks(li.children, pageId) }; }) });
@@ -216,8 +219,8 @@ export class RulesEngine {
     return out;
   }
 
-  private resolveComponent(node: ComponentNode, pageId: string): Block[] {
-    const sig = signatureOf(node);
+  private resolveComponent(node: ComponentNode, pageId: string, sig = signatureOf(node), original: ComponentNode = node): Block[] {
+    this.original = original;
     const plan = this.opts.plan?.[sig.hash];
 
     if (plan?.status === 'excluded') {
@@ -253,7 +256,7 @@ export class RulesEngine {
     } else if (rule.to) {
       const props: Record<string, string | number | boolean | null> = {};
       for (const [k, v] of Object.entries(rule.to.props ?? {})) {
-        const rv = resolveProp(v, node, rule.to.name);
+        const rv = resolveProp(v, node, rule.to.name, k);
         if (rv !== null) props[k] = rv;
       }
       result = [{ id: node.id, type: 'dai', name: rule.to.name, props, children: node.children, rule: rule.id }];
@@ -287,10 +290,14 @@ export class RulesEngine {
   }
 
   /** Record a disposition for a component and every node beneath it (last write wins in the ledger). */
+  /** The unresolved source node for the component currently being resolved; subtree marks must cover source ids, not resolved replacements. */
+  private original?: ComponentNode;
+
   private markSubtree(node: ComponentNode, pageId: string, kind: 'excluded' | 'quarantined', reason: string, reviewer?: string): void {
     const mark = (id: string) => (kind === 'excluded' ? this.opts.ledger.excluded(pageId, id, reason, reviewer) : this.opts.ledger.quarantined(pageId, id, reason));
-    mark(node.id);
-    walkBlocks(node.children, (n) => { mark(n.id); });
+    const src = this.original && this.original.id === node.id ? this.original : node;
+    mark(src.id);
+    walkBlocks(src.children, (n) => { mark(n.id); });
   }
 
   private quarantine(node: ComponentNode, pageId: string, reason: string): Block[] {

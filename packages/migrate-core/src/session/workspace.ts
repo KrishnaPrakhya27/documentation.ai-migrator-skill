@@ -19,7 +19,7 @@ import { join, resolve } from 'node:path';
 import { homedir, platform as osPlatform } from 'node:os';
 import { sha256 } from './ids.js';
 
-export const WORKSPACE_DIRS = ['source-cache', 'snapshot', 'inventory', 'plan', 'output', 'ledger', 'quarantine', 'logging', 'report', 'assets-original'] as const;
+export const WORKSPACE_DIRS = ['source-cache', 'snapshot', 'inventory', 'plan', 'output', 'ledger', 'quarantine', 'logging', 'report', 'assets-original', 'assets-ready'] as const;
 
 export interface SessionTarget {
   /** 'customer-org' (option A) or 'demo-org' (option B) */
@@ -53,6 +53,10 @@ export interface Session {
     urlPlan?: string;
     assetPlan?: string;
     canonicalOutput?: string;
+    /** Inputs (snapshot + plans + asset manifest) of the last convert, and its output hash; a repeat over identical inputs proves determinism. */
+    convertInputs?: string;
+    convertOutput?: string;
+    previousConvertOutput?: string;
   };
   stages: Record<string, { status: 'pending' | 'done' | 'failed'; at?: string; note?: string }>;
 }

@@ -7,7 +7,7 @@ import { isIP } from 'node:net';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { sha256 } from '../session/ids.js';
-import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from 'undici';
+import { fetch as undiciFetch, Agent, ProxyAgent, type Dispatcher } from 'undici';
 
 export type FetchImpl = typeof undiciFetch;
 import type { CookieJar } from 'tough-cookie';
@@ -68,6 +68,16 @@ export function isPublicAddress(ip: string): boolean {
   return false;
 }
 
+/** Addresses validated by assertPublicHost, keyed by hostname; the dispatcher connects only to these (no second resolution, no rebinding). */
+const validatedAddresses = new Map<string, Array<{ address: string; family: number }>>();
+
+export function pinnedLookup(hostname: string, options: any, callback: (err: NodeJS.ErrnoException | null, address: any, family?: number) => void): void {
+  const pinned = validatedAddresses.get(hostname.toLowerCase());
+  if (!pinned?.length) { callback(Object.assign(new Error(`address for ${hostname} was not validated before connect`), { code: 'ENOTFOUND' }), undefined as any); return; }
+  if (options?.all) callback(null, pinned);
+  else callback(null, pinned[0].address, pinned[0].family);
+}
+
 export async function assertPublicHost(url: URL): Promise<string> {
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`refused non-http url ${url}`);
   const host = url.hostname;
@@ -76,7 +86,24 @@ export async function assertPublicHost(url: URL): Promise<string> {
   if (!addresses.length) throw new Error(`no DNS addresses for ${host}`);
   const blocked = addresses.find((x) => !isPublicAddress(x.address));
   if (blocked) throw new Error(`refused non-public address ${blocked.address} for ${host}`);
+  validatedAddresses.set(host.toLowerCase(), addresses.map((x) => ({ address: x.address, family: isIP(x.address) })));
   return addresses[0].address;
+}
+
+/** Read a response body without buffering more than `max` bytes; aborts early on chunked bodies with no content-length. */
+async function readBodyCapped(res: Response, max: number): Promise<Buffer> {
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) { await reader.cancel(); throw new Error(`response exceeds ${max} bytes`); }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c)));
 }
 
 class TokenBucket {
@@ -102,7 +129,9 @@ export class Fetcher {
     this.bucket = new TokenBucket(opts.rps ?? 2);
     this.cacheDir = join(opts.workspace, 'source-cache');
     mkdirSync(this.cacheDir, { recursive: true, mode: 0o700 });
-    this.dispatcher = opts.proxy ? new ProxyAgent(opts.proxy) : undefined;
+    // Without a proxy, connect only to addresses assertPublicHost validated (DNS rebinding cannot swap the target between check and connect).
+    // With a proxy, the proxy resolves names; the public-address check still runs on every hop.
+    this.dispatcher = opts.proxy ? new ProxyAgent(opts.proxy) : new Agent({ connect: { lookup: pinnedLookup as any } });
   }
 
   private cachePath(url: string) { return join(this.cacheDir, `${sha256(url)}.json`); }
@@ -189,6 +218,7 @@ export class Fetcher {
     for (let hop = 0; hop < 5; hop++) {
       this.assertAllowedHost(current);
       await assertPublicHost(current);
+      if (hop > 0 && !(await this.robotsAllows(current))) throw new Error(`robots.txt disallows redirect target ${current}`);
       await this.bucket.wait(current.hostname);
       // Authentication material is origin-bound. Cross-origin redirects never receive it.
       const credentials = current.origin === credentialOrigin && this.opts.credentialOrigins?.includes(current.origin) ? (this.opts.headers ?? {}) : {};
@@ -219,7 +249,7 @@ export class Fetcher {
       const len = Number(res.headers.get('content-length') ?? 0);
       const max = this.opts.maxBytes ?? 20 * 1024 * 1024;
       if (len > max) throw new Error(`response too large (${len} bytes) for ${current}`);
-      const buf = Buffer.from(await res.arrayBuffer());
+      const buf = await readBodyCapped(res, max);
       if (buf.length > max) throw new Error(`response too large (${buf.length} bytes) for ${current}`);
       const contentType = res.headers.get('content-type') ?? '';
       const isText = /^(text\/|application\/(?:json|xml|javascript|xhtml\+xml|ld\+json))/i.test(contentType) || /\+(?:json|xml)(?:;|$)/i.test(contentType);

@@ -13,7 +13,7 @@
  * export and add a fixture.
  */
 import { open as openZip, type Entry } from 'yauzl-promise';
-import { createWriteStream, existsSync, readdirSync, readFileSync, statSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
+import { createWriteStream, existsSync, readdirSync, readFileSync, statSync, mkdirSync, mkdtempSync, renameSync, rmSync, lstatSync } from 'node:fs';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { join, relative, basename, extname, resolve, sep, dirname } from 'node:path';
@@ -58,7 +58,9 @@ export interface D360Export {
 function walkFiles(dir: string, out: string[] = []): string[] {
   for (const f of readdirSync(dir)) {
     const p = join(dir, f);
-    if (statSync(p).isDirectory()) walkFiles(p, out); else out.push(p);
+    const st = lstatSync(p);
+    if (st.isSymbolicLink()) continue; // never follow symlinks inside an export
+    if (st.isDirectory()) walkFiles(p, out); else out.push(p);
   }
   return out;
 }
@@ -114,7 +116,7 @@ export async function extractIfZip(input: string, extractTo: string): Promise<st
 }
 
 export function parseMetadata(content: string): { metadata: Record<string, string>; body: string } {
-  const m = content.match(/<!--\s*## Metadata_Start\s*([\s\S]*?)## Metadata_End\s*-->/);
+  const m = content.match(/^\s*<!--\s*## Metadata_Start\s*([\s\S]*?)## Metadata_End\s*-->/);
   if (!m) return { metadata: {}, body: content };
   const metadata: Record<string, string> = {};
   for (const line of m[1].split('\n')) {
@@ -153,7 +155,8 @@ export function readD360Export(inputRoot: string): D360Export {
   const snippetTokens = new Map<string, number>();
 
   const byBase = new Map<string, string>();
-  for (const f of articleFiles) byBase.set(basename(f).replace(/\.(html?|md)$/i, '').toLowerCase(), f);
+  const wsOf = (f: string) => relative(inputRoot, f).split('/')[0];
+  for (const f of articleFiles) byBase.set(`${wsOf(f)}/${basename(f).replace(/\.(html?|md)$/i, '').toLowerCase()}`, f);
 
   const workspaces = [...new Set(catJson.map((f) => basename(f).replace(/_category_articles\.json$/i, '')))];
 
@@ -168,7 +171,7 @@ export function readD360Export(inputRoot: string): D360Export {
       const a = it.article;
       const slug = String(a.slug ?? a.article_slug ?? (a.url ? String(a.url).split('/').pop() : '') ?? '');
       const title = String(a.title ?? a.article_title ?? a.name ?? slug);
-      const file = byBase.get(slug.toLowerCase()) ?? byBase.get(title.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+      const file = byBase.get(`${ws}/${slug.toLowerCase()}`) ?? byBase.get(`${ws}/${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`);
       if (!file) { unplaced.push({ reason: 'article in json without file', detail: slug || title }); continue; }
       placed.add(file);
       articles.push(makeArticle(file, inputRoot, ws, it.categoryPath, it.order, a.id ?? a.article_id ?? slug, snippetTokens));

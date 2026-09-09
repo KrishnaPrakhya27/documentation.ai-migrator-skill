@@ -125,8 +125,8 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
         const longestRun = Math.max(0, ...Array.from(b.value.matchAll(/`+/g), (m) => m[0].length));
         const fence = '`'.repeat(Math.max(3, longestRun + 1));
         const lang = (b.lang ?? '').replace(/[^A-Za-z0-9_+.#-]/g, '');
-        const title = b.title?.replace(/["\r\n]/g, ' ').trim();
-        const meta = b.meta?.replace(/[\r\n]/g, ' ').trim();
+        const title = b.title?.replace(/["\r\n`~]/g, ' ').trim();
+        const meta = b.meta?.replace(/[\r\n`~]/g, ' ').trim();
         out.push(`${fence}${lang}${title ? ` title="${title}"` : ''}${meta ? ` ${meta}` : ''}\n${b.value}\n${fence}`);
         break;
       }

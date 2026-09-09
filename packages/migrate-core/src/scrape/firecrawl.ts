@@ -49,7 +49,7 @@ export class Firecrawl {
 
   /** URL discovery: 1 credit per call. */
   async map(url: string, opts: { search?: string; limit?: number; includeSubdomains?: boolean } = {}): Promise<string[]> {
-    const r = await this.call<{ success: boolean; links?: Array<string | { url: string }> }>('/v2/map', { url, limit: opts.limit ?? 5000, includeSubdomains: opts.includeSubdomains ?? false, search: opts.search });
+    const r = await this.call<{ success: boolean; links?: Array<string | { url: string }> }>('/v2/map', { url, limit: opts.limit ?? 5000, includeSubdomains: opts.includeSubdomains ?? false, search: opts.search, headers: this.opts.headers });
     return (r.links ?? []).map((l) => (typeof l === 'string' ? l : l.url));
   }
 
@@ -60,7 +60,7 @@ export class Firecrawl {
       urls,
       ignoreInvalidURLs: false,
       maxConcurrency: this.opts.maxConcurrency,
-      zeroDataRetention: this.opts.zeroDataRetention ?? false,
+      zeroDataRetention: this.opts.zeroDataRetention ?? true, // customer content: retention is opt-out
       formats: ['html', 'markdown', 'links'],
       onlyMainContent: true,
       includeTags: this.opts.includeTags,
