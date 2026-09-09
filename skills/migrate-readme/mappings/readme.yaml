@@ -1,0 +1,51 @@
+# ReadMe → Documentation.AI. Seeded from Notion "MAPPING-complete" (Feb 2026),
+# corrected for the current DOM (.rm-Markdown.markdown-body, not rm-Article).
+platform: readme
+version: 1
+rules:
+  - id: readme/accordion-to-expandable
+    tier: T2
+    match: { name: Accordion }
+    to: { name: Expandable, props: { title: $title } }
+    drop: [icon]
+  - id: readme/callout-kind
+    tier: T2
+    match: { name: Callout }
+    to: { name: Callout, props: { kind: $map(kind) } }
+    drop: [icon, theme]
+    note: "emoji/theme → kind via contract valueMaps; blockquote emoji callouts are recognised by the scrape profile as Callout with kind=info|success|alert|danger"
+  - id: readme/cards-to-columns
+    tier: T3
+    match: { name: Cards }
+    handler: cards-to-columns
+  - id: readme/card
+    tier: T2
+    match: { name: Card }
+    to: { name: Card, props: { title: $title, href: $href, icon: $icon, target: $target } }
+    note: "Font Awesome icon names are mapped to Lucide by the icon table before this rule sees them"
+  - id: readme/columns
+    tier: T3
+    match: { name: Columns }
+    handler: columns-count-children
+  - id: readme/image
+    tier: T2
+    match: { name: Image }
+    to: { name: Image, props: { src: $src, alt: $alt, width: $width, height: $height } }
+    drop: [align, border]
+  - id: readme/tabs
+    tier: T3
+    match: { name: Tabs }
+    handler: tabs
+  - id: readme/tab
+    tier: T1
+    match: { name: Tab }
+    to: { name: Tab, props: { title: $title } }
+  - id: readme/embed-iframe
+    tier: T3
+    match: { name: embed }
+    handler: embed-to-iframe
+  - id: readme/recipe-steps
+    tier: T3
+    match: { name: Recipe }
+    handler: list-to-steps
+    note: "Only when the Recipe body was fetched (GitHub or API mode); URL mode cannot fetch Recipes and the cluster is quarantined"

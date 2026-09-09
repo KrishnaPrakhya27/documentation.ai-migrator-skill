@@ -1,0 +1,60 @@
+# Reconciliation decisions for the Documentation.AI content contract.
+# Every entry resolves a disagreement between the renderer, the editor schema
+# (UCC) and the deployment validator. Change these by decision, with a note.
+version: "0.1.0"
+
+# Names that exist in one surface but must be emitted under another name.
+aliases:
+  CardGroup: Columns          # editor accepts CardGroup and serialises it as Columns; renderer has no CardGroup
+  HtmlBlock: rawHtml          # editor-internal node; the migrator emits sanitised raw HTML, never <htmlBlock>
+  SvgBlock: SVG
+  Snippet: SnippetComponent   # editor node for snippet imports; public form is an import + self-closing tag
+
+# Editor-internal nodes that are never emitted as MDX components.
+editorOnly: [HtmlBlock, SvgBlock, Snippet, Paragraph, Heading, List, Table, CodeBlock]
+
+# Prop-level overrides applied on top of the editor schema.
+# Decision 2026-09-09: the renderer's Callout kinds are canonical because that is
+# what readers see; the editor's `note` and `warning` are mapped on the way in.
+propOverrides:
+  Callout:
+    kind:
+      type: string
+      enum: [info, alert, success, danger, tip, custom]
+      default: info
+      required: false
+      description: "Renderer set is canonical. Editor 'note' → info, 'warning' → alert (see valueMaps)."
+  Columns:
+    cols:
+      type: number
+      enum: [2, 3, 4]
+      default: 2
+      required: false
+  Image:
+    alt:
+      type: string
+      required: true
+      description: "Required by the editor schema; the migrator emits alt='' with a lossy ledger entry when the source has none and the plan disallows generation."
+    src:
+      type: string
+      required: true
+      description: "Absolute URL after asset ingestion."
+
+# Value maps applied by the converter when a source value is not in the canonical enum.
+valueMaps:
+  Callout:
+    kind:
+      note: info
+      warning: alert
+      error: danger
+      caution: alert
+      important: info
+      check: success
+
+notes:
+  kbd: "Registered on the client renderer only; safe to emit as lowercase <kbd> (HTML element, not a custom component)."
+  Link: "Prefer Markdown links; <Link> is accepted by the validator."
+  MermaidDiagram: "Never emitted directly; fenced ```mermaid blocks are transformed by the renderer."
+  SnippetComponent: "Never emitted directly; snippet default imports are rewritten by the renderer preprocessor."
+  Script: "Never emitted by the migrator (executable)."
+  Iframe: "Emitted only for allowlisted hosts (plan: assets.iframeHosts)."

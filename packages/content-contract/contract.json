@@ -1,0 +1,1391 @@
+{
+  "contractVersion": "0.1.0",
+  "generatedAt": "2026-09-09T10:59:37.025Z",
+  "inputs": {
+    "renderer": "documentation-ai-app/src/components/mdx-components/MDXRemoteServer.tsx",
+    "deploymentValidator": "documentation-ai-backend/src/trigger/services/deployment/mdxValidation.service.ts",
+    "editorSchemas": "documentation-ai-dashboard/src/components/ucc/*.json"
+  },
+  "emittable": [
+    "AuthParams",
+    "AuthType",
+    "Board",
+    "BoardCard",
+    "BoardColumn",
+    "BodyParams",
+    "Callout",
+    "Card",
+    "CodeBlock",
+    "CodeGroup",
+    "CollectionContent",
+    "CollectionList",
+    "Columns",
+    "ContentType",
+    "Expandable",
+    "ExpandableGroup",
+    "Iframe",
+    "Image",
+    "Link",
+    "MermaidDiagram",
+    "ParamField",
+    "PlaygroundComponent",
+    "Request",
+    "Response",
+    "ResponseField",
+    "SVG",
+    "Script",
+    "Step",
+    "Steps",
+    "Tab",
+    "Tabs",
+    "Update",
+    "Video"
+  ],
+  "components": [
+    {
+      "name": "AuthParams",
+      "publicName": "AuthParams",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": []
+    },
+    {
+      "name": "AuthType",
+      "publicName": "AuthType",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": []
+    },
+    {
+      "name": "Board",
+      "publicName": "Board",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "title": {
+          "type": "string",
+          "default": "Board",
+          "required": false
+        },
+        "columns": {
+          "type": "array",
+          "default": [],
+          "required": true
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "BoardCard",
+      "publicName": "BoardCard",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": []
+    },
+    {
+      "name": "BoardColumn",
+      "publicName": "BoardColumn",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": []
+    },
+    {
+      "name": "BodyParams",
+      "publicName": "BodyParams",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": []
+    },
+    {
+      "name": "Callout",
+      "publicName": "Callout",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "info",
+            "alert",
+            "success",
+            "danger",
+            "tip",
+            "custom"
+          ],
+          "default": "info",
+          "description": "Renderer set is canonical. Editor 'note' → info, 'warning' → alert (see valueMaps).",
+          "required": false
+        },
+        "collapsed": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        }
+      },
+      "children": {
+        "allowed": [
+          "Paragraph",
+          "Heading",
+          "CodeBlock",
+          "List"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "Card",
+      "publicName": "Card",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "title": {
+          "type": "string",
+          "default": "New Card",
+          "required": true
+        },
+        "href": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        },
+        "icon": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        },
+        "image": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        },
+        "cta": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        },
+        "horizontal": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "_self",
+            "_blank",
+            null
+          ],
+          "default": null,
+          "required": false
+        }
+      },
+      "children": {
+        "allowed": [
+          "Paragraph",
+          "Heading",
+          "CodeBlock",
+          "List"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "CardGroup",
+      "publicName": "Columns",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": false,
+        "editorSchema": true
+      },
+      "props": {
+        "cols": {
+          "type": "number",
+          "enum": [
+            2,
+            3,
+            4
+          ],
+          "default": 2,
+          "required": true
+        }
+      },
+      "children": {
+        "allowed": [
+          "Card"
+        ],
+        "min": 1
+      },
+      "notes": [
+        "alias of Columns (decision)"
+      ]
+    },
+    {
+      "name": "CodeBlock",
+      "publicName": "CodeBlock",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "language": {
+          "type": "string",
+          "default": "text",
+          "required": true
+        },
+        "filename": {
+          "type": "string",
+          "required": false
+        },
+        "show-lines": {
+          "type": "boolean",
+          "default": true,
+          "required": false
+        },
+        "wrap": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, code wraps to fit container width instead of horizontal scrolling",
+          "required": false
+        },
+        "highlight": {
+          "type": "array",
+          "required": false
+        },
+        "code": {
+          "type": "string",
+          "required": true
+        },
+        "vector-hash": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "notes": [
+        "editor-only node; never emitted by the migrator"
+      ]
+    },
+    {
+      "name": "CodeGroup",
+      "publicName": "CodeGroup",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "default-tab": {
+          "type": "integer",
+          "required": false
+        },
+        "show-lines": {
+          "type": "boolean",
+          "default": true,
+          "required": false
+        },
+        "line-highlight": {
+          "type": "array",
+          "required": false
+        },
+        "tabs": {
+          "type": "array",
+          "required": true
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "CollectionContent",
+      "publicName": "CollectionContent",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "node": {
+          "type": "string",
+          "description": "Navigation path in type:name/type:name format (e.g. tabs:Documentation/groups:Customize)",
+          "required": true
+        },
+        "defaultExpanded": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "CollectionList",
+      "publicName": "CollectionList",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "node": {
+          "type": "string",
+          "description": "Navigation path in type:name/type:name format (e.g. tabs:Documentation/groups:Getting Started)",
+          "required": true
+        },
+        "layout": {
+          "type": "string",
+          "enum": [
+            "cards",
+            "accordion",
+            "list",
+            "links"
+          ],
+          "default": "cards",
+          "required": false
+        },
+        "cols": {
+          "type": "number",
+          "enum": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "default": 2,
+          "required": false
+        },
+        "cardVariant": {
+          "type": "string",
+          "enum": [
+            "default",
+            "horizontal",
+            "centered"
+          ],
+          "default": "default",
+          "required": false
+        },
+        "defaultOpen": {
+          "type": "boolean",
+          "default": true,
+          "required": false
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "Columns",
+      "publicName": "Columns",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {
+        "cols": {
+          "type": "number",
+          "enum": [
+            2,
+            3,
+            4
+          ],
+          "default": 2,
+          "required": false
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "ContentType",
+      "publicName": "ContentType",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": []
+    },
+    {
+      "name": "Expandable",
+      "publicName": "Expandable",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "title": {
+          "type": "string",
+          "default": "Click to expand",
+          "required": false
+        },
+        "defaultOpen": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "attrs": {
+          "type": "object",
+          "required": false
+        }
+      },
+      "children": {
+        "allowed": [
+          "Paragraph",
+          "Heading",
+          "CodeBlock",
+          "List",
+          "Callout",
+          "Image",
+          "Table"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "ExpandableGroup",
+      "publicName": "ExpandableGroup",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "expandables": {
+          "type": "array",
+          "required": true
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "Heading",
+      "publicName": "Heading",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": false,
+        "editorSchema": true
+      },
+      "props": {
+        "level": {
+          "type": "integer",
+          "required": true
+        },
+        "text": {
+          "type": "string",
+          "required": true
+        },
+        "slug": {
+          "type": "string",
+          "required": true
+        },
+        "vector-hash": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "notes": [
+        "editor-only node; never emitted by the migrator"
+      ]
+    },
+    {
+      "name": "HtmlBlock",
+      "publicName": "rawHtml",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": false,
+        "editorSchema": true
+      },
+      "props": {
+        "code": {
+          "type": "string",
+          "description": "Raw HTML code to render",
+          "required": true
+        }
+      },
+      "notes": [
+        "editor-only node; never emitted by the migrator",
+        "alias of rawHtml (decision)"
+      ]
+    },
+    {
+      "name": "Iframe",
+      "publicName": "Iframe",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "src": {
+          "type": "string",
+          "required": true
+        },
+        "title": {
+          "type": "string",
+          "required": false
+        },
+        "width": {
+          "type": "integer",
+          "required": false
+        },
+        "height": {
+          "type": "integer",
+          "required": false
+        },
+        "allowFullScreen": {
+          "type": "boolean",
+          "default": true,
+          "required": false
+        },
+        "frameBorder": {
+          "type": "string",
+          "default": "0",
+          "required": false
+        },
+        "loading": {
+          "type": "string",
+          "enum": [
+            "lazy",
+            "eager"
+          ],
+          "default": "lazy",
+          "required": false
+        },
+        "sandbox": {
+          "type": "string",
+          "required": false
+        },
+        "style": {
+          "type": "string",
+          "required": false
+        },
+        "displayMode": {
+          "type": "string",
+          "enum": [
+            "fixed",
+            "auto-resize"
+          ],
+          "default": "fixed",
+          "required": false
+        },
+        "vector-hash": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "notes": [
+        "Emitted only for allowlisted hosts (plan: assets.iframeHosts)."
+      ]
+    },
+    {
+      "name": "Image",
+      "publicName": "Image",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "src": {
+          "type": "string",
+          "description": "Absolute URL after asset ingestion.",
+          "required": true
+        },
+        "content-type": {
+          "type": "string",
+          "required": false
+        },
+        "width": {
+          "type": "integer",
+          "required": true
+        },
+        "height": {
+          "type": "integer",
+          "required": true
+        },
+        "alt": {
+          "type": "string",
+          "description": "Required by the editor schema; the migrator emits alt='' with a lossy ledger entry when the source has none and the plan disallows generation.",
+          "required": true
+        },
+        "caption": {
+          "type": "string",
+          "required": false
+        },
+        "focal-point": {
+          "type": "array",
+          "required": false
+        },
+        "ocr-text": {
+          "type": "string",
+          "required": false
+        },
+        "vector-hash": {
+          "type": "string",
+          "required": false
+        },
+        "style": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "Link",
+      "publicName": "Link",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": [
+        "Prefer Markdown links; <Link> is accepted by the validator."
+      ]
+    },
+    {
+      "name": "List",
+      "publicName": "List",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": false,
+        "editorSchema": true
+      },
+      "props": {
+        "variant": {
+          "type": "string",
+          "enum": [
+            "bullet",
+            "numbered",
+            "check"
+          ],
+          "required": true
+        },
+        "attrs": {
+          "type": "object",
+          "required": false
+        }
+      },
+      "children": {
+        "min": 1
+      },
+      "notes": [
+        "editor-only node; never emitted by the migrator"
+      ]
+    },
+    {
+      "name": "MermaidDiagram",
+      "publicName": "MermaidDiagram",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": [
+        "Never emitted directly; fenced ```mermaid blocks are transformed by the renderer."
+      ]
+    },
+    {
+      "name": "Paragraph",
+      "publicName": "Paragraph",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": false,
+        "editorSchema": true
+      },
+      "props": {
+        "variant": {
+          "type": "string",
+          "enum": [
+            "body",
+            "lead",
+            "caption",
+            "quote"
+          ],
+          "default": "body",
+          "required": false
+        },
+        "attrs": {
+          "type": "object",
+          "required": false
+        }
+      },
+      "children": {},
+      "notes": [
+        "editor-only node; never emitted by the migrator"
+      ]
+    },
+    {
+      "name": "ParamField",
+      "publicName": "ParamField",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        },
+        "query": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        },
+        "header": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        },
+        "paramType": {
+          "type": "string",
+          "default": "string",
+          "required": false
+        },
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "deprecated": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "showLocation": {
+          "type": "string",
+          "enum": [
+            "true",
+            "false"
+          ],
+          "default": "true",
+          "required": false
+        },
+        "enum": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        }
+      },
+      "children": {
+        "allowed": [
+          "Paragraph",
+          "Heading",
+          "CodeBlock",
+          "List",
+          "ParamField",
+          "ResponseField",
+          "Expandable"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "PlaygroundComponent",
+      "publicName": "PlaygroundComponent",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": [
+        "validator allows it but the renderer has no component"
+      ]
+    },
+    {
+      "name": "Request",
+      "publicName": "Request",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "default-tab": {
+          "type": "integer",
+          "required": false
+        },
+        "show-lines": {
+          "type": "boolean",
+          "default": true,
+          "required": false
+        },
+        "line-highlight": {
+          "type": "array",
+          "required": false
+        },
+        "tabs": {
+          "type": "array",
+          "required": true
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "Response",
+      "publicName": "Response",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "default-tab": {
+          "type": "integer",
+          "required": false
+        },
+        "show-lines": {
+          "type": "boolean",
+          "default": true,
+          "required": false
+        },
+        "line-highlight": {
+          "type": "array",
+          "required": false
+        },
+        "tabs": {
+          "type": "array",
+          "required": true
+        },
+        "dropdown": {
+          "type": "string",
+          "enum": [
+            "true"
+          ],
+          "required": false
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "ResponseField",
+      "publicName": "ResponseField",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "name": {
+          "type": "string",
+          "default": "response",
+          "required": false
+        },
+        "fieldType": {
+          "type": "string",
+          "default": "string",
+          "required": false
+        },
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "deprecated": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "enum": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "required": false
+        }
+      },
+      "children": {
+        "allowed": [
+          "Paragraph",
+          "Heading",
+          "CodeBlock",
+          "List",
+          "ParamField",
+          "ResponseField",
+          "Expandable"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "SVG",
+      "publicName": "SVG",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": []
+    },
+    {
+      "name": "Script",
+      "publicName": "Script",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": [
+        "Never emitted by the migrator (executable)."
+      ]
+    },
+    {
+      "name": "Snippet",
+      "publicName": "SnippetComponent",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": false,
+        "editorSchema": true
+      },
+      "props": {
+        "name": {
+          "type": "string",
+          "description": "PascalCase component name derived from the filename (e.g. AuthSetup)",
+          "required": true
+        },
+        "path": {
+          "type": "string",
+          "description": "File path relative to project root (e.g. snippets/auth-setup.mdx)",
+          "required": true
+        }
+      },
+      "notes": [
+        "editor-only node; never emitted by the migrator",
+        "alias of SnippetComponent (decision)"
+      ]
+    },
+    {
+      "name": "SnippetComponent",
+      "publicName": "SnippetComponent",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": false,
+        "editorSchema": false
+      },
+      "props": {},
+      "notes": [
+        "renderer knows it but the deployment validator would reject it",
+        "Never emitted directly; snippet default imports are rewritten by the renderer preprocessor."
+      ]
+    },
+    {
+      "name": "Step",
+      "publicName": "Step",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "title": {
+          "type": "string",
+          "default": "New Step",
+          "description": "The heading text displayed for this step",
+          "required": true
+        },
+        "icon": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Lucide icon name to display instead of automatic numbering",
+          "required": false
+        },
+        "titleType": {
+          "type": "string",
+          "enum": [
+            "p",
+            "h2",
+            "h3"
+          ],
+          "default": "p",
+          "description": "The HTML heading level for the step title",
+          "required": false
+        }
+      },
+      "children": {
+        "allowed": [
+          "Paragraph",
+          "Heading",
+          "CodeBlock",
+          "List",
+          "Callout"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "Steps",
+      "publicName": "Steps",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {},
+      "children": {
+        "allowed": [
+          "Step"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "SvgBlock",
+      "publicName": "SVG",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": false,
+        "editorSchema": true
+      },
+      "props": {
+        "src": {
+          "type": "string",
+          "description": "URL to SVG file on CDN",
+          "required": false
+        }
+      },
+      "notes": [
+        "editor-only node; never emitted by the migrator",
+        "alias of SVG (decision)"
+      ]
+    },
+    {
+      "name": "Tab",
+      "publicName": "Tab",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "title": {
+          "type": "string",
+          "default": "Tab 1",
+          "description": "The tab label displayed in the navigation bar",
+          "required": true
+        },
+        "icon": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Lucide icon name to display alongside the tab title",
+          "required": false
+        }
+      },
+      "children": {
+        "allowed": [
+          "Paragraph",
+          "Heading",
+          "CodeBlock",
+          "List",
+          "Callout"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "Table",
+      "publicName": "Table",
+      "sources": {
+        "renderer": false,
+        "deploymentValidator": false,
+        "editorSchema": true
+      },
+      "props": {
+        "header-rows": {
+          "type": "integer",
+          "default": 1,
+          "required": false
+        },
+        "align": {
+          "type": "array",
+          "required": false
+        },
+        "rows": {
+          "type": "array",
+          "required": true
+        }
+      },
+      "notes": [
+        "editor-only node; never emitted by the migrator"
+      ]
+    },
+    {
+      "name": "Tabs",
+      "publicName": "Tabs",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {},
+      "children": {
+        "allowed": [
+          "Tab"
+        ],
+        "min": 1
+      },
+      "notes": []
+    },
+    {
+      "name": "Update",
+      "publicName": "Update",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "label": {
+          "type": "string",
+          "description": "The primary label displayed in the sidebar, typically used for dates or version identifiers",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "description": "Supporting description displayed below the label, commonly used for version numbers or brief categorizations",
+          "required": false
+        },
+        "tags": {
+          "type": "array",
+          "description": "Optional array of tag strings to categorize the update",
+          "required": false
+        }
+      },
+      "notes": []
+    },
+    {
+      "name": "Video",
+      "publicName": "Video",
+      "sources": {
+        "renderer": true,
+        "deploymentValidator": true,
+        "editorSchema": true
+      },
+      "props": {
+        "src": {
+          "type": "string",
+          "required": true
+        },
+        "renderType": {
+          "type": "string",
+          "enum": [
+            "video",
+            "iframe"
+          ],
+          "default": "video",
+          "required": false
+        },
+        "poster": {
+          "type": "string",
+          "required": false
+        },
+        "width": {
+          "type": "integer",
+          "required": true
+        },
+        "height": {
+          "type": "integer",
+          "required": true
+        },
+        "duration": {
+          "type": "number",
+          "required": false
+        },
+        "autoplay": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "loop": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "muted": {
+          "type": "boolean",
+          "default": false,
+          "required": false
+        },
+        "controls": {
+          "type": "boolean",
+          "default": true,
+          "required": false
+        },
+        "allowFullScreen": {
+          "type": "boolean",
+          "default": true,
+          "required": false
+        },
+        "title": {
+          "type": "string",
+          "required": false
+        },
+        "caption": {
+          "type": "string",
+          "required": false
+        },
+        "transcript": {
+          "type": "string",
+          "required": false
+        },
+        "style": {
+          "type": "string",
+          "required": false
+        },
+        "vector-hash": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "notes": []
+    }
+  ],
+  "valueMaps": {
+    "Callout": {
+      "kind": {
+        "note": "info",
+        "warning": "alert",
+        "error": "danger",
+        "caution": "alert",
+        "important": "info",
+        "check": "success"
+      }
+    }
+  },
+  "frontmatter": {
+    "required": [
+      "title"
+    ],
+    "optional": [
+      "description",
+      "metaTitle",
+      "metaDescription",
+      "ogImage",
+      "canonical",
+      "jsonLd"
+    ]
+  },
+  "navigation": {
+    "rootKeys": [
+      "languages",
+      "versions",
+      "tabs",
+      "dropdowns",
+      "menus",
+      "groups",
+      "pages"
+    ],
+    "rule": "exactly one semantic property per container; containers recurse"
+  },
+  "redirects": {
+    "supported": {
+      "exact": true,
+      "namedParam": true,
+      "trailingWildcard": false,
+      "splat": false
+    },
+    "defaultStatus": 308,
+    "caseSensitive": true,
+    "segmentCountMustMatch": true
+  },
+  "anchors": {
+    "customIds": false,
+    "slugger": "rehype-slug (github-slugger), dashes collapsed"
+  },
+  "images": {
+    "relativeSourcesResolve": false,
+    "note": "loader accepts relative paths but deployment uploads no repo assets; use ingested absolute URLs"
+  },
+  "snippets": {
+    "mdx": true,
+    "jsx": {
+      "allowed": true,
+      "executable": true,
+      "migratorEmits": false
+    }
+  }
+}

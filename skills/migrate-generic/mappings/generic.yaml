@@ -1,0 +1,25 @@
+# Generic HTML → Documentation.AI. Applies to every platform after its own table.
+platform: "*"
+version: 1
+rules:
+  - id: generic/details-expandable
+    tier: T1
+    match: { name: details }
+    to: { name: Expandable, props: { title: $summary } }
+  - id: generic/iframe
+    tier: T3
+    match: { name: iframe }
+    handler: embed-to-iframe
+  - id: generic/video
+    tier: T2
+    match: { name: video }
+    to: { name: Video, props: { src: $src } }
+  - id: generic/script-drop
+    tier: T7
+    match: { name: script }
+    children: drop
+    note: "scripts never survive; the subtree is recorded as excluded by rule"
+  - id: generic/style-drop
+    tier: T7
+    match: { name: style }
+    children: drop

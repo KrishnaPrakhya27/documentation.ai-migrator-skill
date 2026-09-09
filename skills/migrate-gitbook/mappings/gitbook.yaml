@@ -1,0 +1,34 @@
+# GitBook (Git Sync Liquid Markdown / API markdown) → Documentation.AI.
+platform: gitbook
+version: 1
+rules:
+  - id: gitbook/hint
+    tier: T2
+    match: { name: hint }
+    to: { name: Callout, props: { kind: $map(style) } }
+    note: "style info|success|warning|danger → contract valueMaps (warning→alert)"
+  - id: gitbook/tabs
+    tier: T3
+    match: { name: tabs }
+    handler: tabs
+  - id: gitbook/tab
+    tier: T1
+    match: { name: tab }
+    to: { name: Tab, props: { title: $title } }
+  - id: gitbook/details
+    tier: T1
+    match: { name: details }
+    to: { name: Expandable, props: { title: $summary } }
+  - id: gitbook/embed
+    tier: T3
+    match: { name: embed }
+    handler: embed-to-iframe
+  - id: gitbook/content-ref
+    tier: T4
+    match: { name: content-ref }
+    children: unwrap
+    note: "content-ref becomes a plain link paragraph (children carry the link)"
+  - id: gitbook/stepper
+    tier: T3
+    match: { name: stepper }
+    handler: list-to-steps

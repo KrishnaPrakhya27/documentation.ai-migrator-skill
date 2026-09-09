@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tsbuildinfo
+# Run data must never live in this repository (external --workspace only)
+runs/
+.env
+.env.*
+!.env.example

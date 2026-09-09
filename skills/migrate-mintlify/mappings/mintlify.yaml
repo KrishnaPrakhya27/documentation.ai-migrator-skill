@@ -1,0 +1,94 @@
+# Mintlify → Documentation.AI. Near 1:1 MDX with a rename layer.
+platform: mintlify
+version: 1
+rules:
+  - id: mint/note
+    tier: T1
+    match: { name: Note }
+    to: { name: Callout, props: { kind: info } }
+  - id: mint/tip
+    tier: T1
+    match: { name: Tip }
+    to: { name: Callout, props: { kind: tip } }
+  - id: mint/warning
+    tier: T1
+    match: { name: Warning }
+    to: { name: Callout, props: { kind: alert } }
+  - id: mint/info
+    tier: T1
+    match: { name: Info }
+    to: { name: Callout, props: { kind: info } }
+  - id: mint/check
+    tier: T1
+    match: { name: Check }
+    to: { name: Callout, props: { kind: success } }
+  - id: mint/accordion
+    tier: T2
+    match: { name: Accordion }
+    to: { name: Expandable, props: { title: $title } }
+    drop: [icon, defaultOpen]
+  - id: mint/accordion-group
+    tier: T1
+    match: { name: AccordionGroup }
+    to: { name: ExpandableGroup }
+  - id: mint/card-group
+    tier: T2
+    match: { name: CardGroup }
+    to: { name: Columns, props: { cols: $cols } }
+  - id: mint/card
+    tier: T2
+    match: { name: Card }
+    to: { name: Card, props: { title: $title, href: $href, icon: $icon } }
+    drop: [color, horizontal]
+  - id: mint/frame
+    tier: T4
+    match: { name: Frame }
+    handler: frame-to-image
+  - id: mint/tabs
+    tier: T3
+    match: { name: Tabs }
+    handler: tabs
+  - id: mint/tab
+    tier: T1
+    match: { name: Tab }
+    to: { name: Tab, props: { title: $title } }
+  - id: mint/steps
+    tier: T1
+    match: { name: Steps }
+    to: { name: Steps }
+  - id: mint/step
+    tier: T2
+    match: { name: Step }
+    to: { name: Step, props: { title: $title, icon: $icon } }
+  - id: mint/code-group
+    tier: T1
+    match: { name: CodeGroup }
+    to: { name: CodeGroup }
+  - id: mint/tooltip
+    tier: T4
+    match: { name: Tooltip }
+    handler: tooltip-to-abbr
+  - id: mint/badge
+    tier: T4
+    match: { name: Badge }
+    handler: badge-to-span
+  - id: mint/request-example
+    tier: T1
+    match: { name: RequestExample }
+    to: { name: Request }
+  - id: mint/response-example
+    tier: T1
+    match: { name: ResponseExample }
+    to: { name: Response }
+  - id: mint/param-field
+    tier: T1
+    match: { name: ParamField }
+    to: { name: ParamField, props: { name: $name, type: $type, required: $required } }
+  - id: mint/response-field
+    tier: T1
+    match: { name: ResponseField }
+    to: { name: ResponseField, props: { name: $name, type: $type, required: $required } }
+  - id: mint/update
+    tier: T1
+    match: { name: Update }
+    to: { name: Update, props: { label: $label, description: $description } }

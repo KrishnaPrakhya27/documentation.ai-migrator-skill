@@ -1,0 +1,45 @@
+# Document360 → Documentation.AI. Seeded from the Scrut export analysis (Aug 2026):
+# 11 constructs, stable class per component. HTML is converted tree-to-tree.
+platform: document360
+version: 1
+rules:
+  - id: d360/infobox-callout
+    tier: T2
+    match: { name: infoBox }
+    to: { name: Callout, props: { kind: info } }
+  - id: d360/warningbox-callout
+    tier: T2
+    match: { name: warningBox }
+    to: { name: Callout, props: { kind: alert } }
+  - id: d360/errorbox-callout
+    tier: T2
+    match: { name: errorBox }
+    to: { name: Callout, props: { kind: danger } }
+  - id: d360/successbox-callout
+    tier: T2
+    match: { name: successBox }
+    to: { name: Callout, props: { kind: success } }
+  - id: d360/details-expandable
+    tier: T1
+    match: { name: details }
+    to: { name: Expandable, props: { title: $summary } }
+  - id: d360/faq-expandable-group
+    tier: T3
+    match: { name: faq }
+    handler: faq-to-expandable-group
+  - id: d360/tabs
+    tier: T3
+    match: { name: tabs }
+    handler: tabs
+  - id: d360/tab
+    tier: T1
+    match: { name: tab }
+    to: { name: Tab, props: { title: $title } }
+  - id: d360/iframe-embed
+    tier: T3
+    match: { name: iframe }
+    handler: embed-to-iframe
+  - id: d360/video
+    tier: T2
+    match: { name: video }
+    to: { name: Video, props: { src: $src } }
