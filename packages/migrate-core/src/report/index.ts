@@ -55,6 +55,7 @@ function provenanceLines(p: RunProvenance): string[] {
     `- migrator: ${describeMigrator(p.migrator)}`,
     `- pages quarantined (exact-fidelity): ${p.quarantine.exactFidelity}`,
     `- pages held (blocked snippet tokens): ${p.quarantine.blockedSnippet}`,
+    `- pages not written for any reason: ${p.quarantine.total}`,
   ];
 }
 
@@ -69,6 +70,7 @@ export function writeSummary(workspace: string, s: { pages: number; converted: n
 | Converted | ${s.converted} |
 | Held (blocked snippet tokens) | ${s.provenance.quarantine.blockedSnippet} |
 | Quarantined (exact-fidelity) | ${s.provenance.quarantine.exactFidelity} |
+| Not written, all reasons | ${s.provenance.quarantine.total} |
 | Component clusters | ${s.clusters} |
 | Assets | ${s.assets} |
 | Gates failing | ${failed} |

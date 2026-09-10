@@ -30,6 +30,22 @@ export interface ProvenanceInput {
 }
 
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
+const DIFF_HASH = /^[0-9a-f]{64}$/;
+
+/**
+ * Every field of a session's recorded provenance, or the name of the first one that is
+ * wrong. A half-written record pins nothing, so verify must not accept one.
+ */
+export function migratorProvenanceProblem(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return 'migrator';
+  const migrator = value as Partial<MigratorProvenance>;
+  if (typeof migrator.gitSha !== 'string' || !COMMIT_SHA.test(migrator.gitSha)) return 'migrator.gitSha';
+  if (typeof migrator.dirty !== 'boolean') return 'migrator.dirty';
+  if (migrator.dirtyHash !== null && (typeof migrator.dirtyHash !== 'string' || !DIFF_HASH.test(migrator.dirtyHash))) return 'migrator.dirtyHash';
+  if (migrator.dirty && migrator.dirtyHash === null) return 'migrator.dirtyHash';
+  if (typeof migrator.packageVersion !== 'string' || !migrator.packageVersion) return 'migrator.packageVersion';
+  return undefined;
+}
 
 export function gitRunnerFor(repoRoot: string): GitRunner {
   // GIT_OPTIONAL_LOCKS=0 keeps `git status` from refreshing the index, so provenance capture never writes to the checkout

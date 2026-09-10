@@ -162,12 +162,20 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       else if (typeof attr.value === 'string') attrs[attr.name] = attr.value;
       else attrs[attr.name] = literalExpression(String(attr.value?.value ?? '')) ?? null;
     }
-    const numeric = (value: unknown) => typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : undefined;
+    // A dimension the source states but this parser cannot read is a loss, not an absence:
+    // it stops the page rather than shipping an image the renderer will size differently.
+    const numeric = (name: 'width' | 'height') => {
+      const value = attrs[name];
+      if (value === undefined || value === null || value === '') return undefined;
+      if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+      if (typeof value === 'string' && /^\d+$/.test(value) && Number(value) > 0) return Number(value);
+      throw new Error(`${opts.file}: image ${String(attrs.src ?? '')} has an unreadable ${name} ${JSON.stringify(value)}; the source states a dimension the migrator cannot carry`);
+    };
     return {
       id: idOf(node, path), src: srcOf(node), type: 'image',
       url: typeof attrs.src === 'string' ? attrs.src : '', alt: typeof attrs.alt === 'string' ? attrs.alt : '',
       title: typeof attrs.title === 'string' ? attrs.title : undefined,
-      width: numeric(attrs.width), height: numeric(attrs.height),
+      width: numeric('width'), height: numeric('height'),
     };
   };
 

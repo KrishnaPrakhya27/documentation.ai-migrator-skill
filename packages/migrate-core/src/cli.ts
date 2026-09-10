@@ -50,8 +50,8 @@ import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver, site
 import type { AssetProviderOptions } from './assets/providers.js';
 import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
 import { runGates, canonicalHash, previewPushBlockers, type GateResult, type SourceEvidence } from './verify/gates.js';
-import { loadRawSourcePages, type RawSourcePage } from './verify/source-truth.js';
-import { runBrowserContentGate, runBrowserFragmentGate, type BrowserAnchor } from './verify/browser.js';
+import { loadRawSourcePages, rawSourceIr, type RawSourcePage } from './verify/source-truth.js';
+import { runBrowserContentGate, runBrowserFragmentGate, type BrowserAnchor, type ExpectedNavigationEntry } from './verify/browser.js';
 import { authoredContentSnapshot, fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from './verify/fidelity.js';
 import { unconvertedFidelityRecord, writeFidelityRecords, type FidelityRecord } from './verify/fidelity-records.js';
 import { writeMigrationBranch } from './write/migration-branch.js';
@@ -302,6 +302,27 @@ function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | un
     }
   }
   return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route) };
+}
+
+/** The Documentation.AI renderer's sidebar container, used to check the deployed navigation. */
+const DAI_PREVIEW_NAV_SELECTOR = 'nav, aside, [role=navigation]';
+
+/**
+ * The sidebar the source states, flattened in reading order. A page placed in two groups
+ * appears twice, which is what the rendered sidebar must show.
+ */
+function expectedSidebar(tree: Tree): ExpectedNavigationEntry[] {
+  const byId = new Map(tree.pages.map((page) => [page.id, page]));
+  const out: ExpectedNavigationEntry[] = [];
+  const walk = (nodes: SourceNavigationNode[], groupPath: string[]): void => {
+    for (const node of nodes) {
+      if (node.type === 'group') { walk(node.children, [...groupPath, node.label]); continue; }
+      const page = byId.get(node.pageId);
+      if (page?.migrate && page.newPath) out.push({ groupPath, label: node.title ?? page.sidebarTitle ?? page.title });
+    }
+  };
+  walk(tree.navigation ?? [], []);
+  return out;
 }
 
 /** New paths (without extension) of the pages whose converted file exists in output/. */
@@ -933,9 +954,28 @@ async function main() {
         const browser = await runBrowserFragmentGate(previewUrl, tree.pages, browserAnchors);
         const index = gates.findIndex((g) => g.id === 'browser-fragments');
         if (index >= 0) gates[index] = browser; else gates.push(browser);
-        const browserContent = await runBrowserContentGate(previewUrl, tree.pages.map((page) => ({ ...page, doc: docs.find((doc) => doc.pageId === page.id) })));
+        // The preview is compared against the raw source, not against the snapshot: the same
+        // standard the local gates apply, on the deployed page.
+        const rawByPageId = new Map((sourceEvidence?.pages ?? []).map((page) => [page.pageId, page]));
+        const manifest = readManifest(workspace);
+        const browserContent = await runBrowserContentGate(
+          previewUrl,
+          tree.pages.map((page) => {
+            const raw = rawByPageId.get(page.id);
+            const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile) : undefined;
+            return { ...page, doc: fromSource ?? docs.find((doc) => doc.pageId === page.id) };
+          }),
+          {
+            routes: writtenPagePaths(workspace, tree),
+            assetUrls: new Map(Object.entries(manifest.byUrl).flatMap(([url, hash]) => { const final = manifest.entries[hash]?.finalUrl; return final ? [[url, final] as [string, string]] : []; })),
+            navigation: expectedSidebar(tree),
+            navSelector: DAI_PREVIEW_NAV_SELECTOR,
+            siteName: typeof readPlatformMeta(workspace).name === 'string' ? readPlatformMeta(workspace).name : undefined,
+          },
+        );
         const contentIndex = gates.findIndex((g) => g.id === 'browser-content');
-        if (contentIndex >= 0) gates[contentIndex] = browserContent; else gates.push(browserContent);
+        if (contentIndex >= 0) gates[contentIndex] = browserContent.gate; else gates.push(browserContent.gate);
+        writeJson(join(workspace, 'report', 'preview-routes.json'), browserContent.routes);
       }
       writeGates(workspace, gates, canonicalHash(join(workspace, 'output')));
       const clusters = existsSync(join(workspace, 'inventory', 'components.json')) ? readJson<ClusterEntry[]>(join(workspace, 'inventory', 'components.json')) : [];

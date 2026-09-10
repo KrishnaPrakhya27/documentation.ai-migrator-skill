@@ -152,9 +152,21 @@ describe('migrator provenance', () => {
     expect(() => countQuarantine(ws)).toThrow(/quarantine\/legacy\.json records no quarantine kind/);
   });
 
-  it('refuses a session that records no migrator provenance', () => {
+  it('refuses a session whose migrator provenance is missing or incomplete, naming the field', () => {
     const ws = temp('dai-legacy-'); ensureWorkspace(ws);
-    writeFileSync(join(ws, 'session.json'), JSON.stringify({ migrationId: 'mig-1', stages: {} }));
-    expect(() => readSession(ws)).toThrow(/records no migrator provenance/);
+    const write = (migrator: unknown) => writeFileSync(join(ws, 'session.json'), JSON.stringify({ migrationId: 'mig-1', stages: {}, ...(migrator === undefined ? {} : { migrator }) }));
+    write(undefined);
+    expect(() => readSession(ws)).toThrow(/no usable migrator provenance \(migrator\)/);
+    // Every field pins something, so a record missing any of them cannot certify output.
+    const complete = { gitSha: 'a'.repeat(40), dirty: false, dirtyHash: null, packageVersion: '0.1.0' };
+    for (const [field, value] of [['gitSha', 'not-a-sha'], ['dirty', 'yes'], ['dirtyHash', 'short'], ['packageVersion', '']] as const) {
+      write({ ...complete, [field]: value });
+      expect(() => readSession(ws), field).toThrow(new RegExp(`migrator\\.${field}`));
+    }
+    // A dirty checkout without the hash of what differs pins nothing either.
+    write({ ...complete, dirty: true, dirtyHash: null });
+    expect(() => readSession(ws)).toThrow(/migrator\.dirtyHash/);
+    write(complete);
+    expect(readSession(ws).migrator.gitSha).toBe('a'.repeat(40));
   });
 });

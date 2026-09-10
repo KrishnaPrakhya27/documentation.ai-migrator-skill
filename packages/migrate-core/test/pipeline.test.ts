@@ -8,7 +8,7 @@ import { fingerprint } from '../src/scrape/fingerprint.js';
 import { legalisePath, headingSlug, slugify } from '../src/urls/slugger.js';
 import { defaultUrlPlan, redirectMaps, anchorMap, applyUrlPlan } from '../src/urls/plan.js';
 import { buildDocumentationNavigation, buildNavigation, pagesWithoutPlacement, placedPageIds, type Tree, type TreePage } from '../src/nav/tree.js';
-import { validateNavigation } from '@dai/content-contract';
+import { loadContract, validateNavigation } from '@dai/content-contract';
 import { RulesEngine, loadMappings, type MappingTable } from '../src/components/rules-engine.js';
 import { DecisionLog } from '../src/log/decisions.js';
 import { Fetcher, isPublicAddress, type FetchImpl } from '../src/scrape/fetcher.js';
@@ -153,6 +153,28 @@ describe('gates', () => {
     const changed = markdownToIr(`---\ntitle: Quickstart\n---\n\nOne. Two.\n\n<Card title="Read">Open</Card>\n`, { platform: 'mintlify', file: 'quickstart.md', pageId: 'p' });
     expect(fidelityEqual(authoredContentSnapshot(source), authoredContentSnapshot(changed))).toBe(false);
   });
+  it('maps every contract component name on re-parse, and refuses an image dimension it cannot read', () => {
+    // The 'dai' platform must recognise the contract's component list as it stands, not a copy of it.
+    const emittable = loadContract().components.filter((component) => !component.notes.some((note) => note.includes('never emitted by the migrator')));
+    expect(emittable.length).toBeGreaterThan(10);
+    // A few contract components are first-class IR nodes rather than generic components.
+    const nativeNode: Record<string, string> = { Image: 'image' };
+    for (const component of emittable) {
+      const mdx = `---\ntitle: T\n---\n\n<${component.name}>text</${component.name}>\n`;
+      const doc = markdownToIr(mdx, { platform: 'dai', file: 'a.mdx', pageId: 'p' });
+      const block = doc.children[0];
+      expect(block.type, `${component.name} should re-parse as a resolved target node`).toBe(nativeNode[component.name] ?? 'dai');
+    }
+    // A name the contract does not define stays an unresolved source component, so a rule must handle it.
+    expect(markdownToIr('---\ntitle: T\n---\n\n<NotInContract>x</NotInContract>\n', { platform: 'dai', file: 'a.mdx', pageId: 'p' }).children[0].type).toBe('component');
+    // An unreadable dimension is a stated fact the migrator cannot carry: it stops rather than dropping it.
+    expect(() => markdownToIr('---\ntitle: T\n---\n\n<Image src="/a.png" alt="a" width="12rem" />\n', { platform: 'dai', file: 'a.mdx', pageId: 'p' })).toThrow(/unreadable width/);
+    expect(() => markdownToIr('---\ntitle: T\n---\n\n<Image src="/a.png" alt="a" height={0} />\n', { platform: 'dai', file: 'a.mdx', pageId: 'p' })).toThrow(/unreadable height/);
+    // An image that states no dimension is unchanged.
+    const plain = markdownToIr('---\ntitle: T\n---\n\n<Image src="/a.png" alt="a" />\n', { platform: 'dai', file: 'a.mdx', pageId: 'p' }).children[0];
+    expect(plain.type === 'image' && plain.width).toBeUndefined();
+  });
+
   it('round-trips target MDX without losing code metadata, links, images, steps, or descriptions', () => {
     const source = [
       '---', 'title: Acme Quickstart', 'description: Exact description.', '---', '',
@@ -296,11 +318,56 @@ describe('gates', () => {
   });
   it('fails the rendered-content gate when a description or short paragraph disappears', async () => {
     const doc = markdownToIr(`---\ntitle: Quickstart\ndescription: Exact description.\n---\n\nOne.\n\nTwo.\n`, { platform: 'mintlify', file: 'quickstart.md', pageId: 'p' });
-    const pass = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'quickstart', migrate: true, doc }], async () => '<html><body><main><h1>Quickstart</h1><p>Exact description.</p><p>One.</p><p>Two.</p></main></body></html>');
-    expect(pass.status).toBe('pass');
-    const fail = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'quickstart', migrate: true, doc }], async () => '<html><body><main><h1>Quickstart</h1><p>One. Two.</p></main></body></html>');
-    expect(fail.status).toBe('fail');
-    expect(fail.samples?.join('\n')).toMatch(/description|two\./i);
+    const page = { id: 'p', newPath: 'quickstart', migrate: true, doc };
+    const pass = await runBrowserContentGate('https://preview.example/', [page], async () => '<html><body><main><h1>Quickstart</h1><p>Exact description.</p><p>One.</p><p>Two.</p></main></body></html>');
+    expect(pass.gate.status).toBe('pass');
+    expect(pass.routes).toEqual([{ route: 'quickstart', status: 'pass', problems: [] }]);
+    const fail = await runBrowserContentGate('https://preview.example/', [page], async () => '<html><body><main><h1>Quickstart</h1><p>One. Two.</p></main></body></html>');
+    expect(fail.gate.status).toBe('fail');
+    expect(fail.gate.samples?.join('\n')).toMatch(/description|two\./i);
+  });
+  it('reads rendered text the way a browser lays it out, so inline markup before punctuation still matches', async () => {
+    const doc = markdownToIr(`---\ntitle: T\n---\n\nSee [docs](/docs).\n`, { platform: 'mintlify', file: 'a.md', pageId: 'p' });
+    const result = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'a', migrate: true, doc }], async () => '<html><body><main><h1>T</h1><p>See <a href="/docs">docs</a>.</p></main></body></html>');
+    // Joining child nodes with a space would render this as "see docs ." and never find the source segment.
+    expect(result.gate.status).toBe('pass');
+  });
+  it('fails when the preview renders text no source accounts for', async () => {
+    const doc = markdownToIr(`---\ntitle: T\n---\n\nOne.\n`, { platform: 'mintlify', file: 'a.md', pageId: 'p' });
+    const result = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'a', migrate: true, doc }], { render: async () => '<html><body><main><h1>T</h1><p>One.</p><div>\u2318I Ask Assistant</div></main></body></html>' });
+    expect(result.gate.status).toBe('fail');
+    expect(result.routes[0].residual).toContain('ask assistant');
+    // The target platform's own controls are allowed; anything else is not.
+    const allowed = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'a', migrate: true, doc }], { render: async () => '<html><body><main><h1>T</h1><p>One.</p><button>Copy</button></main></body></html>' });
+    expect(allowed.gate.status).toBe('pass');
+  });
+  it('fails a route whose card link, image alt or heading outline differs, and one with no source document', async () => {
+    const doc = markdownToIr(`---\ntitle: T\n---\n\n## Section\n\n![Alt text](https://cdn.source/a.png)\n\n[Guide](/guides/setup)\n`, { platform: 'mintlify', file: 'a.md', pageId: 'p' });
+    const page = { id: 'p', newPath: 'a', migrate: true, doc };
+    const body = (extra: string) => `<html><body><main><h1>T</h1><h2>Section</h2><img src="https://cdn.hosted/a.png" alt="Alt text"><p><a href="/guides/setup">Guide</a></p>${extra}</main></body></html>`;
+    const options = { routes: new Set(['a', 'guides/setup']), assetUrls: new Map([['https://cdn.source/a.png', 'https://cdn.hosted/a.png']]) };
+    expect((await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('') })).gate.status).toBe('pass');
+    // An internal link that lands on no migrated page.
+    const broken = await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('<p><a href="/missing">Gone</a></p>') });
+    expect(broken.routes[0].problems.join(' ')).toContain('/missing');
+    // An image still served from the source host.
+    const unhosted = await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('').replace('https://cdn.hosted/a.png', 'https://cdn.source/a.png') });
+    expect(unhosted.routes[0].problems.join(' ')).toContain('expected the hosted');
+    // A migrated page the run cannot judge is a failure, never a silent skip.
+    const blind = await runBrowserContentGate('https://preview.example/', [{ id: 'q', newPath: 'b', migrate: true }], { ...options, render: async () => body('') });
+    expect(blind.gate.status).toBe('fail');
+    expect(blind.routes[0].problems[0]).toContain('no source document');
+  });
+  it('checks the rendered sidebar shows every placement, including a page placed twice', async () => {
+    const doc = markdownToIr(`---\ntitle: Home\n---\n\nOne.\n`, { platform: 'mintlify', file: 'index.md', pageId: 'p' });
+    const sidebar = (labels: string[]) => `<html><head><title>Home - Acme Docs</title></head><body><nav>${labels.map((label) => `<a href="/x">${label}</a>`).join('')}</nav><main><h1>Home</h1><p>One.</p></main></body></html>`;
+    const navigation = [{ groupPath: ['Welcome'], label: 'Home' }, { groupPath: ['Getting Started'], label: 'Home' }];
+    const options = { navigation, navSelector: 'nav', siteName: 'Acme Docs' };
+    const pass = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'index', migrate: true, doc }], { ...options, render: async () => sidebar(['Home', 'Home']) });
+    expect(pass.gate.status).toBe('pass');
+    const once = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'index', migrate: true, doc }], { ...options, render: async () => sidebar(['Home']) });
+    expect(once.gate.status).toBe('fail');
+    expect(once.routes.find((route) => route.route === '(site)')!.problems.join(' ')).toContain('sidebar labels differ');
   });
   it('rejects a private preview target unless local testing is explicitly enabled', async () => {
     const previous = process.env.DAI_ALLOW_LOCAL_PREVIEW;

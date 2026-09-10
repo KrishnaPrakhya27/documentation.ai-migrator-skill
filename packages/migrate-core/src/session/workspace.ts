@@ -18,7 +18,7 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, statSync
 import { join, resolve } from 'node:path';
 import { homedir, platform as osPlatform } from 'node:os';
 import { sha256 } from './ids.js';
-import type { MigratorProvenance } from './provenance.js';
+import { migratorProvenanceProblem, type MigratorProvenance } from './provenance.js';
 
 export const WORKSPACE_DIRS = ['source-cache', 'snapshot', 'inventory', 'plan', 'output', 'ledger', 'quarantine', 'logging', 'report', 'assets-original', 'assets-ready'] as const;
 
@@ -116,7 +116,8 @@ export function readSession(workspace: string): Session {
   const p = sessionPath(workspace);
   if (!existsSync(p)) throw new Error(`No session at ${p}. Run "dai-migrate init" first.`);
   const session = JSON.parse(readFileSync(p, 'utf8')) as Session;
-  if (typeof session.migrator?.gitSha !== 'string') throw new Error(`${p} records no migrator provenance: it was created by a migrator build that predates provenance pinning. Re-run "dai-migrate init" with this migrator.`);
+  const problem = migratorProvenanceProblem(session.migrator);
+  if (problem) throw new Error(`${p} has no usable migrator provenance (${problem}): it was created by a migrator build that predates provenance pinning, or the file was edited. Re-run "dai-migrate init" with this migrator.`);
   return session;
 }
 

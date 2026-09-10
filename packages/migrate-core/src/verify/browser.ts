@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { GateResult } from './gates.js';
 import { assertPublicHost } from '../scrape/fetcher.js';
-import { find, parseHtml, type Dom } from '../ir/from-html.js';
+import { find, findAll, parseHtml, type Dom } from '../ir/from-html.js';
 import { inlineText, walkBlocks, type DocIR } from '../ir/types.js';
 
 const execFileAsync = promisify(execFile);
@@ -135,50 +135,231 @@ export async function runBrowserFragmentGate(
   };
 }
 
-function visibleText(node: Dom): string {
+/** Elements whose boundaries are line breaks for a reader, so text either side must not glue together. */
+const BLOCK_ELEMENTS = new Set(['address', 'article', 'aside', 'blockquote', 'br', 'div', 'dd', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'li', 'main', 'nav', 'ol', 'p', 'pre', 'section', 'table', 'td', 'th', 'tr', 'ul']);
+const INVISIBLE_ELEMENTS = new Set(['script', 'style', 'noscript', 'template', 'svg']);
+
+/**
+ * The text a reader sees, concatenated exactly as the browser lays it out: no separator
+ * between inline nodes, a newline at block boundaries. Joining every child with a space
+ * (the previous behaviour) inserted spaces inside words split by inline markup, so a
+ * paragraph containing a link before punctuation could never be found in the source.
+ */
+export function visibleText(node: Dom): string {
   if (node.type === 'text') return node.data;
-  if (['script', 'style', 'noscript', 'nav', 'aside', 'footer', 'button'].includes(node.name) || node.attribs['aria-hidden'] === 'true') return '';
-  return node.children.map(visibleText).join(' ');
+  if (node.type !== 'tag') return '';
+  if (INVISIBLE_ELEMENTS.has(node.name) || node.attribs['aria-hidden'] === 'true' || node.attribs.hidden !== undefined) return '';
+  const inner = node.children.map(visibleText).join('');
+  return BLOCK_ELEMENTS.has(node.name) ? `\n${inner}\n` : inner;
 }
 
 function normaliseVisible(value: string): string {
-  return value.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+  return value.replace(/\u00a0/g, ' ').replace(/\u200b/g, '').replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
 }
 
-/** Every authored text segment must appear in the rendered preview, in source order. */
+/** One rendered route, judged against the source it was migrated from. */
+export interface PreviewRouteResult {
+  route: string;
+  status: 'pass' | 'fail';
+  problems: string[];
+  /** Rendered article text that no source segment accounts for, after the platform's own chrome is allowed. */
+  residual?: string;
+}
+
+/** Ordered sidebar the preview must render: group labels outermost first, then the page labels under each. */
+export interface ExpectedNavigationEntry { groupPath: string[]; label: string }
+
+export interface BrowserContentOptions {
+  render?: PageRenderer;
+  /** Strings the target platform renders inside the article itself (copy buttons and the like). Anything else left over fails. */
+  previewChrome?: string[];
+  /** Routes the migration wrote, so an internal link that resolves to nothing fails. */
+  routes?: ReadonlySet<string>;
+  /** Final hosted URL per original asset URL; an image still pointing at the source host fails. */
+  assetUrls?: ReadonlyMap<string, string>;
+  /** The sidebar the source states, in order, including a page placed in more than one group. */
+  navigation?: ExpectedNavigationEntry[];
+  /** Selector for the rendered navigation; the check is skipped, and reported, when the target platform declares none. */
+  navSelector?: string;
+  siteName?: string;
+}
+
+const DEFAULT_PREVIEW_CHROME = ['copy', 'copied', 'copy to clipboard', 'ask ai', 'on this page', 'edit this page', 'was this page helpful?', 'yes', 'no', 'previous', 'next'];
+/** What remains between matched segments that carries no information: punctuation, list markers, digits from generated numbering. */
+const INSIGNIFICANT_RESIDUAL = /^[\s\p{P}\p{S}\d]*$/u;
+
+/** The authored segments of a document, in reading order: what the preview must show and nothing more. */
+function documentSegments(doc: DocIR): string[] {
+  const segments: string[] = [];
+  const push = (value: string | undefined) => { const text = normaliseVisible(value ?? ''); if (text) segments.push(text); };
+  push(doc.frontmatter.title);
+  push(doc.frontmatter.description);
+  walkBlocks(doc.children, (block) => {
+    if (block.type === 'paragraph' || block.type === 'heading') push(inlineText(block.children));
+    else if (block.type === 'code') push(block.value);
+    else if (block.type === 'table') for (const row of block.children) for (const cell of row.children) push(inlineText(cell.children));
+    else if (block.type === 'component' || block.type === 'dai') for (const key of ['title', 'summary', 'description', 'label', 'cta']) { const value = block.props[key]; if (typeof value === 'string') push(value); }
+    // Image alt text is not rendered text; it is compared attribute to attribute below.
+    else if (block.type === 'figure' && block.caption) push(inlineText(block.caption));
+  });
+  return segments;
+}
+
+/** Heading outline of a document, ignoring the H1 the target renders from the title. */
+function sourceOutline(doc: DocIR): string[] {
+  const out: string[] = [];
+  walkBlocks(doc.children, (block) => { if (block.type === 'heading' && block.depth > 1) out.push(`${block.depth}:${normaliseVisible(inlineText(block.children))}`); });
+  return out;
+}
+
+function sourceLinkTargets(doc: DocIR): Set<string> {
+  const urls = new Set<string>();
+  walkBlocks(doc.children, (block) => {
+    if (block.type === 'paragraph' || block.type === 'heading') { for (const inline of block.children) if (inline.type === 'link') urls.add(inline.url); }
+    else if (block.type === 'component' || block.type === 'dai') { const href = block.props.href; if (typeof href === 'string') urls.add(href); }
+  });
+  return urls;
+}
+
+function sourceImages(doc: DocIR): Array<{ src: string; alt?: string }> {
+  const images: Array<{ src: string; alt?: string }> = [];
+  walkBlocks(doc.children, (block) => {
+    if (block.type === 'image') images.push({ src: block.url, alt: block.alt });
+    else if (block.type === 'figure') images.push({ src: block.image.url, alt: block.image.alt });
+    else if (block.type === 'paragraph') for (const inline of block.children) if (inline.type === 'image') images.push({ src: inline.url, alt: inline.alt });
+  });
+  return images;
+}
+
+/**
+ * Every authored segment must appear in the rendered preview in order, and the
+ * rendered article must contain nothing else: text with no source is how platform
+ * chrome reached the last migration unnoticed. Links, images, the heading outline
+ * and the sidebar are checked on the same pass, one report row per route.
+ */
 export async function runBrowserContentGate(
   previewUrl: string,
   pages: Array<BrowserPage & { doc?: DocIR }>,
-  render: PageRenderer = chromeDump,
-): Promise<GateResult> {
-  let failures = 0; const samples: string[] = []; let checked = 0;
-  for (const page of pages.filter((entry) => entry.migrate && entry.newPath && entry.doc)) {
-    checked++;
+  options: BrowserContentOptions | PageRenderer = {},
+): Promise<{ gate: GateResult; routes: PreviewRouteResult[] }> {
+  const opts: BrowserContentOptions = typeof options === 'function' ? { render: options } : options;
+  const render = opts.render ?? chromeDump;
+  const allowed = (opts.previewChrome ?? DEFAULT_PREVIEW_CHROME).map(normaliseVisible).filter(Boolean);
+  const routes: PreviewRouteResult[] = [];
+
+  for (const page of pages.filter((entry) => entry.migrate)) {
+    const route = page.newPath ?? page.id;
+    const problems: string[] = [];
+    // A page with no source document cannot be judged, so it is a failure rather than a silent skip.
+    if (!page.newPath) { routes.push({ route, status: 'fail', problems: ['migrated page has no output route'] }); continue; }
+    if (!page.doc) { routes.push({ route, status: 'fail', problems: ['no source document to compare the rendered page against'] }); continue; }
+
     let html: string;
     try {
-      html = await render(routeUrl(previewUrl, page.newPath!));
+      html = await render(routeUrl(previewUrl, page.newPath));
       if (!/<html\b/i.test(html) || /<body[^>]*\bclass=["'][^"']*\bneterror\b/i.test(html) || /\bid=["']main-frame-error["']/i.test(html)) throw new Error('preview did not render a valid page');
+    } catch (error) {
+      routes.push({ route, status: 'fail', problems: [`browser load failed: ${(error as Error).message}`] });
+      continue;
     }
-    catch (error) { failures++; if (samples.length < 8) samples.push(`${page.newPath}: browser load failed: ${(error as Error).message}`); continue; }
+
     const root = parseHtml(html);
-    const scope = find(root, 'article') ?? find(root, 'main') ?? find(root, '[role=main]') ?? find(root, 'body') ?? root;
-    const rendered = normaliseVisible(visibleText(scope));
-    const segments: string[] = [];
-    for (const value of [page.doc!.frontmatter.title, page.doc!.frontmatter.description]) if (typeof value === 'string' && normaliseVisible(value)) segments.push(normaliseVisible(value));
-    walkBlocks(page.doc!.children, (block) => {
-      if (block.type === 'paragraph' || block.type === 'heading') { const value = normaliseVisible(inlineText(block.children)); if (value) segments.push(value); }
-      else if (block.type === 'code') { const value = normaliseVisible(block.value); if (value) segments.push(value); }
-      else if (block.type === 'table') for (const row of block.children) for (const cell of row.children) { const value = normaliseVisible(inlineText(cell.children)); if (value) segments.push(value); }
-      else if (block.type === 'component' || block.type === 'dai') for (const key of ['title', 'summary', 'description', 'label']) { const value = block.props[key]; if (typeof value === 'string' && normaliseVisible(value)) segments.push(normaliseVisible(value)); }
-      else if (block.type === 'image' && block.alt) segments.push(normaliseVisible(block.alt));
-      else if (block.type === 'figure' && block.image.alt) segments.push(normaliseVisible(block.image.alt));
-    });
+    const article = find(root, 'article') ?? find(root, 'main') ?? find(root, '[role=main]') ?? find(root, 'body') ?? root;
+    const rendered = normaliseVisible(visibleText(article));
+
+    // Segments in order; the text between consecutive matches is residual and must be insignificant.
+    const segments = documentSegments(page.doc);
     let cursor = 0;
+    const residual: string[] = [];
     for (const segment of segments) {
       const index = rendered.indexOf(segment, cursor);
-      if (index < 0) { failures++; if (samples.length < 8) samples.push(`${page.newPath}: missing/out-of-order “${segment.slice(0, 80)}”`); }
-      else cursor = index + segment.length;
+      if (index < 0) { problems.push(`missing or out of order: “${segment.slice(0, 80)}”`); continue; }
+      residual.push(rendered.slice(cursor, index));
+      cursor = index + segment.length;
     }
+    residual.push(rendered.slice(cursor));
+    const unexplained = residual
+      .map((piece) => allowed.reduce((text, chrome) => text.split(chrome).join(' '), piece))
+      .map((piece) => piece.trim())
+      .filter((piece) => piece && !INSIGNIFICANT_RESIDUAL.test(piece));
+    if (unexplained.length) problems.push(`rendered text with no source: ${unexplained.slice(0, 3).map((piece) => `“${piece.slice(0, 60)}”`).join(', ')}`);
+
+    // The outline the reader navigates by.
+    const renderedOutline = findAll(article, 'h2, h3, h4, h5, h6').map((heading) => `${Number(heading.name.slice(1))}:${normaliseVisible(visibleText(heading))}`);
+    const expectedOutline = sourceOutline(page.doc);
+    if (renderedOutline.join('|') !== expectedOutline.join('|')) problems.push(`heading outline differs: rendered ${JSON.stringify(renderedOutline)}, source ${JSON.stringify(expectedOutline)}`);
+
+    // Links: internal ones must land on a migrated route, external ones must be the source's own.
+    const sourceTargets = sourceLinkTargets(page.doc);
+    for (const anchor of findAll(article, 'a[href]')) {
+      const href = anchor.attribs.href;
+      if (!href || href.startsWith('#')) continue;
+      if (href.startsWith('/')) {
+        const target = href.split(/[?#]/)[0].replace(/^\/+|\/$/g, '') || 'index';
+        if (opts.routes && !opts.routes.has(target)) problems.push(`internal link ${href} resolves to no migrated page`);
+      } else if (/^https?:/i.test(href) && sourceTargets.size && !sourceTargets.has(href)) {
+        problems.push(`external link ${href} is not one the source states`);
+      }
+    }
+
+    // Images: rehosted, and still carrying the alt text the source wrote.
+    const expectedImages = sourceImages(page.doc);
+    const renderedImages = findAll(article, 'img');
+    if (renderedImages.length !== expectedImages.length) problems.push(`image count differs: rendered ${renderedImages.length}, source ${expectedImages.length}`);
+    renderedImages.forEach((image, index) => {
+      const expected = expectedImages[index];
+      if (!expected) return;
+      const alt = image.attribs.alt ?? '';
+      if (normaliseVisible(alt) !== normaliseVisible(expected.alt ?? '')) problems.push(`image ${index + 1} alt is ${JSON.stringify(alt)}, source states ${JSON.stringify(expected.alt ?? '')}`);
+      const src = image.attribs.src ?? '';
+      if (opts.assetUrls?.size) {
+        const hosted = opts.assetUrls.get(expected.src) ?? expected.src;
+        if (src && hosted && !src.startsWith(hosted) && src !== hosted) problems.push(`image ${index + 1} renders ${src}, expected the hosted ${hosted}`);
+      }
+    });
+
+    routes.push({ route, status: problems.length ? 'fail' : 'pass', problems, ...(unexplained.length ? { residual: unexplained.join(' | ').slice(0, 500) } : {}) });
   }
-  return { id: 'browser-content', status: failures ? 'fail' : 'pass', detail: `${failures} authored text segments missing or out of order across ${checked} rendered preview pages`, count: failures, samples };
+
+  // The sidebar and the site name are properties of the whole preview, checked once on the first route.
+  const first = pages.find((entry) => entry.migrate && entry.newPath);
+  if (first && (opts.navigation?.length || opts.siteName)) {
+    const problems: string[] = [];
+    try {
+      const html = await render(routeUrl(previewUrl, first.newPath!));
+      const root = parseHtml(html);
+      if (opts.siteName) {
+        const title = find(root, 'title');
+        const text = title ? normaliseVisible(visibleText(title)) : '';
+        if (!text.includes(normaliseVisible(opts.siteName))) problems.push(`page title ${JSON.stringify(text)} does not carry the site name ${JSON.stringify(opts.siteName)}`);
+      }
+      if (opts.navigation?.length) {
+        if (!opts.navSelector) problems.push('the target platform declares no navigation selector, so the rendered sidebar cannot be checked');
+        else {
+          const container = find(root, opts.navSelector);
+          if (!container) problems.push(`no rendered navigation matched ${opts.navSelector}`);
+          else {
+            const labels = findAll(container, 'a[href]').map((anchor) => normaliseVisible(visibleText(anchor))).filter(Boolean);
+            const expected = opts.navigation.map((entry) => normaliseVisible(entry.label));
+            if (labels.join('|') !== expected.join('|')) problems.push(`sidebar labels differ: rendered ${JSON.stringify(labels)}, source ${JSON.stringify(expected)}`);
+          }
+        }
+      }
+    } catch (error) {
+      problems.push(`browser load failed: ${(error as Error).message}`);
+    }
+    routes.push({ route: '(site)', status: problems.length ? 'fail' : 'pass', problems });
+  }
+
+  const failed = routes.filter((entry) => entry.status === 'fail');
+  return {
+    gate: {
+      id: 'browser-content',
+      status: failed.length ? 'fail' : 'pass',
+      detail: `${failed.length} of ${routes.length} preview routes differ from the source they were migrated from`,
+      count: failed.length,
+      samples: failed.slice(0, 8).map((entry) => `${entry.route}: ${entry.problems[0]}`),
+    },
+    routes,
+  };
 }

@@ -10,3 +10,17 @@ description: "Acquire hosted Mintlify pages when the source repository is unavai
 - Rendered structure: `span[data-as="p"]` is a paragraph (`paragraphSelectors`); `[data-component-part="step-title"]` and `[data-component-part="card-title"]` are lifted into the Step / Card `title` prop and removed from the children (`@part:`), Step numbers are dropped; `CardGroup` cols come from `style="--cols:n"` (`@style-var:`); the code language comes from the `language` attribute with highlighter ids normalised to fence names (`shellscript` → `bash`, `plaintext` → none) and the `language-*` class as the fallback; callout kind comes from `data-callout-type`.
 - Rendered components lose their MDX names; the profile maps rendered DOM back to source names where the markup is stable (callouts, accordion groups, card grids, steps, tabs, frames). Card `href`s are applied client-side and are absent from the rendered HTML, so the published `.md` is the content source and the HTML is used for reconciliation. Everything else is a T7 candidate and appears in the component plan.
 - Prefer asking the customer for the source repo; scraping a Mintlify site is strictly the fallback.
+
+## Navigation recovery
+The rendered navigation lives in the Next.js Flight payload as `scopedNav`. On scoped deployments `docsConfig.navigation` is stripped to `{"pages": []}` server-side, so `scopedNav` is what the sidebar actually renders and what the migration reproduces. The extractor:
+
+- reassembles the payload from every `self.__next_f.push` chunk before searching it, so a navigation larger than one chunk is not lost;
+- walks every container Mintlify nests navigation under (`versions`, `languages`, `products`, `dropdowns`, `anchors`, `tabs`, `groups`, `pages`), so tabbed and versioned sites keep their structure;
+- records each placement separately, so a page listed in two groups appears in both.
+
+`extractDomSidebarNavigation` reads the rendered `#sidebar-content` (group headings via `.sidebar-group-header`) as a second, independent witness. It is the navigation source on sites that embed none, and elsewhere the `navigation-exact` gate cross-checks the written navigation against a fresh extraction from the frozen source.
+
+`docsConfig` in the same payload carries the site name, colours, logo and favicon; these are written to `inventory/platform-meta.json` and into `documentation.json`.
+
+## Canonical hosts
+A Mintlify site is served under both `<slug>.mintlify.site` and `<slug>.mintlify.app`. The profile declares the pair, so a URL on either host is the same page: the fetch allowlist admits both and every discovered URL is rewritten onto the seed origin. Without this the sitemap Mintlify publishes on the paired host is silently dropped and no page gets sitemap provenance.

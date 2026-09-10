@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated 10 September 2026 after sitemap-structure discovery. Verified by `npm run typecheck`, 65 tests, and end-to-end CLI runs over the synthetic Document360 export, Mintlify fixture repository, and generic smoke repository.
+Last updated 10 September 2026 after the exact-fidelity work. Verified by `npm run typecheck`, the unit tier (`npm test`), the exactness proof tier (`npm run test:proof` against a saved real Mintlify site) and end-to-end CLI runs over the synthetic Document360 export, Mintlify fixture repository, and generic smoke repository.
 
 ## Implemented and verified
 
@@ -17,7 +17,7 @@ Last updated 10 September 2026 after sitemap-structure discovery. Verified by `n
 - Markdown/MDX parsing with GFM, literal-only props, no JavaScript evaluation; single-line JSX elements promoted to block components; inline runs under flow elements kept as paragraphs.
 - Component Conversion Engine: declarative mappings per platform, T0–T4 deterministic, T5 static only, T7 sanitised fragment or quarantine, `drop` rules with subtree ledger marks, per-cluster plan decisions honoured (approve, exclude, quarantine).
 - Assets: download, hash dedupe, SVG sanitisation, `s3` provider (tested with an injected client), `dai-api` provider (wired to the presign/confirm endpoints; blocked until the platform accepts API-key credentials there), failed entries retried.
-- Verification: 18 release gates including block-level ledger coverage, prose and code/table parity, contract validation, navigation, links, redirects, plan pinning, gates bound to the output hash, convert-level determinism, preview contract version, rendered anchors in headless Chrome with resolver pinning.
+- Verification: 30 release gates including verification against the raw acquired source (`source-content-exact`, `source-metadata-exact`, `html-reconciliation`, `chrome-absent`), navigation compared against a fresh extraction from the frozen source, route-by-route preview comparison, migrator provenance pinning, and block-level ledger coverage, prose and code/table parity, contract validation, navigation, links, redirects, plan pinning, gates bound to the output hash, convert-level determinism, preview contract version, rendered anchors in headless Chrome with resolver pinning.
 - Git writer: `refs/heads/migration/<session>`, isolated worktree, host-bound org allowlist (GitHub and GitLab, subgroups), no force-push, protected-branch refusal.
 - Reports: gates, review queue, summary, redirects, anchors, platform gaps, cutover runbook, sitemap list, search canary.
 - Human review is consolidated into exactly four standard gates: scope/structure, conversion plan, pre-push validation, and preview/release. Ambiguity and failed automated checks are exception states, not additional approvals.
@@ -57,3 +57,31 @@ npx tsx packages/migrate-core/src/cli.ts report    --workspace /secure/ws
 ## Testing
 
 Two tiers. `npm test` runs the unit tier (`packages/*/test/**/*.test.ts`): self-contained tests over small synthetic inputs with neutral content that reproduce each structural trap (duplicate sidebar placement, `sidebarTitle` ≠ title, description blockquote next to an authored blockquote, `⌘I` chrome, fenced code with meta, cross-host sitemaps, llms.txt double listing). `npm run test:proof` runs the proof tier (`packages/*/test/proof/**/*.proof.test.ts` through `vitest.proof.config.ts`, excluded from `npm test`): the exactness proof against the saved raw source of a real site, reached only through `DAI_SOURCE_TRUTH_DIR`, a directory holding `truth.json`, `llms.txt`, `robots.txt`, `sitemap.xml`, `html/` and `md/`. That source lives outside this repository, so no customer or demo content is vendored here; the proof run fails immediately, naming the variable and the missing file, when the directory is unset or incomplete. `packages/migrate-core/test/helpers/source-truth.ts` loads and types `truth.json` (`loadTruth`, `pageByPath`, `chromeStrings`); `test/helpers/fixture-fetcher.ts` serves the saved site to the `Fetcher` (`fixtureFetcher`, both site hosts) and a synthetic in-memory site for the unit tier (`syntheticSiteFetcher`), each recording every requested URL. Every proof assertion has a synthetic counterpart in the unit tier so `npm test` proves the mechanism without the external source.
+
+## Exact fidelity
+
+`init --fidelity exact` (the default) is the mode for a customer migration. What it
+guarantees, and where each guarantee is enforced:
+
+| Guarantee | Enforced at |
+|---|---|
+| Title, description and sidebar label come from the source's own statements, never a URL or a theme-decorated `<title>` | `discover`, `inventory`, gate `source-metadata-exact` |
+| Every page the source publishes is migrated; none is invented | `discover`, gates `pages-accounted`, `source-content-exact` |
+| Body blocks match the published source in count and order | gate `source-content-exact` |
+| The rendered page and the published Markdown agree on images, links, code languages and the heading outline | gate `html-reconciliation` |
+| No platform chrome reaches the output | gate `chrome-absent`, profile `chromeStrings` |
+| Group labels, order, nesting and repeated placements match the source, cross-checked against a fresh extraction | gate `navigation-exact` |
+| Missing published Markdown, an unhostable asset, an authored exclusion or a lost placement stops the run | `acquire`, `assets`, `convert`, `nav` |
+| The deployed preview renders the source's content and nothing else | gate `browser-content`, `report/preview-routes.json` |
+| The output was produced by the migrator build the session pinned | gate `migrator-pinned` |
+| A second convert over the same inputs is byte-identical | gate `deterministic-rerun` |
+
+Permissive mode runs the same pipeline and reports the exact family as `not-run`.
+
+## Testing
+
+- `npm test` — unit tier. Synthetic inputs only; no network and no customer content in the repository.
+- `DAI_SOURCE_TRUTH_DIR=<dir> npm run test:proof` — exactness proof against a saved capture of a real
+  documentation site held outside this repository. It runs the pipeline offline, asserts the output
+  against the site's own `truth.json`, and reintroduces each loss a real migration once shipped to
+  confirm the gates fail. The command fails, rather than skipping, when the variable is unset.

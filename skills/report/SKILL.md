@@ -11,3 +11,6 @@ Outputs currently implemented: `report/gates.json`, `report/review-queue.md`, `r
 Customer HTML/PDF, engineer-notes enforcement, CSV annexes, performance comparisons and cutover-plan generation are future work. Do not claim those artefacts exist.
 
 Never ship raw markdown or model output to a customer.
+
+## Provenance and per-route results
+`report/summary.md` records which migrator build produced the output (commit, whether the checkout was dirty, and the hash of what differed), the fidelity mode and the navigation source. `verify --preview` writes `report/preview-routes.json`: one row per deployed route with its residual rendered text and any link, image, heading-outline or sidebar problem. `report/unlisted-pages.json` lists pages the source publishes without a sidebar placement.

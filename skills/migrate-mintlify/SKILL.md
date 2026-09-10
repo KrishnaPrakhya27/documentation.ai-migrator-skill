@@ -6,6 +6,16 @@ description: "Migrate a Mintlify site from its source repository onto Documentat
 
 Implemented source preference: **source repository** (`docs.json` or `mint.json`) → live URL acquisition with the Mintlify scrape profile.
 
+## Migrating a live Mintlify site
+A hosted Mintlify site states its own content, and exact mode uses only those statements:
+
+- `/llms.txt` is the page index: one entry per page with the exact title, the exact description and the URL of the published Markdown. `discover` fetches it first and every page it lists enters scope.
+- Each page serves its authored Markdown at `<path>.md`. Acquisition **requires** it: in exact mode a page whose `.md` is missing, is not Markdown, or answers with HTML stops the run. The rendered HTML is frozen beside it for reconciliation, never as a replacement.
+- `.mintlify.site` and `.mintlify.app` are the same site. The paired host is treated as the seed origin, so the sitemap Mintlify publishes on the other host is used rather than discarded.
+- The page's navigation, sidebar label, group and description come from the `scopedNav` object in the rendered Flight payload, which is what the sidebar renders. The rendered sidebar DOM is extracted too, as an independent witness the gates cross-check.
+- The title is the `llms.txt` title, then the published `.md` H1, then the platform's page metadata. The `<title>` element is theme-decorated (`Page - Site`) and is never a title. A page the site lists but does not place in the sidebar is migrated and reported in `report/unlisted-pages.json`, never given an invented group.
+- Fence info strings carry Mintlify's own theming (```bash theme={null}). The directive is dropped because the target contract rejects the expression; the language and code text are byte-exact, and the original info string is kept on the node.
+
 ## What the adapter does
 - Walks the recursive navigation object (`versions`, `languages`, `tabs`, `anchors`, `dropdowns`, `products`, `groups`, `pages`) into `plan/tree.yaml` with group path, version and locale per page; lists pages that are in navigation but missing on disk.
 - Translates `redirects`: exact rules now; trailing `:slug*` or `*` become `:splat` candidates in `report/redirects.wildcard.json` (platform dependency); mid-path wildcards are reported and skipped.
