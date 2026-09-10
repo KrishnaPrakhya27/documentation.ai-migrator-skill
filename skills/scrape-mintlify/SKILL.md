@@ -1,11 +1,12 @@
 ---
 name: scrape-mintlify
-description: Acquire hosted Mintlify pages when the source repository is unavailable, using sitemap and seed-link discovery plus Mintlify article selectors and rendered-component recognisers.
+description: "Acquire hosted Mintlify pages when the source repository is unavailable, using recursive sitemaps, ordered sidebar links, same-origin crawling, Mintlify article selectors, and rendered-component recognisers."
 ---
 # Scrape Mintlify
 
-- Fingerprint: `<meta name="generator" content="Mintlify">`, `application-name=Mintlify`, `#content-container`, `#content-area`, `#sidebar-content`, `mintcdn.com`.
-- Discovery: sitemap ∪ seed-page links ∪ optional Firecrawl map. The profile records navigation selectors, but sidebar reconstruction and recursive link-graph discovery are not wired into the current CLI.
-- Article: `#content-area` (`.prose`). Remove `#table-of-contents-content`, `#page-title` duplicates, feedback widgets.
-- Rendered components lose their MDX names; the profile maps rendered DOM back to source names where the markup is stable (callout variants by class, accordion groups, card grids, tabs). Everything else is a T7 candidate and appears in the component plan.
+- Fingerprint (`profiles.ts` mintlify signals): `<meta name="generator" content="Mintlify">`, `application-name=Mintlify`, `#content-area`, `#sidebar-content`, `#navigation-items`, `mintcdn.com` assets, `docs.json` / `mint.json` in a repo, and the published `.md` suffix.
+- Discovery: recursive sitemap indexes ∪ ordered Mintlify sidebar links ∪ recursive same-origin links ∪ optional Firecrawl map. Sitemap order and locale/version hints are used only when stronger sidebar/path evidence is absent.
+- Article: `#content-area`. Before conversion the profile removes theme chrome: `header` (group eyebrow, `#page-title`, description — title and description come from llms.txt and the published `.md`), `nav`, `footer`, `#table-of-contents-content`, `#sidebar-content`, `#navigation-items`, `#pagination`, `[data-feedback]`, the assistant bar and everything inside it (`[data-assistant-bar]`, `.chat-assistant-floating-input`, the `⌘I` shortcut hint, textarea and send button), code-block floating buttons, the "Expand image" lightbox button and the per-heading "Navigate to header" anchors. `profile.chromeStrings` lists the theme strings that must never reach migrated output.
+- Rendered structure: `span[data-as="p"]` is a paragraph (`paragraphSelectors`); `[data-component-part="step-title"]` and `[data-component-part="card-title"]` are lifted into the Step / Card `title` prop and removed from the children (`@part:`), Step numbers are dropped; `CardGroup` cols come from `style="--cols:n"` (`@style-var:`); the code language comes from the `language` attribute with highlighter ids normalised to fence names (`shellscript` → `bash`, `plaintext` → none) and the `language-*` class as the fallback; callout kind comes from `data-callout-type`.
+- Rendered components lose their MDX names; the profile maps rendered DOM back to source names where the markup is stable (callouts, accordion groups, card grids, steps, tabs, frames). Card `href`s are applied client-side and are absent from the rendered HTML, so the published `.md` is the content source and the HTML is used for reconciliation. Everything else is a T7 candidate and appears in the component plan.
 - Prefer asking the customer for the source repo; scraping a Mintlify site is strictly the fallback.

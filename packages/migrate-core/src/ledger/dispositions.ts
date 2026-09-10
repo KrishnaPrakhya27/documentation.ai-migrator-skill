@@ -11,6 +11,8 @@ export type Disposition =
   | { kind: 'excluded'; pageId: string; sourceNodeId: string; reason: string; reviewer?: string; at: string }
   | { kind: 'quarantined'; pageId: string; sourceNodeId: string; reason: string };
 
+export type ExcludedDisposition = Extract<Disposition, { kind: 'excluded' }>;
+
 export class Ledger {
   private path: string;
   private seen = new Map<string, Disposition>();
@@ -47,10 +49,16 @@ export interface LedgerSummary {
   missing: Array<{ pageId: string; sourceNodeId: string }>;
 }
 
-/** Coverage against the set of source node ids captured at snapshot time. */
-export function summarize(dispositions: Disposition[], sourceIds: Array<{ pageId: string; nodeId: string }>): LedgerSummary {
+/** The disposition that stands for each node: convert may write several for one node, and the last one wins. */
+function lastDispositions(dispositions: Disposition[]): Map<string, Disposition> {
   const last = new Map<string, Disposition>();
   for (const d of dispositions) last.set(`${d.pageId}:${d.sourceNodeId}`, d);
+  return last;
+}
+
+/** Coverage against the set of source node ids captured at snapshot time. */
+export function summarize(dispositions: Disposition[], sourceIds: Array<{ pageId: string; nodeId: string }>): LedgerSummary {
+  const last = lastDispositions(dispositions);
   const s: LedgerSummary = { totalSource: sourceIds.length, covered: 0, identical: 0, transformed: 0, lossy: 0, excluded: 0, excludedUnattributed: 0, quarantined: 0, missing: [] };
   for (const { pageId, nodeId } of sourceIds) {
     const d = last.get(`${pageId}:${nodeId}`);
@@ -62,4 +70,15 @@ export function summarize(dispositions: Disposition[], sourceIds: Array<{ pageId
     else s.quarantined++;
   }
   return s;
+}
+
+/** The standing `excluded` disposition of every source node that has one, in source order. */
+export function effectiveExclusions(dispositions: Disposition[], sourceIds: Array<{ pageId: string; nodeId: string }>): ExcludedDisposition[] {
+  const last = lastDispositions(dispositions);
+  const out: ExcludedDisposition[] = [];
+  for (const { pageId, nodeId } of sourceIds) {
+    const d = last.get(`${pageId}:${nodeId}`);
+    if (d?.kind === 'excluded') out.push(d);
+  }
+  return out;
 }

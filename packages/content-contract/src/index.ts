@@ -63,6 +63,7 @@ export interface ValidationIssue {
   severity: 'error' | 'warning';
   code:
     | 'unknown-component'
+    | 'invalid-navigation'
     | 'editor-only-node'
     | 'invalid-prop-value'
     | 'missing-required-prop'
@@ -154,6 +155,7 @@ export function validateMdx(mdx: string, contract = loadContract()): ValidationI
       if (!inner) continue;
       if (/^user\.[a-zA-Z_]+$/.test(inner)) continue; // the one supported expression
       if (/^[0-9]+$/.test(inner)) continue; // numeric props like cols={3}
+      if (/^(?:true|false)$/.test(inner)) continue; // boolean props like controls={true}; the platform parses them as JSON literals
       if (/^\/\*[\s\S]*\*\/$/.test(inner)) continue; // MDX comment
       issues.push({ severity: 'error', code: 'expression', message: `expression {${inner.slice(0, 40)}} is not allowed`, line: ln });
     }
@@ -167,27 +169,59 @@ export function validateMdx(mdx: string, contract = loadContract()): ValidationI
 }
 
 /** Navigation: exactly one semantic root key; recurse; every page path resolves. */
+/** Child collections each navigation container may hold, per the platform schema (dashboard.documentation.ai/documentation.json). */
+const NAV_CHILDREN: Record<string, string[]> = {
+  navigation: ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'groups', 'pages'],
+  product: ['versions', 'languages', 'tabs', 'dropdowns', 'groups', 'pages'],
+  version: ['languages', 'tabs', 'dropdowns', 'groups', 'pages'],
+  language: ['tabs', 'dropdowns', 'groups', 'pages'],
+  tab: ['dropdowns', 'groups', 'pages'],
+  dropdown: ['tabs', 'dropdowns', 'groups', 'pages'],
+  group: ['pages'],
+};
+const NAV_ITEM: Record<string, string> = { products: 'product', versions: 'version', languages: 'language', tabs: 'tab', dropdowns: 'dropdown', groups: 'group' };
+
+/**
+ * documentation.json structure. Pages are objects ({ title, path | href }) or nested
+ * groups; a bare string is a Mintlify convention the renderer does not accept.
+ */
 export function validateNavigation(doc: any, pageExists: (path: string) => boolean, contract = loadContract()): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  const err = (message: string) => { issues.push({ severity: 'error', code: 'invalid-navigation', message }); };
+  if (typeof doc?.name !== 'string' || !doc.name) err('documentation.json requires a string "name"');
+  if (doc?.initialRoute !== undefined) {
+    const route = String(doc.initialRoute);
+    if (route.startsWith('/')) err(`initialRoute "${route}" must be a page path without a leading slash`);
+    else if (!pageExists(route)) err(`initialRoute "${route}" has no page file`);
+  }
   const nav = doc?.navigation;
-  if (!nav || typeof nav !== 'object') return [{ severity: 'error', code: 'unknown-component', message: 'documentation.json has no navigation object' }];
+  if (!nav || typeof nav !== 'object') { err('documentation.json has no navigation object'); return issues; }
   const keys = contract.navigation.rootKeys;
 
-  const check = (node: any, path: string) => {
-    if (typeof node === 'string') {
-      if (!pageExists(node)) issues.push({ severity: 'error', code: 'unknown-component', message: `navigation page "${node}" has no file (${path})` });
-      return;
-    }
-    if (!node || typeof node !== 'object') return;
+  const pageItem = (it: any, path: string): void => {
+    if (typeof it === 'string') { err(`${path} is the bare string "${it}"; pages must be objects like { "title": ..., "path": ... }`); return; }
+    if (!it || typeof it !== 'object') { err(`${path} must be a page or group object`); return; }
+    if ('group' in it) { container(it, 'group', path); return; }
+    if (typeof it.title !== 'string' || !it.title) err(`${path} requires a "title"`);
+    if (typeof it.path === 'string') { if (!pageExists(it.path)) err(`navigation page "${it.path}" has no file (${path})`); }
+    else if (typeof it.href !== 'string') err(`${path} requires "path" or "href"`);
+  };
+  const container = (node: any, kind: string, path: string): void => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) { err(`${path} must be an object`); return; }
+    if (kind !== 'navigation' && (typeof node[kind] !== 'string' || !node[kind])) err(`${path} requires a string "${kind}"`);
+    if ((kind === 'version' || kind === 'language') && 'default' in node) err(`${path}: "default" is not a ${kind} property; list the default ${kind} first`);
+    const allowed = NAV_CHILDREN[kind];
     const present = keys.filter((k) => k in node);
-    if (present.length !== 1) issues.push({ severity: 'error', code: 'unknown-component', message: `container at ${path} must have exactly one of [${keys.join(', ')}], has [${present.join(', ')}]` });
+    const externalTab = kind === 'tab' && typeof node.href === 'string';
+    if (!externalTab && present.length !== 1) err(`${path} must have exactly one of [${allowed.join(', ')}]`);
     for (const k of present) {
+      if (!allowed.includes(k)) { err(`${path}: a ${kind} cannot contain ${k}`); continue; }
       const items = node[k];
-      if (!Array.isArray(items)) { issues.push({ severity: 'error', code: 'unknown-component', message: `${path}.${k} must be an array` }); continue; }
-      items.forEach((it: any, i: number) => check(it, `${path}.${k}[${i}]`));
+      if (!Array.isArray(items)) { err(`${path}.${k} must be an array`); continue; }
+      items.forEach((it: any, i: number) => (k === 'pages' ? pageItem(it, `${path}.${k}[${i}]`) : container(it, NAV_ITEM[k], `${path}.${k}[${i}]`)));
     }
   };
-  check(nav, 'navigation');
+  container(nav, 'navigation', 'navigation');
   return issues;
 }
 

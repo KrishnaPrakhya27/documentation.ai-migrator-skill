@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { GateResult } from './gates.js';
 import { assertPublicHost } from '../scrape/fetcher.js';
+import { find, parseHtml, type Dom } from '../ir/from-html.js';
+import { inlineText, walkBlocks, type DocIR } from '../ir/types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,6 +35,15 @@ export function findChrome(): string | undefined {
   return candidates.find(existsSync);
 }
 
+/**
+ * Chrome host-resolver rules that pin the preview host to a validated address and make every
+ * other hostname unresolvable. Chrome applies the first matching rule, so the pin must come
+ * before the wildcard; wildcard-first sends the preview host itself to NOTFOUND.
+ */
+export function pinnedResolverRules(hostname: string, address: string): string {
+  return `MAP ${hostname} ${address}, MAP * ~NOTFOUND`;
+}
+
 export async function chromeDump(url: string): Promise<string> {
   const chrome = findChrome();
   if (!chrome) throw new Error('Chrome not found; set CHROME_PATH to a Chrome or Chromium binary');
@@ -43,7 +54,7 @@ export async function chromeDump(url: string): Promise<string> {
   // so a redirect to another host (including link-local metadata endpoints) fails closed in Chrome.
   const resolverRules = localPreview && process.env.DAI_ALLOW_LOCAL_PREVIEW === '1'
     ? undefined
-    : `MAP * ~NOTFOUND, MAP ${parsed.hostname} ${await assertPublicHost(parsed)}`;
+    : pinnedResolverRules(parsed.hostname, await assertPublicHost(parsed));
   const profile = mkdtempSync(join(tmpdir(), 'dai-chrome-profile-'));
   try {
     const { stdout } = await execFileAsync(chrome, [
@@ -99,6 +110,10 @@ export async function runBrowserFragmentGate(
     try {
       html = await render(url);
       if (!/<html\b/i.test(html)) throw new Error('rendered output is not an HTML document');
+      // Chrome's own error document is still HTML; scanning it would report every anchor as missing
+      if (/<body[^>]*\bclass=["'][^"']*\bneterror\b/i.test(html) || /\bid=["']main-frame-error["']/i.test(html)) {
+        throw new Error('Chrome showed its network error page instead of the preview; check host resolution and connectivity');
+      }
     } catch (error) {
       missing += Math.max(1, ids.size);
       if (samples.length < 8) samples.push(`${path || '/'}: browser load failed: ${(error as Error).message}`);
@@ -118,4 +133,52 @@ export async function runBrowserFragmentGate(
     count: missing,
     samples,
   };
+}
+
+function visibleText(node: Dom): string {
+  if (node.type === 'text') return node.data;
+  if (['script', 'style', 'noscript', 'nav', 'aside', 'footer', 'button'].includes(node.name) || node.attribs['aria-hidden'] === 'true') return '';
+  return node.children.map(visibleText).join(' ');
+}
+
+function normaliseVisible(value: string): string {
+  return value.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+}
+
+/** Every authored text segment must appear in the rendered preview, in source order. */
+export async function runBrowserContentGate(
+  previewUrl: string,
+  pages: Array<BrowserPage & { doc?: DocIR }>,
+  render: PageRenderer = chromeDump,
+): Promise<GateResult> {
+  let failures = 0; const samples: string[] = []; let checked = 0;
+  for (const page of pages.filter((entry) => entry.migrate && entry.newPath && entry.doc)) {
+    checked++;
+    let html: string;
+    try {
+      html = await render(routeUrl(previewUrl, page.newPath!));
+      if (!/<html\b/i.test(html) || /<body[^>]*\bclass=["'][^"']*\bneterror\b/i.test(html) || /\bid=["']main-frame-error["']/i.test(html)) throw new Error('preview did not render a valid page');
+    }
+    catch (error) { failures++; if (samples.length < 8) samples.push(`${page.newPath}: browser load failed: ${(error as Error).message}`); continue; }
+    const root = parseHtml(html);
+    const scope = find(root, 'article') ?? find(root, 'main') ?? find(root, '[role=main]') ?? find(root, 'body') ?? root;
+    const rendered = normaliseVisible(visibleText(scope));
+    const segments: string[] = [];
+    for (const value of [page.doc!.frontmatter.title, page.doc!.frontmatter.description]) if (typeof value === 'string' && normaliseVisible(value)) segments.push(normaliseVisible(value));
+    walkBlocks(page.doc!.children, (block) => {
+      if (block.type === 'paragraph' || block.type === 'heading') { const value = normaliseVisible(inlineText(block.children)); if (value) segments.push(value); }
+      else if (block.type === 'code') { const value = normaliseVisible(block.value); if (value) segments.push(value); }
+      else if (block.type === 'table') for (const row of block.children) for (const cell of row.children) { const value = normaliseVisible(inlineText(cell.children)); if (value) segments.push(value); }
+      else if (block.type === 'component' || block.type === 'dai') for (const key of ['title', 'summary', 'description', 'label']) { const value = block.props[key]; if (typeof value === 'string' && normaliseVisible(value)) segments.push(normaliseVisible(value)); }
+      else if (block.type === 'image' && block.alt) segments.push(normaliseVisible(block.alt));
+      else if (block.type === 'figure' && block.image.alt) segments.push(normaliseVisible(block.image.alt));
+    });
+    let cursor = 0;
+    for (const segment of segments) {
+      const index = rendered.indexOf(segment, cursor);
+      if (index < 0) { failures++; if (samples.length < 8) samples.push(`${page.newPath}: missing/out-of-order “${segment.slice(0, 80)}”`); }
+      else cursor = index + segment.length;
+    }
+  }
+  return { id: 'browser-content', status: failures ? 'fail' : 'pass', detail: `${failures} authored text segments missing or out of order across ${checked} rendered preview pages`, count: failures, samples };
 }

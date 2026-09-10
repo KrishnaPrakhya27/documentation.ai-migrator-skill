@@ -10,9 +10,10 @@ import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
 import { mdxjs } from 'micromark-extension-mdxjs';
 import { mdxFromMarkdown } from 'mdast-util-mdx';
+import { loadContract } from '@dai/content-contract';
 import { nodeId } from '../session/ids.js';
 import { sanitizeHtmlToJsx } from '../components/sanitize.js';
-import type { Block, ComponentNode, DocIR, Frontmatter, Inline, ListItemNode, TableCellNode, TableRowNode } from './types.js';
+import type { Block, ComponentNode, DaiComponentNode, DocIR, Frontmatter, ImageNode, Inline, ListItemNode, TableCellNode, TableRowNode } from './types.js';
 
 export interface MarkdownAdapterOptions {
   platform: string;
@@ -22,12 +23,45 @@ export interface MarkdownAdapterOptions {
   frontmatter?: Partial<Frontmatter>;
   /** Resolve a snippet import path (e.g. "/snippets/intro.mdx") to its MDX body; undefined leaves the import unresolved (quarantined). */
   resolveSnippet?: (importPath: string) => string | undefined;
+  /**
+   * Fence info-string directives that are the source platform's own theming rather than authored
+   * content (`theme={null}`). They are removed from the emitted meta, which the target contract would
+   * reject as an expression, and preserved on the node as `sourceMeta`. Declared by the scrape profile.
+   */
+  codeMetaStrip?: string[];
+}
+
+/** Removes the platform's theming directives from a fence info string, returning undefined when nothing authored remains. */
+export function stripPlatformCodeMeta(meta: string | undefined, patterns: string[] | undefined): string | undefined {
+  if (!meta || !patterns?.length) return meta;
+  let out = meta;
+  for (const pattern of patterns) out = out.replace(new RegExp(pattern, 'g'), ' ');
+  out = out.replace(/\s+/g, ' ').trim();
+  return out || undefined;
 }
 
 /** Sentinel wrapped around a custom heading id ({#id}) so it survives parsing and is lifted into heading.sourceId. */
 const ANCHOR_OPEN = '\uE000';
 const ANCHOR_CLOSE = '\uE001';
 const SNIPPET_IMPORT = /^\s*import\s+([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+\.(?:mdx?|jsx))["'];?\s*$/;
+
+/** Documentation.AI writes images as <Image />, source MDX as <img />; both are images, never components. */
+function isImageElement(node: { name?: string | null }): boolean {
+  return node.name === 'Image' || String(node.name).toLowerCase() === 'img';
+}
+
+/** Elements the inline serialiser owns; alone on a line they still belong to a paragraph. */
+function isInlineOnlyElement(node: { name?: string | null }): boolean {
+  const name = String(node.name).toLowerCase();
+  return name === 'br' || name === 'kbd';
+}
+
+let contractComponentNames: Set<string> | undefined;
+/** Target MDX (platform 'dai') names contract components directly; they are already resolved, so no mapping rule may run on them. */
+function isContractComponentName(name: string): boolean {
+  contractComponentNames ??= new Set(loadContract().components.map((component) => component.name));
+  return contractComponentNames.has(name);
+}
 
 /** Snippet imports and their usages, from the ESM nodes of a document. */
 function snippetImports(tree: any): Map<string, string> {
@@ -118,6 +152,25 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
   const imports = snippetImports(tree);
   const srcOf = (node: any) => ({ file: opts.file, line: node.position?.start?.line, col: node.position?.start?.column });
 
+  const imageFromMarkdown = (node: any, path: number[]): ImageNode => ({ id: idOf(node, path), src: srcOf(node), type: 'image', url: node.url ?? '', alt: node.alt ?? '', title: node.title ?? undefined });
+
+  const imageFromMdx = (node: any, path: number[]): ImageNode => {
+    const attrs: Record<string, string | number | boolean | null> = {};
+    for (const attr of node.attributes ?? []) {
+      if (attr.type !== 'mdxJsxAttribute' || typeof attr.name !== 'string') continue;
+      if (attr.value === null) attrs[attr.name] = true;
+      else if (typeof attr.value === 'string') attrs[attr.name] = attr.value;
+      else attrs[attr.name] = literalExpression(String(attr.value?.value ?? '')) ?? null;
+    }
+    const numeric = (value: unknown) => typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : undefined;
+    return {
+      id: idOf(node, path), src: srcOf(node), type: 'image',
+      url: typeof attrs.src === 'string' ? attrs.src : '', alt: typeof attrs.alt === 'string' ? attrs.alt : '',
+      title: typeof attrs.title === 'string' ? attrs.title : undefined,
+      width: numeric(attrs.width), height: numeric(attrs.height),
+    };
+  };
+
   const inline = (nodes: any[], path: number[]): Inline[] => nodes.flatMap((node, index): Inline[] => {
     const p = [...path, index];
     const base = { id: idOf(node, p), src: srcOf(node) };
@@ -128,7 +181,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       case 'emphasis': return [{ ...base, type: 'emphasis', children: inline(node.children ?? [], p) }];
       case 'delete': return [{ ...base, type: 'delete', children: inline(node.children ?? [], p) }];
       case 'link': return [{ ...base, type: 'link', url: node.url ?? '', title: node.title ?? undefined, children: inline(node.children ?? [], p) }];
-      case 'image': return [{ ...base, type: 'image', url: node.url ?? '', alt: node.alt ?? '', title: node.title ?? undefined }];
+      case 'image': return [imageFromMarkdown(node, p)];
       case 'break': return [{ ...base, type: 'break' }];
       case 'html': {
         const value = sanitizeHtmlToJsx(node.value ?? '');
@@ -139,6 +192,10 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
           ? [{ ...base, type: 'inlineHtml', value: `{${String(node.value).trim()}}` }]
           : [{ ...base, type: 'inlineHtml', value: `{/* UNSUPPORTED EXPRESSION ${idOf(node, p)} */}` }];
       case 'mdxJsxTextElement': {
+        const name = String(node.name).toLowerCase();
+        if (isImageElement(node)) return [imageFromMdx(node, p)];
+        if (name === 'br') return [{ ...base, type: 'break' }];
+        if (name === 'kbd') return [{ ...base, type: 'kbd', children: inline(node.children ?? [], p) }];
         const text = inline(node.children ?? [], p);
         // Inline source components need a human decision; preserve their visible
         // text and leave a blocking marker rather than silently changing meaning.
@@ -175,6 +232,29 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     };
   };
 
+  /** A non-literal attribute keeps the node a source component so exact mode stops on it instead of accepting it as resolved. */
+  const jsxElement = (node: any, path: number[]): ComponentNode | DaiComponentNode => {
+    const source = component(node, path);
+    if (opts.platform !== 'dai' || source.styleDeps?.length || !isContractComponentName(source.name)) return source;
+    return { id: source.id, src: source.src, type: 'dai', name: source.name, props: source.props, children: source.children };
+  };
+
+  const jsxFlow = (node: any, path: number[]): Block[] => {
+    if (isImageElement(node)) return [imageFromMdx(node, path)];
+    const importPath = node.name ? imports.get(node.name) : undefined;
+    if (importPath && /\.mdx?$/.test(importPath) && !(node.attributes ?? []).length && opts.resolveSnippet) {
+      const body = opts.resolveSnippet(importPath);
+      if (body !== undefined) {
+        // inline the snippet's blocks; ids are derived from the snippet file so they are stable and distinct
+        const sub = markdownToIr(body, { ...opts, file: `${opts.file}::${importPath}`, resolveSnippet: opts.resolveSnippet });
+        return sub.children;
+      }
+    }
+    const element = jsxElement(node, path);
+    if (element.type === 'component' && element.name === 'snippetRef') return [{ id: element.id, src: element.src, type: 'snippetRef', token: String(element.props.token ?? ''), platform: opts.platform }];
+    return [element];
+  };
+
   const INLINE_TYPES = new Set(['text', 'strong', 'emphasis', 'delete', 'inlineCode', 'link', 'image', 'break', 'html', 'mdxTextExpression', 'mdxJsxTextElement']);
   /** JSX flow elements may hold inline nodes directly (<Note>text</Note>); wrap each run of them in a synthetic paragraph so no text is lost. */
   const groupInline = (nodes: any[]): any[] => {
@@ -190,13 +270,14 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     const base = { id: idOf(node, p), src: srcOf(node) };
     switch (node.type) {
       case 'paragraph': {
-        // <Note>text</Note> on a single line parses as an inline JSX element wrapped in a paragraph; that is a block component
         const meaningful = (node.children ?? []).filter((c: any) => !(c.type === 'text' && !String(c.value).trim()));
-        if (meaningful.length === 1 && meaningful[0].type === 'mdxJsxTextElement' && meaningful[0].name) {
-          const el = { ...meaningful[0], type: 'mdxJsxFlowElement' };
-          const c = component(el, p);
-          return [c];
-        }
+        // <Note>text</Note> on a single line parses as an inline JSX element wrapped in a paragraph; that is a block
+        // component, and adjacent single-line elements (<Card>…</Card>\n<Card>…</Card>) are that many block components in order
+        const isBlockElement = (c: any) => c.type === 'mdxJsxTextElement' && c.name && !isInlineOnlyElement(c);
+        if (meaningful.length && meaningful.every(isBlockElement)) return meaningful.flatMap((element: any, index: number) => jsxFlow({ ...element, type: 'mdxJsxFlowElement' }, [...p, index]));
+        const only = meaningful.length === 1 ? meaningful[0] : undefined;
+        // an image alone on its line is a block image whichever syntax wrote it, the normal form the HTML adapter also uses
+        if (only?.type === 'image') return [imageFromMarkdown(only, p)];
         return [{ ...base, type: 'paragraph', children: inline(node.children ?? [], p) }];
       }
       case 'heading': {
@@ -211,7 +292,11 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         });
         return [{ ...base, type: 'heading', depth: node.depth, children, sourceId }];
       }
-      case 'code': return [{ ...base, type: 'code', lang: node.lang ?? undefined, meta: node.meta ?? undefined, value: node.value ?? '' }];
+      case 'code': {
+        const sourceMeta = node.meta ?? undefined;
+        const meta = stripPlatformCodeMeta(sourceMeta, opts.codeMetaStrip);
+        return [{ ...base, type: 'code', lang: node.lang ?? undefined, meta, ...(sourceMeta !== undefined && sourceMeta !== meta ? { sourceMeta } : {}), value: node.value ?? '' }];
+      }
       case 'blockquote': {
         const children = blocks(node.children ?? [], p);
         const first = children[0];
@@ -239,20 +324,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       }
       case 'thematicBreak': return [{ ...base, type: 'thematicBreak' }];
       case 'html': return [{ ...base, type: 'html', value: node.value ?? '' }];
-      case 'mdxJsxFlowElement': {
-        const importPath = node.name ? imports.get(node.name) : undefined;
-        if (importPath && /\.mdx?$/.test(importPath) && !(node.attributes ?? []).length && opts.resolveSnippet) {
-          const body = opts.resolveSnippet(importPath);
-          if (body !== undefined) {
-            // inline the snippet's blocks; ids are derived from the snippet file so they are stable and distinct
-            const sub = markdownToIr(body, { ...opts, file: `${opts.file}::${importPath}`, resolveSnippet: opts.resolveSnippet });
-            return sub.children;
-          }
-        }
-        const c = component(node, p);
-        if (c.name === 'snippetRef') return [{ id: c.id, src: c.src, type: 'snippetRef', token: String(c.props.token ?? ''), platform: opts.platform }];
-        return [c];
-      }
+      case 'mdxJsxFlowElement': return jsxFlow(node, p);
       case 'mdxjsEsm': {
         const lines = String(node.value ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
         const onlyResolvedImports = lines.length > 0 && lines.every((l) => { const m = l.match(SNIPPET_IMPORT); return !!m && /\.mdx?$/.test(m[2]) && opts.resolveSnippet?.(m[2]) !== undefined; });

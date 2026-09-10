@@ -34,16 +34,24 @@ rules:
   - id: mint/card-group
     tier: T2
     match: { name: CardGroup }
-    to: { name: Columns, props: { cols: $cols } }
+    # the authored cols is kept and clamped only when outside the contract enum [2,3,4]; an absent cols renders the shared default
+    handler: cards-to-columns
   - id: mint/card
     tier: T2
     match: { name: Card }
-    to: { name: Card, props: { title: $title, href: $href, icon: $icon } }
-    drop: [color, horizontal]
+    to: { name: Card, props: { title: $title, href: $href, icon: $icon, image: $img, cta: $cta, horizontal: $horizontal } }
+    # icon colour, icon style and the hover arrow are decoration; any other authored prop is reported as dropped
+    drop: [color, iconType, arrow]
   - id: mint/frame
     tier: T4
     match: { name: Frame }
     handler: frame-to-image
+  - id: mint/video
+    tier: T2
+    match: { name: video }
+    # src is rewritten through the asset manifest before conversion; data-path is the asset's repository path, carried by the manifest
+    to: { name: Video, props: { src: $src, controls: $controls, autoplay: $autoplay, loop: $loop, muted: $muted, poster: $poster } }
+    drop: [data-path]
   - id: mint/tabs
     tier: T3
     match: { name: Tabs }
@@ -92,3 +100,10 @@ rules:
     tier: T1
     match: { name: Update }
     to: { name: Update, props: { label: $label, description: $description } }
+  - id: mint/video
+    tier: T2
+    match: { name: video }
+    # a published <video> keeps its HTML media attributes; src and poster are rehosted through the asset manifest
+    to: { name: Video, props: { src: $src, poster: $poster, controls: $controls, autoplay: $autoplay, loop: $loop, muted: $muted } }
+    # data-path is the storage path Mintlify stamps on published media; the rehosted src carries the file
+    drop: [data-path]

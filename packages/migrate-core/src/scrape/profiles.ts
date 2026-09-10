@@ -7,7 +7,7 @@
  * research in the architecture report). Selectors drift; each profile ships a
  * fingerprint test that must be run against a live page in CI.
  */
-import type { ComponentRecogniser } from '../ir/from-html.js';
+import type { ComponentRecogniser, HtmlAdapterOptions } from '../ir/from-html.js';
 
 export interface Signal {
   kind: 'meta' | 'dom' | 'asset' | 'path' | 'archive' | 'md-suffix';
@@ -23,12 +23,72 @@ export interface ScrapeProfile {
   removeSelectors: string[];
   navSelector?: string;
   navLinkSelector?: string;
+  /** Group heading inside the rendered sidebar. Required to recover navigation from the DOM as an independent witness. */
+  navGroupSelector?: string;
   recognisers: ComponentRecogniser[];
+  /** Elements the theme renders as paragraphs without a <p> tag. */
+  paragraphSelectors?: string[];
+  /** Extractor for the rendered code-block language attribute; the language-* class is the fallback. */
+  codeLanguage?: string;
+  /**
+   * Fence info-string directives that are the platform's own theming, not authored content
+   * (Mintlify writes ```bash theme={null}). They are removed from the emitted meta because the
+   * target contract rejects the expression, and kept on the node as `sourceMeta`.
+   */
+  codeMetaStrip?: string[];
+  /** Theme strings that surround authored content in the rendered HTML; none may reach migrated output. */
+  chromeStrings?: string[];
   /** Platform serves raw markdown at <url>.md; prefer it over HTML. */
   mdSuffix?: boolean;
+  /** Host suffixes under which the platform serves one site: the same slug under any of them is the same site (`<slug>.mintlify.site` ⇄ `<slug>.mintlify.app`). */
+  hostAliasSuffixes?: string[][];
   /** Hosts whose assets must be rehosted (source CDN). */
   assetHosts: string[];
 }
+
+/** The other hosts a profile declares to serve the same site as `host`; empty when the host is not on one of the platform's paired suffixes. */
+export function profileHostAliases(profile: ScrapeProfile, host: string): string[] {
+  const hostname = host.toLowerCase();
+  for (const suffixes of profile.hostAliasSuffixes ?? []) {
+    const suffix = suffixes.find((candidate) => hostname.endsWith(candidate) && hostname.length > candidate.length);
+    if (!suffix) continue;
+    const slug = hostname.slice(0, -suffix.length);
+    return suffixes.filter((candidate) => candidate !== suffix).map((candidate) => slug + candidate);
+  }
+  return [];
+}
+
+/**
+ * Visible text and accessible names the Mintlify theme adds around the article
+ * (assistant bar, table of contents, pagination, code and image buttons, footer,
+ * header). Page-specific chrome (the group eyebrow above the H1, Step numbers) is
+ * removed structurally by the profile rather than listed here.
+ */
+const MINTLIFY_CHROME_STRINGS: string[] = [
+  'Skip to main content',
+  'Search...',
+  'Open search',
+  'Change theme preference',
+  'Ask Assistant',
+  'Ask a question...',
+  '⌘I',
+  'Send message',
+  'Add attachment',
+  'Close assistant panel',
+  'Maximize assistant panel',
+  'Toggle assistant panel',
+  'Responses are generated using AI and may contain mistakes.',
+  'On this page',
+  'Navigate to header',
+  'Expand image',
+  'Copy the contents from the code block',
+  'Copy page',
+  'Ask AI',
+  'Was this page helpful?',
+  'Previous:',
+  'Next:',
+  'Powered by',
+];
 
 const EMOJI_CALLOUT: ComponentRecogniser[] = [
   { selector: 'blockquote.callout_info, blockquote.callout_default', name: 'Callout', props: { kind: 'info' } },
@@ -77,23 +137,41 @@ export const PROFILES: Record<string, ScrapeProfile> = {
       { kind: 'asset', pattern: 'mintcdn.com', weight: 1 },
       { kind: 'path', pattern: 'docs.json', weight: 5 },
       { kind: 'path', pattern: 'mint.json', weight: 5 },
+      { kind: 'md-suffix', pattern: '', weight: 2 },
     ],
     articleSelector: '#content-area',
-    removeSelectors: ['#table-of-contents-content', '#sidebar-content', '#navigation-items', 'nav', 'header', 'footer', '[data-feedback]'],
+    // `header` carries the group eyebrow, #page-title and the description, all of which come from
+    // llms.txt / the published .md instead. The assistant bar is removed together with everything
+    // inside it (the descendant forms cover the unlabeled "\u2318I" shortcut span, the textarea and the
+    // send button even if a theme re-parents the bar). The last selector drops Mintlify's
+    // per-heading hover anchor (a zero-width space + icon inside every h1-h6), which otherwise
+    // survives as a "[\u200b](#slug)" prefix on each heading.
+    removeSelectors: [
+      '#table-of-contents-content', '#sidebar-content', '#navigation-items', 'nav', 'header', 'footer', '.eyebrow', '[data-feedback]',
+      '[data-assistant-bar]', '[data-assistant-bar] *', '.chat-assistant-floating-input', '.chat-assistant-floating-input *', '#chat-assistant-textarea', '.chat-assistant-send-button',
+      '#pagination', '[data-floating-buttons]', 'button[aria-label="Expand image"]', 'a[aria-label="Navigate to header"]',
+    ],
     navSelector: '#sidebar-content',
     navLinkSelector: '#sidebar-content a[href]',
+    navGroupSelector: '.sidebar-group-header',
+    paragraphSelectors: ['span[data-as="p"]'],
+    codeLanguage: '@attr:language',
+    codeMetaStrip: ['theme=\\{[^}]*\\}'],
+    chromeStrings: MINTLIFY_CHROME_STRINGS,
     recognisers: [
-      { selector: '.callout, [data-callout]', name: 'Callout', props: { kind: '@class-suffix:callout-' } },
+      { selector: '.callout, [data-callout]', name: 'Callout', props: { kind: '@attr:data-callout-type' } },
       { selector: 'details.accordion, .accordion', name: 'Accordion', props: { title: '@text:summary' }, strip: ['summary'] },
       { selector: '.accordion-group', name: 'AccordionGroup' },
-      { selector: '.card-group', name: 'CardGroup', props: { cols: '@count:.card' } },
-      { selector: '.card', name: 'Card', props: { title: '@text:h2, h3', href: '@attr:href' } },
+      { selector: '.card-group', name: 'CardGroup', props: { cols: '@style-var:--cols' } },
+      { selector: '.card', name: 'Card', props: { title: '@part:card-title', href: '@attr-or-descendant:href' } },
       { selector: '.tabs', name: 'Tabs' },
       { selector: '[role=tabpanel]', name: 'Tab', props: { title: '@attr:aria-label' } },
       { selector: '.frame, figure.frame', name: 'Frame', props: { caption: '@text:figcaption' }, strip: ['figcaption'] },
       { selector: '.steps', name: 'Steps' },
-      { selector: '.step', name: 'Step', props: { title: '@text:.step-title' }, strip: ['.step-title'] },
+      { selector: '.step', name: 'Step', props: { title: '@part:step-title' }, strip: ['[data-component-part="step-number"]', '[data-component-part="step-line"]'] },
     ],
+    mdSuffix: true,
+    hostAliasSuffixes: [['.mintlify.site', '.mintlify.app']],
     assetHosts: ['mintcdn.com', 'mintlify.s3-us-west-1.amazonaws.com', 'mintlify.s3.us-west-1.amazonaws.com'],
   },
   gitbook: {
@@ -229,4 +307,17 @@ export const PROFILES: Record<string, ScrapeProfile> = {
 
 export function getProfile(platform: string): ScrapeProfile {
   return PROFILES[platform] ?? PROFILES.generic;
+}
+
+/** The adapter options a profile implies for one scraped page, so no call site can leave a profile field behind. */
+export function htmlAdapterOptions(profile: ScrapeProfile, page: { platform: string; file: string }): HtmlAdapterOptions {
+  return {
+    platform: page.platform,
+    file: page.file,
+    articleSelector: profile.articleSelector,
+    removeSelectors: profile.removeSelectors,
+    recognisers: profile.recognisers,
+    paragraphSelectors: profile.paragraphSelectors,
+    codeLanguage: profile.codeLanguage,
+  };
 }

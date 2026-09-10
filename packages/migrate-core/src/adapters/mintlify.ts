@@ -9,7 +9,8 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { Tree, TreePage } from '../nav/tree.js';
+import { parse as parseYaml } from 'yaml';
+import type { SourceNavigationNode, Tree, TreePage } from '../nav/tree.js';
 import type { RedirectRule } from '../urls/plan.js';
 import { pageIdFromPlatform } from '../session/ids.js';
 
@@ -47,20 +48,26 @@ export function readMintlifyRepo(rootIn: string): MintlifyRepo {
   const cfg = JSON.parse(readFileSync(join(root, configFile), 'utf8')) as Record<string, any>;
 
   const pages: TreePage[] = [];
+  const pageById = new Map<string, TreePage>();
   const openapi: MintlifyOpenApiRef[] = [];
   const missing: string[] = [];
   let order = 0;
   let defaultVersion: string | undefined; let defaultLocale: string | undefined;
 
-  const walk = (node: any, ctx: { group: string[]; version?: string; locale?: string; openapi?: string }) => {
+  const walk = (node: any, ctx: { group: string[]; version?: string; locale?: string; openapi?: string }): SourceNavigationNode[] => {
     if (typeof node === 'string') {
       const file = pageFile(root, node);
-      if (!file) { missing.push(node); return; }
-      pages.push({ id: pageIdFromPlatform('mintlify', `${ctx.locale ?? ''}|${ctx.version ?? ''}|${node}`), title: node.split('/').pop()!.replace(/[-_]+/g, ' '), source: file.slice(root.length + 1), group: ctx.group, order: order++, oldPath: `/${node}`, migrate: true, version: ctx.version, locale: ctx.locale, reason: configFile });
-      return;
+      if (!file) { missing.push(node); return []; }
+      const id = pageIdFromPlatform('mintlify', `${ctx.locale ?? ''}|${ctx.version ?? ''}|${node}`);
+      let page = pageById.get(id);
+      if (!page) {
+        page = { id, title: node.split('/').pop()!.replace(/[-_]+/g, ' '), source: file.slice(root.length + 1), group: ctx.group, order: order++, oldPath: `/${node}`, migrate: true, version: ctx.version, locale: ctx.locale, reason: configFile };
+        pageById.set(id, page); pages.push(page);
+      }
+      return [{ type: 'page', pageId: id }];
     }
-    if (Array.isArray(node)) { node.forEach((n) => walk(n, ctx)); return; }
-    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) return node.flatMap((n) => walk(n, ctx));
+    if (!node || typeof node !== 'object') return [];
     const next = { ...ctx };
     if (typeof node.version === 'string') { next.version = node.version; if (node.default === true || defaultVersion === undefined) defaultVersion = node.version; }
     if (typeof node.language === 'string') { next.locale = node.language; if (node.default === true || defaultLocale === undefined) defaultLocale = node.language; }
@@ -68,17 +75,23 @@ export function readMintlifyRepo(rootIn: string): MintlifyRepo {
     if (label && !node.version && !node.language) next.group = [...ctx.group, String(label)];
     if (typeof node.openapi === 'string') { next.openapi = node.openapi; openapi.push({ groupPath: next.group, spec: node.openapi, version: next.version, locale: next.locale }); }
     else if (node.openapi && typeof node.openapi === 'object' && typeof node.openapi.source === 'string') { openapi.push({ groupPath: next.group, spec: node.openapi.source, version: next.version, locale: next.locale }); }
-    if (typeof node.href === 'string' && !DIVISIONS.some((k) => k in node)) return; // external link entry
-    for (const k of DIVISIONS) if (k in node) walk(node[k], next);
-    if (node.global && typeof node.global === 'object') walk(node.global, next);
+    if (typeof node.href === 'string' && !DIVISIONS.some((k) => k in node)) return []; // external link entry
+    const children: SourceNavigationNode[] = [];
+    for (const k of DIVISIONS) if (k in node) children.push(...walk(node[k], next));
+    if (node.global && typeof node.global === 'object') children.push(...walk(node.global, next));
+    return label && !node.version && !node.language && children.length ? [{ type: 'group', label: String(label), children }] : children;
   };
-  walk(cfg.navigation ?? {}, { group: [] });
+  const navigation = walk(cfg.navigation ?? {}, { group: [] });
 
   // page titles from frontmatter when present
   for (const p of pages) {
     const raw = readFileSync(join(root, p.source), 'utf8');
-    const t = raw.match(/^---\r?\n[\s\S]*?^title:\s*["']?([^\n"']+)/m)?.[1]?.trim();
-    if (t) p.title = t;
+    const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!match) continue;
+    const data = parseYaml(match[1]) as Record<string, unknown> | undefined;
+    if (typeof data?.title === 'string') p.title = data.title;
+    if (typeof data?.sidebarTitle === 'string') p.sidebarTitle = data.sidebarTitle;
+    if (typeof data?.description === 'string') p.description = data.description;
   }
 
   // redirects: Mintlify supports :slug, :slug* and a trailing *; the platform supports exact and :param only
@@ -94,7 +107,7 @@ export function readMintlifyRepo(rootIn: string): MintlifyRepo {
     } else exact.push({ source: r.source, destination: r.destination, statusCode: status });
   }
 
-  return { root, configFile, name: cfg.name, colors: cfg.colors, logo: cfg.logo, favicon: cfg.favicon, tree: { scope: 'full', platform: 'mintlify', pages, defaultVersion, defaultLocale }, redirects: { exact, wildcard, skipped }, openapi, missing };
+  return { root, configFile, name: cfg.name, colors: cfg.colors, logo: cfg.logo, favicon: cfg.favicon, tree: { scope: 'full', platform: 'mintlify', pages, navigation, navigationSource: 'source-config', defaultVersion, defaultLocale }, redirects: { exact, wildcard, skipped }, openapi, missing };
 }
 
 /** Snippet resolver for Mintlify: imports are absolute from the repo root ("/snippets/x.mdx"). */

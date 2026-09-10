@@ -29,26 +29,54 @@ export function parseHtml(html: string): El {
   return root;
 }
 
-/** Tiny selector matcher: tag, #id, .class, tag.class, tag[attr], tag[attr=value], comma lists. */
+/** Tiny selector matcher: tag, *, #id, .class, tag.class, tag[attr], tag[attr=value], descendant combinators (space), comma lists. */
 export function matchesSelector(el: El, selector: string): boolean {
   return selector.split(',').some((sel) => {
-    sel = sel.trim();
-    const m = sel.match(/^([a-z0-9-]+)?(#[A-Za-z0-9_-]+)?((?:\.[A-Za-z0-9_-]+)*)((?:\[[^\]]+\])*)$/i);
-    if (!m) return false;
-    const [, tag, idSel, classes, attrs] = m;
-    if (tag && el.name !== tag.toLowerCase()) return false;
-    if (idSel && el.attribs.id !== idSel.slice(1)) return false;
-    const cls = (el.attribs.class ?? '').split(/\s+/).filter(Boolean);
-    for (const c of classes.split('.').filter(Boolean)) if (!cls.includes(c)) return false;
-    for (const a of attrs.match(/\[[^\]]+\]/g) ?? []) {
-      const am = a.slice(1, -1).match(/^([^=]+)(?:=["']?([^"']*)["']?)?$/);
-      if (!am) return false;
-      const [, k, v] = am;
-      if (!(k in el.attribs)) return false;
-      if (v !== undefined && el.attribs[k] !== v) return false;
+    const compounds = splitDescendantCompounds(sel.trim());
+    if (!compounds.length || !matchesCompound(el, compounds[compounds.length - 1])) return false;
+    let ancestor = el.parent;
+    for (let i = compounds.length - 2; i >= 0; i--) {
+      while (ancestor && !matchesCompound(ancestor, compounds[i])) ancestor = ancestor.parent;
+      if (!ancestor) return false;
+      ancestor = ancestor.parent;
     }
     return true;
   });
+}
+
+/** Splits `a b[x="y z"] c` on whitespace outside attribute brackets. */
+function splitDescendantCompounds(selector: string): string[] {
+  const out: string[] = [];
+  let current = '';
+  let depth = 0;
+  for (const ch of selector) {
+    if (ch === '[') depth++;
+    else if (ch === ']') depth--;
+    if (/\s/.test(ch) && depth === 0) {
+      if (current) out.push(current);
+      current = '';
+    } else current += ch;
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+function matchesCompound(el: El, compound: string): boolean {
+  const m = compound.match(/^(\*|[a-z0-9-]+)?(#[A-Za-z0-9_-]+)?((?:\.[A-Za-z0-9_-]+)*)((?:\[[^\]]+\])*)$/i);
+  if (!m) return false;
+  const [, tag, idSel, classes, attrs] = m;
+  if (tag && tag !== '*' && el.name !== tag.toLowerCase()) return false;
+  if (idSel && el.attribs.id !== idSel.slice(1)) return false;
+  const cls = (el.attribs.class ?? '').split(/\s+/).filter(Boolean);
+  for (const c of classes.split('.').filter(Boolean)) if (!cls.includes(c)) return false;
+  for (const a of attrs.match(/\[[^\]]+\]/g) ?? []) {
+    const am = a.slice(1, -1).match(/^([^=]+)(?:=["']?([^"']*)["']?)?$/);
+    if (!am) return false;
+    const [, k, v] = am;
+    if (!(k in el.attribs)) return false;
+    if (v !== undefined && el.attribs[k] !== v) return false;
+  }
+  return true;
 }
 
 /** A platform profile tells the adapter which elements are components. */
@@ -56,7 +84,13 @@ export interface ComponentRecogniser {
   selector: string;
   /** Platform-native component name to assign. */
   name: string;
-  /** Props: literal values, or extractors: "@attr:name", "@text:selector", "@count:selector", "@class-suffix:prefix". */
+  /**
+   * Props: literal values, or extractors: "@attr:name", "@attr-or-descendant:name", "@flag:name" (true when
+   * a boolean HTML attribute such as controls is present, whatever its value), "@text:selector",
+   * "@part:name" (text of the descendant with data-component-part=name, which is then removed from the
+   * children so a lifted title is not also emitted as content), "@style-var:--name" (a custom property
+   * from the style attribute; integers become numbers), "@count:selector", "@class-suffix:prefix".
+   */
   props?: Record<string, string | number | boolean>;
   /** Child element selector whose contents become the component children (default: the element itself). */
   contentSelector?: string;
@@ -72,6 +106,10 @@ export interface HtmlAdapterOptions {
   articleSelector?: string;
   /** Elements removed entirely (chrome). */
   removeSelectors?: string[];
+  /** Elements the platform renders as paragraphs without a <p> tag (Mintlify: span[data-as="p"]); each becomes its own paragraph block. */
+  paragraphSelectors?: string[];
+  /** Extractor for a rendered code-block language (e.g. "@attr:language"), read from the <code> then the <pre>; the language-/lang- class is the fallback. */
+  codeLanguage?: string;
   /** Iframe hosts allowed to become Iframe components; others become components named 'iframe' for the rules engine to quarantine. */
   iframeHosts?: string[];
 }
@@ -112,6 +150,56 @@ export function textOf(el: Dom): string {
 function remove(el: El, selectors: string[]): void {
   el.children = el.children.filter((c) => !(c.type === 'tag' && selectors.some((s) => matchesSelector(c, s))));
   for (const c of el.children) if (c.type === 'tag') remove(c, selectors);
+}
+
+/** Copy of `el` with the given elements removed at any depth. */
+function without(el: El, excluded: Set<El>): El {
+  return {
+    ...el,
+    children: el.children.filter((c) => !(c.type === 'tag' && excluded.has(c))).map((c) => (c.type === 'tag' ? without(c, excluded) : c)),
+  };
+}
+
+/** Value of a custom property in a style attribute ("--cols:2" → 2); integers become numbers so they compare equal to an authored `cols={2}`. */
+function styleVariable(style: string | undefined, name: string): string | number | null {
+  for (const declaration of (style ?? '').split(';')) {
+    const colon = declaration.indexOf(':');
+    if (colon < 0 || declaration.slice(0, colon).trim() !== name) continue;
+    const value = declaration.slice(colon + 1).trim();
+    return /^-?\d+$/.test(value) ? Number(value) : value;
+  }
+  return null;
+}
+
+type ExtractedProp = string | number | boolean | null;
+
+interface Extraction {
+  value: ExtractedProp;
+  /** The descendant lifted into the prop by "@part", to be removed from the children. */
+  lifted?: El;
+}
+
+function extractProp(el: El, spec: string): Extraction {
+  const [kind, arg] = spec.slice(1).split(':', 2);
+  switch (kind) {
+    case 'attr': return { value: el.attribs[arg] ?? null };
+    case 'attr-or-descendant': return { value: el.attribs[arg] ?? find(el, `[${arg}]`)?.attribs[arg] ?? null };
+    case 'flag': return { value: arg in el.attribs ? true : null };
+    case 'text': { const t = arg ? find(el, arg) : el; return { value: t ? textOf(t).trim() : null }; }
+    case 'part': { const part = find(el, `[data-component-part="${arg}"]`); return part ? { value: textOf(part).trim(), lifted: part } : { value: null }; }
+    case 'style-var': return { value: styleVariable(el.attribs.style, arg) };
+    case 'count': return { value: findAll(el, arg).length };
+    case 'class-suffix': { const c = (el.attribs.class ?? '').split(/\s+/).find((x) => x.startsWith(arg)); return { value: c ? c.slice(arg.length) : null }; }
+    default: return { value: null };
+  }
+}
+
+/** Renderers emit their highlighter's language ids; the IR carries the fence names authors write. */
+const RENDERED_CODE_LANGUAGE_ALIASES: Record<string, string> = { shellscript: 'bash', plaintext: '' };
+
+function fenceLanguage(renderedId: string): string | undefined {
+  const lang = RENDERED_CODE_LANGUAGE_ALIASES[renderedId] ?? renderedId;
+  return lang || undefined;
 }
 
 export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult {
@@ -180,7 +268,8 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
     return { id: id(p, url), type: 'image', url, alt: (n.attribs.alt ?? '').trim(), title: n.attribs.title, width: Number.isFinite(w) ? w : undefined, height: Number.isFinite(h) ? h : undefined };
   };
 
-  const isBlockish = (n: Dom) => n.type === 'tag' && !INLINE.has(n.name);
+  const isParagraphElement = (n: El) => (opts.paragraphSelectors ?? []).some((s) => matchesSelector(n, s));
+  const isBlockish = (n: Dom) => n.type === 'tag' && (!INLINE.has(n.name) || isParagraphElement(n));
 
   const blocksOf = (nodes: Dom[], path: number[]): Block[] => {
     const out: Block[] = [];
@@ -222,19 +311,12 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
       headings.push(node);
       return [node];
     }
+    if (n.name === 'p' || isParagraphElement(n)) return paragraphOf(n, p);
     switch (n.name) {
-      case 'p': {
-        const inl = inlineOf(n.children, p);
-        const onlyImg = inl.length === 1 && inl[0].type === 'image';
-        if (onlyImg) return [inl[0] as ImageNode];
-        return inl.length ? [{ id: id(p, textOf(n)), type: 'paragraph', children: inl }] : [];
-      }
       case 'pre': {
         const codeEl = n.children.find((c) => c.type === 'tag' && c.name === 'code') as El | undefined;
-        const cls = (codeEl?.attribs.class ?? n.attribs.class ?? '');
-        const lang = cls.match(/(?:language|lang)-([A-Za-z0-9+#.-]+)/)?.[1];
         const value = textOf(codeEl ?? n).replace(/^\n/, '').replace(/\n$/, '');
-        return [{ id: id(p, value), type: 'code', lang, value }];
+        return [{ id: id(p, value), type: 'code', lang: codeLanguageOf(n, codeEl), value }];
       }
       case 'ul': case 'ol': {
         const items: ListItemNode[] = n.children.filter((c): c is El => c.type === 'tag' && c.name === 'li').map((li, i) => ({ id: id([...p, i], textOf(li)), type: 'listItem', children: blocksOf(li.children, [...p, i]) }));
@@ -261,7 +343,10 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
       case 'script': case 'style':
         // executable or styling content never becomes children; keep only a hash so the ledger can account for the node
         return [componentOf({ ...n, children: [] }, { selector: n.name, name: n.name, props: { src: '@attr:src', contentHash: nodeId(opts.file, p, textOf(n)) } }, p)];
-      case 'iframe': case 'video': case 'audio': case 'object': case 'embed': case 'form': case 'input': case 'button':
+      case 'video':
+        // the media attributes are content (a video without controls cannot be played); src may sit on a <source> child
+        return [componentOf(n, { selector: 'video', name: 'video', props: { src: '@attr-or-descendant:src', poster: '@attr:poster', controls: '@flag:controls', autoplay: '@flag:autoplay', loop: '@flag:loop', muted: '@flag:muted', title: '@attr:title' } }, p)];
+      case 'iframe': case 'audio': case 'object': case 'embed': case 'form': case 'input': case 'button':
         return [componentOf(n, { selector: n.name, name: n.name, props: { src: '@attr:src', title: '@attr:title' } }, p)];
       case 'details': {
         const summary = find(n, 'summary');
@@ -272,22 +357,35 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
     }
   };
 
+  const paragraphOf = (n: El, p: number[]): Block[] => {
+    const inl = inlineOf(n.children, p);
+    const onlyImg = inl.length === 1 && inl[0].type === 'image';
+    if (onlyImg) return [inl[0] as ImageNode];
+    return inl.length ? [{ id: id(p, textOf(n)), type: 'paragraph', children: inl }] : [];
+  };
+
+  const codeLanguageOf = (pre: El, codeEl: El | undefined): string | undefined => {
+    if (opts.codeLanguage) {
+      const declared = extractProp(codeEl ?? pre, opts.codeLanguage).value ?? extractProp(pre, opts.codeLanguage).value;
+      if (typeof declared === 'string') return fenceLanguage(declared);
+    }
+    const cls = codeEl?.attribs.class ?? pre.attribs.class ?? '';
+    return cls.match(/(?:language|lang)-([A-Za-z0-9+#.-]+)/)?.[1];
+  };
+
   const componentOf = (n: El, r: ComponentRecogniser, p: number[]): ComponentNode => {
-    const props: Record<string, string | number | boolean | null> = {};
+    const props: Record<string, ExtractedProp> = {};
+    const lifted = new Set<El>();
     for (const [k, v] of Object.entries(r.props ?? {})) {
       if (typeof v !== 'string' || !v.startsWith('@')) { props[k] = v; continue; }
-      const [kind, arg] = v.slice(1).split(':', 2);
-      switch (kind) {
-        case 'attr': props[k] = n.attribs[arg] ?? null; break;
-        case 'text': { const t = arg ? find(n, arg) : n; props[k] = t ? textOf(t).trim() : null; break; }
-        case 'count': props[k] = findAll(n, arg).length; break;
-        case 'class-suffix': { const c = (n.attribs.class ?? '').split(/\s+/).find((x) => x.startsWith(arg)); props[k] = c ? c.slice(arg.length) : null; break; }
-        default: props[k] = null;
-      }
+      const extraction = extractProp(n, v);
+      props[k] = extraction.value;
+      if (extraction.lifted) lifted.add(extraction.lifted);
     }
     let content: El = n;
     if (r.contentSelector) content = find(n, r.contentSelector) ?? n;
     if (r.strip?.length) content = { ...content, children: content.children.filter((c) => !(c.type === 'tag' && r.strip!.some((s) => matchesSelector(c, s)))) };
+    if (lifted.size) content = without(content, lifted);
     const styleDeps = (n.attribs.class ?? '').split(/\s+/).filter(Boolean);
     return { id: id(p, `${r.name}:${textOf(n).slice(0, 80)}`), type: 'component', name: r.name, platform: opts.platform, props, children: blocksOf(content.children, [...p, 0]), styleDeps: styleDeps.length ? styleDeps : undefined, src: { file: opts.file } };
   };

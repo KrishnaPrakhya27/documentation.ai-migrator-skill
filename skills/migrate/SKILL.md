@@ -4,12 +4,12 @@ description: "Router for Documentation.AI migrations: fingerprints the source (e
 ---
 # Migrate (router)
 
-You are running an internal Documentation.AI migration. Deterministic code does the work; you orchestrate, stop at gates, and never publish anything the gates reject.
+You are running an internal Documentation.AI migration. Deterministic code does the work; you orchestrate the four standard human gates below and never publish anything the automated checks or a human reviewer rejects.
 
 ## Before anything
 1. Ask for or confirm: source (URL, export archive, or repo), landing option (`customer-org` or `demo-org`), and an external workspace path. Refuse to run inside this plugin directory.
-2. Run `dai-migrate init --workspace <path> --source <src> --target <customer-org|demo-org> [--platform <name>] [--export <archive>]`. It validates the landing choice, records the remote allowlist, and—when `DAI_API_BASE` and `DAI_API_KEY` are set—checks `/api/v1/config`. Preview availability, quota and role are reported as platform checks that still require dashboard confirmation.
-3. Run `dai-migrate fingerprint`. Read `plan/fingerprint.json`: platform, confidence, signals. If confidence < 0.7 or two platforms score close, stop and ask which platform it is; never guess on hybrid sites.
+2. Run `dai-migrate init --workspace <path> --source <src> --target <customer-org|demo-org> --remote <git url of the repo connected to the target Documentation.AI project> [--platform <name>] [--export <archive>] --allowed-orgs <owner>`. It proves push access to the remote with a dry-run that changes nothing (a missing credential is reported with the exact fix, never discovered after conversion). With `DAI_API_BASE` and `DAI_API_KEY` set it also settles every platform question now: the API key, that the remote is the repository connected to the project (branch sets compared), the live deployment branch, whether previews have been produced before, the media API, and the asset provider to use. Any failed check stops here with the fix named; nothing is written. `report/preflight.json` keeps the result. Ask the user for the remote URL if they do not give it: it is the repository the dashboard created or connected for the project.
+3. Run `dai-migrate fingerprint`. Read `plan/fingerprint.json`: platform, confidence, signals. If confidence < 0.7 or two platforms score close and the user did not already select a platform, ask which platform it is; never guess on hybrid sites. An explicit user platform selection resolves this exception.
 
 ## Hand-off
 - `document360` → skill `migrate-document360`
@@ -18,10 +18,18 @@ You are running an internal Documentation.AI migration. Deterministic code does 
 - `gitbook` → `migrate-gitbook`
 - otherwise → `migrate-generic`
 
-Current executable paths are: Document360 export ZIP/directory; any local Markdown/MDX/HTML repository; and live URL acquisition through the local fetcher or Firecrawl. ReadMe and GitBook API clients, OpenAPI migration, provider-backed asset ingestion, and source-specific navigation config import are not implemented; the platform skills state these boundaries explicitly.
+Current executable paths are: Document360 export ZIP/directory; any local Markdown/MDX/HTML repository; ReadMe API v2; Mintlify, GitBook and ReadMe sync repositories; and live URL acquisition through the local fetcher or Firecrawl. The platform skills state their remaining boundaries explicitly.
+
+## Four human gates
+1. **Scope and structure**, after `discover`: approve pages, exclusions, navigation groups, order, versions and locales.
+2. **Conversion plan**, after `inventory` and `plan`: resolve component, URL, redirect, asset, iframe and snippet decisions.
+3. **Pre-push validation**, after assets, two identical conversions, `nav` and local `verify`: inspect the generated site and automated results, then approve only the named migration-branch push.
+4. **Preview and release**, after preview `verify`: inspect the rendered preview and final report, then explicitly approve cutover/release.
+
+Stop only at these four standard gates. Missing required inputs, ambiguous platform detection and failed automated checks may still require attention, but they are exceptions rather than additional approval gates. Fold platform-specific decisions into gate 1 or 2. Do not ask again for an action already authorized at the relevant gate unless its reviewed artifacts changed.
 
 ## Release sequence
-Run `assets` before `convert`. Run `verify` twice without a preview so the second run proves determinism. `write --push` may then push only the migration branch, with every non-preview gate passing, so Documentation.AI can create the preview. Re-run `verify --preview-url <url> --preview-contract-version <version>`; release is allowed only when every gate passes.
+Run `assets` before `convert`, and run `convert` twice over identical inputs to prove determinism. Generate navigation, then run local `verify`; gate 3 occurs only when every pre-push automated check passes. `write --push` may then push only the approved migration branch; it clones the remote into the workspace if no `--repo` is given, then waits for the platform to build the preview and records the preview URL in the session (a missing deployment is diagnosed: GitHub App repository access, plan without previews, or wrong remote). Re-run `verify --preview`; the preview URL and the contract version come from the session (the version is read from the platform when exposed, otherwise the pinned version is assumed and the report says so). Gate 4 occurs only when every release check passes.
 
 ## Rules you never break
 - No `.jsx` snippets or any executable output; T5 is static only.

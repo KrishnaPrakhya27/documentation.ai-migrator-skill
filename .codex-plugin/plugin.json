@@ -1,19 +1,31 @@
 {
   "name": "documentation-ai-migration",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260910054936",
   "description": "Migrate documentation sites onto Documentation.AI: generic crawl, ReadMe, Mintlify, GitBook and Document360 importers, scraping skills per platform, verification and reporting.",
-  "author": { "name": "Documentation.AI" },
+  "author": {
+    "name": "Documentation.AI"
+  },
   "interface": {
     "displayName": "Documentation.AI Migration",
     "shortDescription": "Plan, convert, validate, and report documentation migrations",
     "longDescription": "Internal migration tooling for discovering, converting, validating, and reporting documentation moves from supported platforms into Documentation.AI.",
     "developerName": "Documentation.AI",
     "category": "Developer Tools",
-    "capabilities": ["Interactive", "Write"],
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
     "defaultPrompt": [
-      "Use /migrate to inspect a documentation source and create a gated migration plan."
+      "Use $migrate to inspect a documentation source and run its four-gate migration workflow."
     ]
   },
   "skills": "./skills",
-  "keywords": ["documentation", "migration", "mintlify", "gitbook", "readme", "document360"]
+  "keywords": [
+    "documentation",
+    "migration",
+    "mintlify",
+    "gitbook",
+    "readme",
+    "document360"
+  ]
 }

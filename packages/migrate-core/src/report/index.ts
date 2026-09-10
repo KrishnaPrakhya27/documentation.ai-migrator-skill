@@ -7,6 +7,10 @@ import { join } from 'node:path';
 import type { GateResult } from '../verify/gates.js';
 import type { ClusterEntry } from '../components/signature.js';
 import type { Decision } from '../log/decisions.js';
+import type { Session } from '../session/workspace.js';
+import { describeMigrator, type MigratorProvenance } from '../session/provenance.js';
+import type { QuarantineCounts } from '../session/quarantine.js';
+import type { Tree } from '../nav/tree.js';
 
 export function writeGates(workspace: string, gates: GateResult[], outputHash?: string): void {
   writeFileSync(join(workspace, 'report', 'gates.json'), JSON.stringify({ at: new Date().toISOString(), outputHash, pass: gates.every((g) => g.status === 'pass'), gates }, null, 2), { mode: 0o600 });
@@ -36,7 +40,25 @@ export function writePlatformGaps(workspace: string, decisions: Decision[], shim
   writeFileSync(join(workspace, 'report', 'platform-gaps.json'), JSON.stringify({ anchorShims: shims, decisions: [...byRule.entries()].map(([k, count]) => ({ key: k, count })) }, null, 2), { mode: 0o600 });
 }
 
-export function writeSummary(workspace: string, s: { pages: number; converted: number; quarantined: number; clusters: number; assets: number; gates: GateResult[]; branch?: string }): void {
+/** What every report says about the run itself, so nobody has to remember which build and mode produced the output. */
+export interface RunProvenance {
+  fidelityMode: 'exact' | 'permissive';
+  navigationSource?: Tree['navigationSource'];
+  migrator: MigratorProvenance;
+  quarantine: QuarantineCounts;
+}
+
+function provenanceLines(p: RunProvenance): string[] {
+  return [
+    `- fidelity: ${p.fidelityMode}`,
+    `- navigation source: ${p.navigationSource ?? 'not recorded'}`,
+    `- migrator: ${describeMigrator(p.migrator)}`,
+    `- pages quarantined (exact-fidelity): ${p.quarantine.exactFidelity}`,
+    `- pages held (blocked snippet tokens): ${p.quarantine.blockedSnippet}`,
+  ];
+}
+
+export function writeSummary(workspace: string, s: { pages: number; converted: number; clusters: number; assets: number; gates: GateResult[]; branch?: string; provenance: RunProvenance }): void {
   const failed = s.gates.filter((g) => g.status === 'fail').length;
   const notRun = s.gates.filter((g) => g.status === 'not-run').length;
   const md = `# Migration summary
@@ -45,7 +67,8 @@ export function writeSummary(workspace: string, s: { pages: number; converted: n
 |---|---|
 | Pages in scope | ${s.pages} |
 | Converted | ${s.converted} |
-| Quarantined pages | ${s.quarantined} |
+| Held (blocked snippet tokens) | ${s.provenance.quarantine.blockedSnippet} |
+| Quarantined (exact-fidelity) | ${s.provenance.quarantine.exactFidelity} |
 | Component clusters | ${s.clusters} |
 | Assets | ${s.assets} |
 | Gates failing | ${failed} |
@@ -53,6 +76,41 @@ export function writeSummary(workspace: string, s: { pages: number; converted: n
 | Branch | ${s.branch ?? '-'} |
 
 Release is ${failed === 0 && notRun === 0 ? 'ALLOWED' : 'BLOCKED'} by the gates. See review-queue.md.
+
+## Provenance
+
+${provenanceLines(s.provenance).join('\n')}
 `;
   writeFileSync(join(workspace, 'report', 'summary.md'), md, { mode: 0o600 });
+}
+
+/** What was verified about the target at init and discovered at write, plus which build ran, so the report never relies on memory. */
+export function writeConnectionSummary(workspace: string, s: Session, provenance: RunProvenance): void {
+  const preflightPath = join(workspace, 'report', 'preflight.json');
+  const preflight = existsSync(preflightPath) ? JSON.parse(readFileSync(preflightPath, 'utf8')) as Array<{ id: string; status: string; detail: string }> : [];
+  const t = s.target;
+  const lines = [
+    '# Target connection',
+    '',
+    `| | |`, `|---|---|`,
+    `| Landing | ${t.landing} |`,
+    `| Remote | ${t.repoRemote ?? 'not set'} |`,
+    `| Live deployment branch | ${t.deploymentBranch ?? 'unknown'} |`,
+    `| Connected repository verified | ${t.connectedRepoVerified === undefined ? 'not checked' : t.connectedRepoVerified ? 'yes' : 'no'} |`,
+    `| Push access verified | ${t.pushAccessVerified === undefined ? 'not checked' : t.pushAccessVerified ? 'yes' : 'no'} |`,
+    `| Asset provider | ${t.assetProvider ?? 'local'} |`,
+    `| Media API (G7) | ${t.mediaApiAvailable ? 'available' : 'not available'} |`,
+    `| Content contract | ${t.contractVersionAssumed ? `assumed ${s.versions.contentContract} (platform does not expose contentContractVersion)` : t.contentContractVersion ?? s.versions.contentContract} |`,
+    `| Preview | ${t.previewUrl ?? 'not created'} |`,
+    '',
+    '## Provenance',
+    '',
+    ...provenanceLines(provenance),
+    '',
+    '## Preflight checks at init',
+    '',
+    ...preflight.map((c) => `- ${c.status === 'ok' ? '✔' : c.status === 'fail' ? '✖' : '·'} **${c.id}**: ${c.detail}`),
+    '',
+  ];
+  writeFileSync(join(workspace, 'report', 'connection.md'), lines.join('\n'), { mode: 0o600 });
 }

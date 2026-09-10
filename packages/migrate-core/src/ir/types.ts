@@ -28,7 +28,8 @@ export type Inline = TextNode | InlineCodeNode | StrongNode | EmphasisNode | Del
 
 export interface ParagraphNode extends BaseNode { type: 'paragraph'; children: Inline[] }
 export interface HeadingNode extends BaseNode { type: 'heading'; depth: 1 | 2 | 3 | 4 | 5 | 6; children: Inline[]; /** id from the source, if it had one */ sourceId?: string }
-export interface CodeNode extends BaseNode { type: 'code'; lang?: string; meta?: string; value: string; title?: string }
+/** `sourceMeta` keeps the fence info string as authored when the target contract cannot carry all of it (platform theming directives); `meta` is what is emitted. */
+export interface CodeNode extends BaseNode { type: 'code'; lang?: string; meta?: string; sourceMeta?: string; value: string; title?: string }
 export interface BlockquoteNode extends BaseNode { type: 'blockquote'; children: Block[] }
 export interface ListNode extends BaseNode { type: 'list'; ordered: boolean; start?: number; children: ListItemNode[] }
 export interface ListItemNode extends BaseNode { type: 'listItem'; checked?: boolean; children: Block[] }

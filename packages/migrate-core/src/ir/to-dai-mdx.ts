@@ -2,7 +2,7 @@
  * DocIR → Documentation.AI MDX. Deterministic: same IR, same bytes.
  * Only public contract names are emitted. Editor-internal nodes never appear.
  */
-import type { Block, Inline, DocIR, DaiComponentNode, ListNode, TableNode, Frontmatter } from './types.js';
+import type { Block, Inline, DocIR, DaiComponentNode, ImageNode, ListNode, TableNode, Frontmatter } from './types.js';
 import { stringify as toYaml } from 'yaml';
 import { isSafeUrl } from '../components/sanitize.js';
 
@@ -40,9 +40,9 @@ function markdownUrl(url: string, kind: 'link' | 'resource'): string | undefined
   return url.trim().replace(/\\/g, '%5C').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/</g, '%3C').replace(/>/g, '%3E');
 }
 
-function imageToMdx(url: string, alt: string, width?: number, height?: number): string {
-  const safe = markdownUrl(url, 'resource');
-  return safe ? openTag('Image', { src: safe, alt, width: width ?? null, height: height ?? null }, true) : escapeText(alt);
+function imageToMdx(image: ImageNode): string {
+  const safe = markdownUrl(image.url, 'resource');
+  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null }, true) : escapeText(image.alt);
 }
 
 export function openTag(name: string, props: Record<string, string | number | boolean | null>, selfClose = false): string {
@@ -77,7 +77,7 @@ export function inlineToMdx(nodes: Inline[]): string {
       case 'break': return '<br />';
       case 'kbd': return `<kbd>${inlineToMdx(n.children)}</kbd>`;
       case 'inlineHtml': return n.value;
-      case 'image': return imageToMdx(n.url, n.alt, n.width, n.height);
+      case 'image': return imageToMdx(n);
     }
   }).join('');
 }
@@ -134,9 +134,9 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
       case 'list': out.push(listToMdx(b, opts)); break;
       case 'table': out.push(tableToMdx(b)); break;
       case 'thematicBreak': out.push('---'); break;
-      case 'image': out.push(imageToMdx(b.url, b.alt, b.width, b.height)); break;
+      case 'image': out.push(imageToMdx(b)); break;
       case 'figure': {
-        out.push(imageToMdx(b.image.url, b.image.alt, b.image.width, b.image.height));
+        out.push(imageToMdx(b.image));
         if (b.caption?.length) out.push(`*${inlineToMdx(b.caption)}*`);
         break;
       }

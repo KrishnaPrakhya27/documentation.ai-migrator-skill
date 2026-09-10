@@ -1,6 +1,6 @@
 ---
 name: migrate-mintlify
-description: Migrate a Mintlify site from its source repository onto Documentation.AI: docs.json or mint.json navigation (versions, languages, tabs, anchors, dropdowns, groups), snippet imports, redirects, group-level OpenAPI, custom heading ids, and a component rename layer. Falls back to scrape-mintlify.
+description: "Migrate a Mintlify site from its source repository onto Documentation.AI: docs.json or mint.json navigation (versions, languages, tabs, anchors, dropdowns, groups), snippet imports, redirects, group-level OpenAPI, custom heading ids, and a component rename layer. Falls back to scrape-mintlify."
 ---
 # Migrate Mintlify
 
@@ -16,9 +16,9 @@ Implemented source preference: **source repository** (`docs.json` or `mint.json`
 - Scans `snippets/`, `components/`, `src/components/` and `custom-blocks/` for component definitions and attaches their hashes to signatures, so custom components cluster per definition.
 
 ## Procedure
-1. `dai-migrate init --workspace <dir> --source <repo> --repo <repo> --target customer-org|demo-org --platform mintlify --allowed-orgs <org>`
-2. `dai-migrate discover` ⏸ review `plan/tree.yaml` (scope, version and locale mapping) and `inventory/platform-meta.json` (missing pages, skipped redirects).
-3. `dai-migrate inventory` → `plan` ⏸ review clusters: Note/Tip/Warning/Info/Check, Accordion*, CardGroup, Frame, Tooltip, Badge, RequestExample/ResponseExample map by rule; custom components and non-literal expressions need a decision.
-4. `assets` → `convert` → `convert` (determinism) → `nav` ⏸ → `verify` → `write` → preview `verify` → `report`.
+1. `dai-migrate init --workspace <dir> --source <repo> --repo <repo> --target customer-org|demo-org --platform mintlify --remote <connected repo url> --allowed-orgs <owner>`
+2. `dai-migrate discover` → **human gate 1/4**: review `plan/tree.yaml` (scope, version and locale mapping) and `inventory/platform-meta.json` (missing pages, skipped redirects).
+3. `dai-migrate inventory` → `plan` → **human gate 2/4**: review clusters; custom components and non-literal expressions need a decision.
+4. `assets` → `convert` twice (determinism) → `nav` → local `verify` → **human gate 3/4** → `write --push` (waits for the preview) → `verify --preview` → **human gate 4/4** → `report`.
 
 Not implemented: SDK reference generation, `Snippet` components with props, `Icon`/`Tiles`/`Tree`/`Panel` (T7 candidates).

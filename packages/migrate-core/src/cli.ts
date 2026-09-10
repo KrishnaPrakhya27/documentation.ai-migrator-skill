@@ -2,7 +2,9 @@
 /**
  * dai-migrate: stage commands over an external workspace.
  *
- *   init → fingerprint → discover ⏸ → acquire → inventory → plan ⏸ → assets → convert → nav ⏸ → verify ×2 → push preview → verify preview ⏸ → report
+ *   init → fingerprint → discover [human 1/4] → acquire → inventory → plan [human 2/4]
+ *   → assets → convert ×2 → nav → verify [human 3/4] → push preview
+ *   → verify preview [human 4/4] → report
  *
  * Every stage reads and writes files in the workspace; re-runs are safe.
  */
@@ -15,12 +17,17 @@ import { Cookie, CookieJar } from 'tough-cookie';
 import { loadContract } from '@dai/content-contract';
 import { assertOutsidePlugin, ensureWorkspace, readSession, writeSession, markStage, type Session, fileHash } from './session/workspace.js';
 import { newMigrationId, pageIdFromPlatform, sha256 } from './session/ids.js';
-import { preflight } from './session/preflight.js';
+import { captureMigratorProvenance } from './session/provenance.js';
+import { countQuarantine, writeQuarantine } from './session/quarantine.js';
+import { preflight, probePushAccess } from './session/preflight.js';
+import { DaiClient, noDeploymentDiagnosis } from './session/platform.js';
 import { fingerprint } from './scrape/fingerprint.js';
-import { Fetcher, type FetchOptions } from './scrape/fetcher.js';
+import { CanonicalHosts, Fetcher, type FetchOptions } from './scrape/fetcher.js';
 import { Firecrawl, type FirecrawlOptions } from './scrape/firecrawl.js';
-import { getProfile } from './scrape/profiles.js';
-import { discoverLiveSite } from './scrape/discovery.js';
+import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, type DiscoveredNavigationNode } from './scrape/discovery.js';
+import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
+import { acquirePages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
 import { htmlToIr } from './ir/from-html.js';
 import { markdownToIr } from './ir/from-markdown.js';
 import { extractIfZip, readD360Export, d360ArticleToIr, type D360Export } from './adapters/document360.js';
@@ -28,8 +35,8 @@ import { readMintlifyRepo, mintlifySnippetResolver } from './adapters/mintlify.j
 import { readGitbookRepo } from './adapters/gitbook.js';
 import { readReadmeRepo, ReadmeApi, readmeApiTree } from './adapters/readme.js';
 import { scanComponentDefinitions, attachDefinitions } from './adapters/definitions.js';
-import { writeTree, readTree, buildNavigation, attachGroupOpenapi, type Tree, type TreePage } from './nav/tree.js';
-import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap } from './urls/plan.js';
+import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacement, placedPageIds, type GroupOpenapiRef, type SourceNavigationNode, type Tree, type TreePage } from './nav/tree.js';
+import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
 import { RulesEngine, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
 import { Ledger } from './ledger/dispositions.js';
@@ -38,12 +45,17 @@ import { redact } from './log/redact.js';
 import { docToMdx } from './ir/to-dai-mdx.js';
 import type { DocIR } from './ir/types.js';
 import { walkBlocks, inlineText } from './ir/types.js';
-import { collectAssets, readManifest, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';
-import { ingestAssets, type AssetProviderOptions } from './assets/providers.js';
-import { runGates, canonicalHash, previewPushBlockers, type GateResult } from './verify/gates.js';
-import { runBrowserFragmentGate, type BrowserAnchor } from './verify/browser.js';
+import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
+import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver, siteAssetReferences, type SiteMediaMeta } from './assets/manifest.js';
+import type { AssetProviderOptions } from './assets/providers.js';
+import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
+import { runGates, canonicalHash, previewPushBlockers, type GateResult, type SourceEvidence } from './verify/gates.js';
+import { loadRawSourcePages, type RawSourcePage } from './verify/source-truth.js';
+import { runBrowserContentGate, runBrowserFragmentGate, type BrowserAnchor } from './verify/browser.js';
+import { authoredContentSnapshot, fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from './verify/fidelity.js';
+import { unconvertedFidelityRecord, writeFidelityRecords, type FidelityRecord } from './verify/fidelity-records.js';
 import { writeMigrationBranch } from './write/migration-branch.js';
-import { writeGates, writeReviewQueue, writeSummary, writePlatformGaps, readDecisions } from './report/index.js';
+import { writeGates, writeReviewQueue, writeSummary, writePlatformGaps, readDecisions, writeConnectionSummary, type RunProvenance } from './report/index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(here, '..', '..', '..');
@@ -51,18 +63,19 @@ const CORE_VERSION = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'package.json'), 
 
 const HELP = `dai-migrate <command> [options]
 
-Commands (run in order; ⏸ = review the written plan file before continuing):
-  init         --workspace <dir> --source <url|path> --target customer-org|demo-org [--platform p] [--export <zip|dir>] [--allowed-orgs a,b] [--customer-authorised]
+Commands (run in order; the workflow has exactly four standard human gates):
+  init         --workspace <dir> --source <url|path> --target customer-org|demo-org --remote <git url> [--platform p] [--export <zip|dir>] [--fidelity exact|permissive] [--allowed-orgs a,b] [--customer-authorised]
+               verifies the remote, the API key, the connected repository, previews and the media API up front; records the asset provider
   fingerprint  [--url <u>] [--export <zip|dir>] [--repo <dir>]     → plan/fingerprint.json
-  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] → plan/tree.yaml ⏸
+  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] → plan/tree.yaml [gate 1: scope]
   acquire      [--fetcher local|firecrawl] [--profile p] [--urls file] [--proxy url] [--headers-file json] [--cookies-file file] → source-cache/acquired/
   inventory                                                         → snapshot/, inventory/*.json
-  plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml ⏸
+  plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml [gate 2: conversion plan]
   assets       [--provider none|local|s3|dai-api]                   → plan/assets.json, assets-original/
   convert                                                           → output/, ledger/, quarantine/
-  nav                                                               → output/documentation.json, report/redirects.*.json, report/anchors.json ⏸
-  write        --repo <dir> [--remote <url>] [--push]               → refs/heads/migration/<session>
-  verify       [--preview-url <u>] [--preview-contract-version v]   → report/gates.json, report/review-queue.md ⏸
+  nav                                                               → output/documentation.json, report/redirects.*.json, report/anchors.json
+  write        [--repo <dir>] [--remote <url>] [--push] [--no-wait] [--preview-timeout min] → refs/heads/migration/<session>; with --push waits for the preview deployment and records its URL
+  verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
   report                                                            → report/summary.md, report/platform-gaps.json
 
 Every command except init takes --workspace <dir> (or MIGRATION_WORKSPACE).`;
@@ -74,6 +87,7 @@ const { values: v, positionals } = parseArgs({
     source: { type: 'string' }, target: { type: 'string' }, platform: { type: 'string' }, export: { type: 'string' }, url: { type: 'string' }, repo: { type: 'string' },
     'allowed-orgs': { type: 'string', default: process.env.MIGRATION_ALLOWED_ORGS ?? '' },
     'customer-authorised': { type: 'boolean', default: false },
+    fidelity: { type: 'string', default: 'exact' },
     mode: { type: 'string' }, 'strip-prefix': { type: 'string' }, case: { type: 'string' },
     provider: { type: 'string', default: process.env.MIGRATION_ASSET_PROVIDER }, fetcher: { type: 'string', default: 'local' }, profile: { type: 'string' }, urls: { type: 'string' },
     'discovery-limit': { type: 'string', default: process.env.MIGRATION_DISCOVERY_LIMIT ?? '5000' },
@@ -83,7 +97,8 @@ const { values: v, positionals } = parseArgs({
     proxy: { type: 'string', default: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY },
     'headers-file': { type: 'string', default: process.env.MIGRATION_HEADERS_FILE }, 'cookies-file': { type: 'string', default: process.env.MIGRATION_COOKIES_FILE }, 'auth-origin': { type: 'string', default: process.env.MIGRATION_AUTH_ORIGINS },
     remote: { type: 'string' }, push: { type: 'boolean', default: false },
-    'preview-url': { type: 'string' }, 'preview-contract-version': { type: 'string' },
+    'no-wait': { type: 'boolean', default: false }, 'preview-timeout': { type: 'string', default: process.env.MIGRATION_PREVIEW_TIMEOUT_MIN ?? '15' },
+    preview: { type: 'boolean', default: false }, 'preview-url': { type: 'string' }, 'preview-contract-version': { type: 'string' },
     'log-originals': { type: 'boolean', default: false },
     help: { type: 'boolean', default: false },
   },
@@ -98,6 +113,9 @@ function ws(): string {
 }
 function fail(msg: string): never { console.error(`✖ ${redact(msg)}`); process.exit(1); }
 function ok(msg: string) { console.log(`✔ ${msg}`); }
+function humanGate(number: 1 | 2 | 3 | 4, name: string, review: string): void {
+  console.log(`⏸ HUMAN GATE ${number}/4 — ${name}: ${review}`);
+}
 function readJson<T>(p: string): T { return JSON.parse(readFileSync(p, 'utf8')) as T; }
 function writeJson(p: string, o: unknown) { mkdirSync(dirname(p), { recursive: true, mode: 0o700 }); writeFileSync(p, JSON.stringify(o, null, 2) + '\n', { mode: 0o600 }); }
 function readSensitive(path: string): string {
@@ -215,8 +233,12 @@ function repoTree(root: string, platform: string): Tree {
   return { scope: 'full', platform, pages };
 }
 
-interface AcquiredPage { url: string; finalUrl?: string; contentType?: string; body?: string; markdown?: string; title?: string }
-function acquiredPath(workspace: string, pageId: string): string { return join(workspace, 'source-cache', 'acquired', `${pageId}.json`); }
+function canonicalHostsPath(workspace: string): string { return join(workspace, 'inventory', 'canonical-hosts.json'); }
+/** The seed site's paired hosts from the profile plus the hosts discovery recorded from robots.txt and llms.txt. */
+function sourceCanonicalHosts(workspace: string, seedUrl: string, profile: ScrapeProfile): CanonicalHosts {
+  const recorded = existsSync(canonicalHostsPath(workspace)) ? readJson<{ aliases: string[] }>(canonicalHostsPath(workspace)).aliases : [];
+  return new CanonicalHosts(new URL(seedUrl).origin, [...profileHostAliases(profile, new URL(seedUrl).hostname), ...recorded]);
+}
 
 function readComponentPlan(workspace: string): Record<string, ComponentPlanEntry> {
   const p = join(workspace, 'plan', 'component-plan.yaml');
@@ -228,6 +250,65 @@ function readComponentPlan(workspace: string): Record<string, ComponentPlanEntry
   return out;
 }
 
+/** inventory/platform-meta.json: site metadata and connections the source adapter recorded at discovery. */
+interface PlatformMeta {
+  name?: string;
+  theme?: string;
+  colors?: Record<string, string>;
+  logo?: unknown;
+  favicon?: string;
+  redirects?: { exact: RedirectRule[]; wildcard: RedirectRule[] };
+  openapi?: GroupOpenapiRef[];
+  /** Source repository root the openapi specs are relative to. */
+  root?: string;
+}
+
+function readPlatformMeta(workspace: string): PlatformMeta {
+  const p = join(workspace, 'inventory', 'platform-meta.json');
+  return existsSync(p) ? readJson<PlatformMeta>(p) : {};
+}
+
+/**
+ * The acquisition, re-read for verification: the frozen pages, the profile that
+ * describes the rendered source, and the navigation extracted afresh from the
+ * frozen HTML so the written navigation is judged against the source rather than
+ * against the tree this run built from it.
+ */
+function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | undefined {
+  const profile = getProfile(tree.platform);
+  let pages: RawSourcePage[];
+  try { pages = loadRawSourcePages({ workspace, outputDir: join(workspace, 'output'), pages: tree.pages }); }
+  catch (error) { fail((error as Error).message); }
+  if (!pages.length) return undefined;
+
+  const seed = tree.pages.find((page) => page.migrate && /^https?:\/\//.test(page.source))?.source;
+  const home = pages.find((page) => page.path === '/') ?? pages[0];
+  let navigation: Record<string, unknown> | undefined;
+  let navigationSource: string | undefined;
+  if (seed && home.html) {
+    const origin = new URL(seed).origin;
+    const extracted = tree.platform === 'mintlify' ? extractMintlifyNavigation(home.html, origin)?.navigation : undefined;
+    const fromDom = extracted ? undefined : extractDomSidebarNavigation(home.html, seed, origin, profile);
+    const nodes = extracted ?? fromDom;
+    if (nodes) {
+      navigationSource = extracted ? 'platform-metadata' : 'dom-sidebar';
+      const byUrl = new Map(tree.pages.map((page) => [page.source.replace(/\/$/, ''), page.id]));
+      const toSource = (items: DiscoveredNavigationNode[]): SourceNavigationNode[] => items.flatMap((node): SourceNavigationNode[] => {
+        if (node.type === 'page') { const id = byUrl.get(node.url.replace(/\/$/, '')); return id ? [{ type: 'page', pageId: id, title: node.title }] : []; }
+        const children = toSource(node.children);
+        return children.length ? [{ type: 'group', label: node.label, children }] : [];
+      });
+      navigation = buildDocumentationNavigation({ ...tree, navigation: toSource(nodes) }, writtenPagePaths(workspace, tree), readPlatformMeta(workspace)).navigation;
+    }
+  }
+  return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route) };
+}
+
+/** New paths (without extension) of the pages whose converted file exists in output/. */
+function writtenPagePaths(workspace: string, tree: Tree): Set<string> {
+  return new Set(tree.pages.flatMap((page) => (page.newPath && existsSync(join(workspace, 'output', `${page.newPath}.mdx`)) ? [page.newPath] : [])));
+}
+
 async function main() {
   switch (cmd) {
     case 'init': {
@@ -235,26 +316,30 @@ async function main() {
       assertOutsidePlugin(workspace, PLUGIN_ROOT);
       if (!v.source) fail('--source is required');
       if (v.target !== 'customer-org' && v.target !== 'demo-org') fail('--target must be customer-org or demo-org');
+      if (v.fidelity !== 'exact' && v.fidelity !== 'permissive') fail('--fidelity must be exact or permissive');
+      const migrator = captureMigratorProvenance({ repoRoot: PLUGIN_ROOT, packageVersion: CORE_VERSION });
       ensureWorkspace(workspace);
       const contract = loadContract();
       const allowedOrgs = v['allowed-orgs']!.split(',').map((s) => s.trim()).filter(Boolean);
-      const checks = await preflight({ target: { landing: v.target }, allowedRemoteOrgs: allowedOrgs, daiApiBase: process.env.DAI_API_BASE, daiApiKey: process.env.DAI_API_KEY });
-      for (const c of checks) console.log(`  ${c.status === 'ok' ? '✔' : c.status === 'fail' ? '✖' : '·'} ${c.id}: ${c.detail}`);
-      if (checks.some((c) => c.status === 'fail')) fail('preflight failed');
+      const s3Configured = !!((process.env.MIGRATION_S3_BUCKET ?? process.env.MIGRATION_R2_BUCKET) && process.env.MIGRATION_ASSET_PUBLIC_BASE);
+      const pre = await preflight({ target: { landing: v.target as 'customer-org' | 'demo-org', repoRemote: v.remote }, allowedRemoteOrgs: allowedOrgs, daiApiBase: process.env.DAI_API_BASE, daiApiKey: process.env.DAI_API_KEY, s3Configured });
+      for (const c of pre.checks) console.log(`  ${c.status === 'ok' ? '✔' : c.status === 'fail' ? '✖' : '·'} ${c.id}: ${c.detail}`);
+      if (pre.checks.some((c) => c.status === 'fail')) fail('preflight failed; fix the connection issues above before migrating (nothing was written)');
+      writeJson(join(workspace, 'report', 'preflight.json'), pre.checks);
       const session: Session = {
         migrationId: newMigrationId(), createdAt: new Date().toISOString(),
         source: {
           kind: v.export ? 'export' : v.repo ? 'repo' : /^https?:\/\//.test(v.source!) ? 'url' : existsSync(v.source!) && statSync(v.source!).isDirectory() ? 'repo' : 'export',
           location: v.export ?? v.repo ?? v.source!, platform: v.platform,
         },
-        target: { landing: v.target as 'customer-org' | 'demo-org' },
-        scope: 'full', customerAuthorisedCrawl: !!v['customer-authorised'],
+        target: { landing: v.target as 'customer-org' | 'demo-org', ...pre.target },
+        scope: 'full', customerAuthorisedCrawl: !!v['customer-authorised'], fidelityMode: v.fidelity, migrator,
         versions: { core: CORE_VERSION, contentContract: contract.contractVersion, parsers: { htmlparser2: '10' } },
         hashes: {}, stages: {},
       };
       writeSession(workspace, session);
       writeJson(join(workspace, 'plan', 'allowed-orgs.json'), allowedOrgs);
-      ok(`session ${session.migrationId} at ${workspace} (landing: ${session.target.landing})`);
+      ok(`session ${session.migrationId} at ${workspace} (landing: ${session.target.landing}; assets: ${session.target.assetProvider ?? 'local'}; remote: ${session.target.repoRemote ?? 'not set'}; fidelity: ${session.fidelityMode}; migrator: ${migrator.gitSha.slice(0, 12)}${migrator.dirty ? ' with uncommitted changes' : ''})`);
       break;
     }
     case 'fingerprint': {
@@ -266,7 +351,8 @@ async function main() {
       const fp = fingerprint({ html, paths });
       writeJson(join(workspace, 'plan', 'fingerprint.json'), fp);
       if (fp.best) ok(`${fp.best.platform} (${fp.best.confidence.toFixed(2)}) matched ${fp.best.matched.join(', ')}`);
-      if (fp.ambiguous) console.log(`⏸ ambiguous: ${fp.reason}. Pass --platform to init or choose a skill explicitly.`);
+      if (fp.ambiguous && s.source.platform) console.log(`· fingerprint is ambiguous (${fp.reason}); continuing with the explicitly selected platform ${s.source.platform}`);
+      else if (fp.ambiguous) console.log(`? input required (not a standard human gate): ${fp.reason}. Pass --platform to init or choose a skill explicitly.`);
       else if (!s.source.platform) { s.source.platform = fp.best!.platform; s.source.platformConfidence = fp.best!.confidence; writeSession(workspace, s); }
       break;
     }
@@ -322,34 +408,85 @@ async function main() {
           mkdirSync(join(workspace, 'source-cache', 'acquired'), { recursive: true, mode: 0o700 });
           for (const t of tree.pages) {
             const p = bodies.get(t.source.replace('readme-api://', '').replace('/', ':'))!;
-            const acquired: AcquiredPage = p.bodyType === 'markdown' ? { url: t.source, markdown: p.body, title: p.title } : { url: t.source, body: p.body, contentType: 'text/html', title: p.title };
+            const acquired: AcquiredPage = p.bodyType === 'markdown' ? { url: t.source, markdown: p.body, markdownSha256: sha256(p.body), title: p.title } : { url: t.source, html: p.body, htmlSha256: sha256(p.body), contentType: 'text/html', title: p.title };
             writeJson(acquiredPath(workspace, t.id), acquired);
           }
           markStage(workspace, 'acquire', 'done', 'readme-api');
           ok(`${tree.pages.length} pages from the ReadMe API (guides + reference), bodies acquired; ${pages.filter((p) => p.hidden).length} hidden pages skipped`);
         } else {
           const host = new URL(url).hostname;
-          const f = new Fetcher(networkOptions(workspace, s, [host]));
+          const profile = getProfile(v.profile ?? platform ?? 'generic');
+          const canonicalHosts = new CanonicalHosts(new URL(url).origin, profileHostAliases(profile, host));
+          const f = new Fetcher({ ...networkOptions(workspace, s, [host]), canonicalHosts });
           let fc: Firecrawl | undefined;
           if (v.fetcher === 'firecrawl' && process.env.FIRECRAWL_API_KEY) {
             fc = new Firecrawl(await firecrawlOptions(workspace, s, url));
           }
           const limit = Number(v['discovery-limit']);
           if (!Number.isInteger(limit) || limit < 1 || limit > 50_000) fail('--discovery-limit must be an integer from 1 to 50000');
-          const discovery = await discoverLiveSite({ seedUrl: url, fetcher: f, profile: getProfile(v.profile ?? platform ?? 'generic'), limit, map: fc ? (u, n) => fc!.map(u, { limit: n }) : undefined });
+          const discovery = await discoverLiveSite({ seedUrl: url, fetcher: f, profile, limit, map: fc ? (u, n) => fc!.map(u, { limit: n }) : undefined });
           writeJson(join(workspace, 'inventory', 'discovery-failures.json'), discovery.failures);
-          const pages: TreePage[] = discovery.pages.sort((a, b) => a.url.localeCompare(b.url)).map(({ url: u, reasons, title }, i) => {
+          writeJson(join(workspace, 'inventory', 'sitemaps.json'), discovery.sitemaps);
+          writeJson(join(workspace, 'inventory', 'llms.json'), discovery.llms ?? null);
+          writeJson(canonicalHostsPath(workspace), { seed: canonicalHosts.seedOrigin, aliases: discovery.canonicalHosts });
+          const orderTier = { sidebar: 0, sitemap: 1, crawl: 2 } as const;
+          const pages: TreePage[] = discovery.pages.sort((a, b) => orderTier[a.orderSource] - orderTier[b.orderSource] || a.orderHint - b.orderHint || a.url.localeCompare(b.url)).map(({ url: u, reasons, title, description, sidebarTitle, domSidebarTitle, llms, groupHint, locale, version, sitemap }, i) => {
             const parsed = new URL(u);
             const parts = parsed.pathname.split('/').filter(Boolean);
-            return { id: pageIdFromPlatform(platform ?? 'generic', u), title: title ?? decodeURIComponent(parts.at(-1) ?? 'index').replace(/[-_]+/g, ' '), source: u, group: parts.slice(0, -1).map((x) => decodeURIComponent(x).replace(/[-_]+/g, ' ')), order: i, oldPath: parsed.pathname, migrate: true, reason: reasons.join('+') };
+            let pathGroups = parts.slice(0, -1);
+            if (locale && pathGroups[0]?.toLowerCase() === locale.toLowerCase()) pathGroups = pathGroups.slice(1);
+            const groups = pathGroups.length ? pathGroups.map((x) => decodeURIComponent(x).replace(/[-_]+/g, ' ')) : (groupHint ?? []);
+            // A URL-derived title is a placeholder, marked as such: inventory replaces it with the page's own H1 and exact mode refuses one that survives.
+            const titleSource: TreePage['titleSource'] = llms?.title ? 'llms-txt' : title ? 'platform-metadata' : 'path';
+            return {
+              id: pageIdFromPlatform(platform ?? 'generic', u), title: llms?.title ?? title ?? decodeURIComponent(parts.at(-1) ?? 'index').replace(/[-_]+/g, ' '), titleSource, sidebarTitle, domSidebarTitle, description, llms, source: u,
+              group: groups, order: i, oldPath: parsed.pathname, migrate: true, locale, version, reason: reasons.join('+'),
+              discovery: sitemap ? { sitemap: sitemap.source, sitemapOrder: sitemap.order, lastmod: sitemap.lastmod, changefreq: sitemap.changefreq, priority: sitemap.priority, groupHint } : undefined,
+            };
           });
-          tree = { scope: 'full', platform: platform ?? 'generic', pages };
-          ok(`${pages.length} unique URLs from recursive links, sidebars, sitemaps and configured map sources; ${discovery.failures.length} fetch failures${discovery.truncated ? '; limit reached' : ''}`);
+          const pageIdByUrl = new Map(pages.map((page) => [page.source.replace(/\/$/, ''), page.id]));
+          // A navigation entry the page set cannot account for means discovery missed a page.
+          // Dropping it silently is how a group vanished from the last migration, so exact mode stops here.
+          const unmappedNavigationUrls: string[] = [];
+          const mapNavigation = (nodes: import('./scrape/discovery.js').DiscoveredNavigationNode[]): SourceNavigationNode[] => {
+            const out: SourceNavigationNode[] = [];
+            for (const node of nodes) {
+            if (node.type === 'page') {
+              const pageId = pageIdByUrl.get(node.url.replace(/\/$/, ''));
+              if (pageId) out.push({ type: 'page', pageId, title: node.title });
+              else unmappedNavigationUrls.push(node.url);
+              continue;
+            }
+            const children = mapNavigation(node.children);
+            if (children.length) out.push({ type: 'group', label: node.label, children });
+            }
+            return out;
+          };
+          const navigation = discovery.navigation ? mapNavigation(discovery.navigation) : undefined;
+          if (navigation?.length) {
+            // A page the site publishes but does not place in its sidebar migrates as a file and is reported; it is never given an invented group.
+            const placed = placedPageIds(navigation);
+            for (const page of pages) page.navMembership = placed.has(page.id) ? 'listed' : 'unlisted';
+          }
+          if (unmappedNavigationUrls.length && (s.fidelityMode ?? 'exact') === 'exact') {
+            fail(`${unmappedNavigationUrls.length} page(s) in the source navigation are not in the discovered page set, so their placement would be lost:\n${unmappedNavigationUrls.map((u) => `  ${u}`).join('\n')}\nraise --limit, check the crawl allowlist, or re-run init with --fidelity permissive`);
+          }
+          for (const url of unmappedNavigationUrls) console.log(`· navigation page not discovered, placement dropped: ${url}`);
+          const fallbackSource = pages.some((page) => page.discovery?.groupHint?.length) ? 'sitemap-hint' as const : 'url-path' as const;
+          tree = { scope: 'full', platform: platform ?? 'generic', pages, navigation, navigationSource: navigation?.length ? (discovery.navigationSource ?? 'platform-metadata') : fallbackSource };
+          // The site's own declaration (docsConfig) is authoritative; og:site_name is the fallback for platforms that publish none.
+          const siteMeta: PlatformMeta & { platform: string } = {
+            platform: platform ?? 'generic',
+            ...discovery.siteConfig,
+            ...(discovery.siteConfig?.name ? {} : discovery.siteName ? { name: discovery.siteName } : {}),
+          };
+          writeJson(join(workspace, 'inventory', 'platform-meta.json'), siteMeta);
+          ok(`${pages.length} unique URLs from ${discovery.llms ? `${discovery.llms.entries.length} llms.txt entries, ` : ''}recursive links, sidebars, ${discovery.sitemaps.sources.length} sitemap file(s) and configured map sources${discovery.canonicalHosts.length ? ` (canonical hosts: ${discovery.canonicalHosts.join(', ')})` : ''}; ${discovery.failures.length} fetch failures${discovery.truncated ? '; limit reached' : ''}`);
         }
       }
       writeTree(workspace, tree);
       markStage(workspace, 'discover', 'done');
-      console.log(`⏸ review ${join(workspace, 'plan', 'tree.yaml')}: set migrate: false on out-of-scope pages, scope: partial if so`);
+      humanGate(1, 'scope and structure', `review ${join(workspace, 'plan', 'tree.yaml')} plus source-specific inventory; confirm pages, groups, order, versions and locales before acquisition/inventory`);
       break;
     }
     case 'acquire': {
@@ -376,23 +513,9 @@ async function main() {
         }
       } else {
         const host = new URL(s.source.location).hostname;
-        const fetcher = new Fetcher(networkOptions(workspace, s, [host]));
-        for (const page of pages) {
-          let result;
-          if (profile.mdSuffix) {
-            const mdUrl = /\.md$/i.test(page.source) ? page.source : page.source.replace(/\/$/, '') + '.md';
-            try {
-              const md = await fetcher.get(mdUrl);
-              if (md.status === 200 && md.body.trim()) result = { url: page.source, finalUrl: md.finalUrl, contentType: md.contentType, markdown: md.body };
-            } catch { /* fall through to HTML */ }
-          }
-          if (!result) {
-            const html = await fetcher.get(page.source);
-            if (html.status < 200 || html.status >= 300) fail(`HTTP ${html.status} for ${page.source}`);
-            result = { url: page.source, finalUrl: html.finalUrl, contentType: html.contentType, body: html.body };
-          }
-          writeJson(acquiredPath(workspace, page.id), result);
-        }
+        const fetcher = new Fetcher({ ...networkOptions(workspace, s, [host]), canonicalHosts: sourceCanonicalHosts(workspace, s.source.location, profile) });
+        const acquisition = await acquirePages({ workspace, pages, fetcher, profile, fidelityMode: s.fidelityMode ?? 'exact' });
+        for (const fallback of acquisition.markdownUnavailable) console.log(`· ${fallback.url}: published Markdown not acquired (${fallback.reason}); permissive mode keeps the rendered HTML`);
       }
       markStage(workspace, 'acquire', 'done', `${pages.length} pages frozen`);
       ok(`${pages.length} pages acquired into source-cache/acquired`);
@@ -420,9 +543,9 @@ async function main() {
           const file = resolve(root, p.source);
           if (file !== root && !file.startsWith(root + '/')) fail(`source page escapes repository: ${p.source}`);
           const raw = readFileSync(file, 'utf8');
-          if (/\.mdx?$/i.test(file)) docs.push(attachDefinitions(markdownToIr(raw, { platform: tree.platform, file: p.source, pageId: p.id, title: p.title, resolveSnippet: tree.platform === 'mintlify' ? mintlifySnippetResolver(root) : undefined }), definitions));
+          if (/\.mdx?$/i.test(file)) docs.push(attachDefinitions(markdownToIr(raw, { platform: tree.platform, file: p.source, pageId: p.id, title: p.title, resolveSnippet: tree.platform === 'mintlify' ? mintlifySnippetResolver(root) : undefined, codeMetaStrip: profile.codeMetaStrip }), definitions));
           else {
-            const ir = htmlToIr(raw, { platform: tree.platform, file: p.source, articleSelector: profile.articleSelector, removeSelectors: profile.removeSelectors, recognisers: profile.recognisers });
+            const ir = htmlToIr(raw, htmlAdapterOptions(profile, { platform: tree.platform, file: p.source }));
             docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title: p.title }, children: ir.children });
           }
         }
@@ -432,10 +555,26 @@ async function main() {
           const cached = acquiredPath(workspace, p.id);
           if (!existsSync(cached)) fail(`acquired page missing for ${p.source}; run dai-migrate acquire first`);
           const page = readJson<AcquiredPage>(cached);
-          if (page.markdown) docs.push(markdownToIr(page.markdown, { platform: tree.platform, file: p.source, pageId: p.id, title: page.title ?? p.title }));
+          if (page.markdown) {
+            // The declared description (llms.txt, then platform metadata) is what the published .md's leading blockquote must equal to leave the body.
+            const description = page.llms?.description ?? page.description ?? p.description;
+            const published = unwrapPublishedMarkdown(page.markdown, tree.platform, { expectedDescription: description });
+            // The site's own statements only: its llms.txt entry, then the page's H1, then platform metadata.
+            // A URL-derived placeholder is never a title, so exact mode stops rather than inventing one.
+            const stated = p.llms?.title ?? published.title ?? (p.titleSource && p.titleSource !== 'path' ? p.title : undefined);
+            if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry, published Markdown H1 and platform metadata all lack one; re-run init with --fidelity permissive to fall back to the URL`);
+            const title = stated ?? p.title;
+            docs.push(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}) }, codeMetaStrip: profile.codeMetaStrip }));
+          }
           else {
-            const ir = htmlToIr(page.body ?? '', { platform: tree.platform, file: p.source, articleSelector: profile.articleSelector, removeSelectors: profile.removeSelectors, recognisers: profile.recognisers });
-            docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title: page.title ?? p.title }, children: ir.children });
+            if (page.html === undefined) fail(`acquired record for ${p.source} holds neither published Markdown nor HTML; run dai-migrate acquire again`);
+            const ir = htmlToIr(page.html, htmlAdapterOptions(profile, { platform: tree.platform, file: p.source }));
+            // No published Markdown here, so the page's own H1 is the H1 of the rendered article.
+            const firstHeading = ir.children.find((block) => block.type === 'heading' && block.depth === 1);
+            const h1 = firstHeading?.type === 'heading' ? inlineText(firstHeading.children).trim() || undefined : undefined;
+            const title = p.llms?.title ?? h1 ?? (p.titleSource && p.titleSource !== 'path' ? p.title : undefined) ?? p.title;
+            const description = page.llms?.description ?? page.description ?? p.description;
+            docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}) }, children: ir.children });
           }
         }
       }
@@ -489,23 +628,27 @@ async function main() {
       writeFileSync(planPath, toYaml({ components }), { mode: 0o600 });
       const urlPlan = readUrlPlan(workspace) ?? defaultUrlPlan(tree, { mode: (v.mode as any) ?? 'preserve', stripPrefix: v['strip-prefix'], case: (v.case as any) ?? 'preserve' });
       writeUrlPlan(workspace, urlPlan);
-      const assetsPlan = { provider: v.provider ?? 'local', generateAlt: false, iframeHosts: ['www.youtube.com', 'youtube.com', 'youtu.be', 'player.vimeo.com', 'www.loom.com'] };
+      const assetsPlan = { provider: v.provider ?? s.target.assetProvider ?? 'local', generateAlt: false, iframeHosts: ['www.youtube.com', 'youtube.com', 'youtu.be', 'player.vimeo.com', 'www.loom.com'] };
       const ap = join(workspace, 'plan', 'assets.yaml'); if (!existsSync(ap)) writeFileSync(ap, toYaml(assetsPlan), { mode: 0o600 });
       // plans are pinned again by convert; a plan edit invalidates any verified output
       s.hashes.componentPlan = fileHash(planPath); s.hashes.urlPlan = fileHash(join(workspace, 'plan', 'urls.yaml')); s.hashes.canonicalOutput = undefined; writeSession(workspace, s);
       markStage(workspace, 'plan', 'done');
       const needs = components.filter((c) => c.status === 'needs-review').length;
       ok(`component plan: ${components.length} clusters, ${needs} need review; url plan: ${urlPlan.pages.length} pages (${urlPlan.mode})`);
-      console.log(`⏸ review plan/component-plan.yaml, plan/urls.yaml, plan/assets.yaml, inventory/snippets.json (blocked tokens)`);
+      humanGate(2, 'conversion plan', 'review plan/component-plan.yaml, plan/urls.yaml, plan/assets.yaml and inventory/snippets.json; resolve every needs-review or blocked decision before conversion');
       break;
     }
     case 'assets': {
       const workspace = ws(); const s = readSession(workspace);
-      requireStages(s, 'inventory');
-      const docs = loadSnapshot(workspace);
+      requireStages(s, 'plan');
+      const fidelityMode = s.fidelityMode ?? 'exact';
+      const blockExclusions = readBlockExclusions(workspace);
+      assertExclusionsPermitted(fidelityMode, blockExclusions);
+      // permissive mode only: excluded blocks are not part of the migration, so their assets are neither fetched nor gated
+      const docs = loadSnapshot(workspace).map((d) => applyBlockExclusions(d, blockExclusions));
       const assetPlanPath = join(workspace, 'plan', 'assets.yaml');
       const assetPlan = existsSync(assetPlanPath) ? (parseYaml(readFileSync(assetPlanPath, 'utf8')) as { provider?: string }) : {};
-      const provider = v.provider ?? assetPlan.provider ?? 'local';
+      const provider = v.provider ?? assetPlan.provider ?? s.target.assetProvider ?? 'local';
       if (!['none', 'local', 's3', 'dai-api'].includes(provider)) fail(`unsupported asset provider ${provider}`);
       // Asset CDNs are often cross-host. The Fetcher still rejects private
       // addresses and never sends source credentials across origins.
@@ -516,7 +659,9 @@ async function main() {
         const exp = readD360Export(existsSync(root) ? root : s.source.location);
         localResolver = d360MediaResolver(exp.mediaDir);
       }
-      let m = await collectAssets(docs, workspace, { fetcher, localResolver, provider });
+      // the site's logo and favicon recorded by discover are hosted like any page image
+      const metaPath = join(workspace, 'inventory', 'platform-meta.json');
+      const siteAssets = existsSync(metaPath) ? siteAssetReferences(readJson<SiteMediaMeta>(metaPath)) : [];
       const providerOptions: AssetProviderOptions = {
         workspace,
         provider: provider as AssetProviderOptions['provider'],
@@ -529,26 +674,35 @@ async function main() {
           accessKeyId: process.env.MIGRATION_S3_ACCESS_KEY_ID ?? process.env.MIGRATION_R2_ACCESS_KEY_ID,
           secretAccessKey: process.env.MIGRATION_S3_SECRET_ACCESS_KEY ?? process.env.MIGRATION_R2_SECRET_ACCESS_KEY,
         } : undefined,
-        dai: provider === 'dai-api' ? {
-          baseUrl: process.env.DAI_API_BASE ?? '', token: process.env.DAI_API_KEY ?? '',
-          organizationId: process.env.DAI_ORGANIZATION_ID ?? '', documentationId: process.env.DAI_DOCUMENTATION_ID ?? '',
-        } : undefined,
+        dai: provider === 'dai-api' ? { baseUrl: process.env.DAI_API_BASE ?? '', token: process.env.DAI_API_KEY ?? '' } : undefined,
       };
       if (provider === 's3' && (!providerOptions.s3!.bucket || !providerOptions.s3!.publicBase)) fail('s3 provider requires MIGRATION_S3_BUCKET and MIGRATION_ASSET_PUBLIC_BASE');
-      if (provider === 'dai-api' && Object.values(providerOptions.dai!).some((x) => !x)) fail('dai-api provider requires DAI_API_BASE, DAI_API_KEY, DAI_ORGANIZATION_ID and DAI_DOCUMENTATION_ID');
-      m = await ingestAssets(m, providerOptions);
-      const entries = Object.values(m.entries);
+      if (provider === 'dai-api' && Object.values(providerOptions.dai!).some((x) => !x)) fail('dai-api provider requires DAI_API_BASE and DAI_API_KEY (the key is bound to one documentation)');
+      let result: AssetsStageResult;
+      try {
+        result = await runAssetsStage({ workspace, docs, fidelityMode, provider: providerOptions, fetcher, localResolver, siteAssets });
+      } catch (error) {
+        if (!(error instanceof UnhostedAssetsError)) throw error;
+        markStage(workspace, 'assets', 'failed', `${error.entries.length} assets without a hosted URL`);
+        fail(error.message);
+      }
+      const entries = Object.values(result.manifest.entries);
       markStage(workspace, 'assets', 'done');
-      ok(`${entries.length} assets via ${provider}: ${entries.filter((e) => e.status === 'ingested').length} ingested, ${entries.filter((e) => e.status === 'downloaded').length} local, ${entries.filter((e) => e.status === 'kept-external').length} kept external, ${entries.filter((e) => e.status === 'failed').length} failed; ${entries.reduce((n, e) => n + e.altMissing, 0)} references without alt`);
+      ok(`${entries.length} assets (${referenceTally(result.manifest) || 'no references'}) via ${provider}: ${entries.filter((e) => e.status === 'ingested').length} ingested, ${entries.filter((e) => e.status === 'downloaded').length} local, ${entries.filter((e) => e.status === 'kept-external').length} kept external, ${entries.filter((e) => e.status === 'failed').length} failed; ${entries.reduce((n, e) => n + e.altMissing, 0)} references without alt`);
       if (provider === 'local') console.log('· provider local: release remains blocked until dai-api or s3 assigns final URLs');
       break;
     }
     case 'convert': {
       const workspace = ws(); const s = readSession(workspace);
       requireStages(s, 'plan', 'assets');
+      const blockExclusions = readBlockExclusions(workspace);
+      // exact mode carries every authored block; an operator exclusion is refused before anything is read or written
+      if ((s.fidelityMode ?? 'exact') === 'exact' && blockExclusions.length) fail(`block exclusions are not permitted in exact mode: plan/block-exclusions.yaml lists ${blockExclusions.length} (${blockExclusions.map((e) => `${e.pageId}:${e.nodeId}`).join(', ')}); remove them, or re-run init with --fidelity permissive`);
       const tree = applyUrlPlan(readTree(workspace), readUrlPlan(workspace) ?? defaultUrlPlan(readTree(workspace)));
       const docs = loadSnapshot(workspace);
       const manifest = readManifest(workspace);
+      const unmatchedExclusions = unmatchedBlockExclusions(docs, blockExclusions);
+      if (unmatchedExclusions.length) fail(`plan/block-exclusions.yaml names nodes that are not in the snapshot: ${unmatchedExclusions.map((e) => `${e.pageId}:${e.nodeId}`).join(', ')}`);
       const plan = readComponentPlan(workspace);
       const assetsPlan = existsSync(join(workspace, 'plan', 'assets.yaml')) ? (parseYaml(readFileSync(join(workspace, 'plan', 'assets.yaml'), 'utf8')) as { iframeHosts?: string[] }) : {};
       // fresh ledger and log per convert run
@@ -565,56 +719,88 @@ async function main() {
       const inbound = new Map<string, number>();
       for (const l of links) { const h = l.url.split('#')[1]; if (h) inbound.set(`#${h}`, (inbound.get(`#${h}`) ?? 0) + 1); }
       const shims = anchorMap(anchors, inbound).shims;
-      let converted = 0; let blocked = 0;
+      let converted = 0; let heldForSnippets = 0; let quarantinedForFidelity = 0;
+      // every snapshot page gets a record, so verify can tell a page convert skipped on purpose from one it never saw
+      const fidelityRecords: FidelityRecord[] = [];
       for (const doc of docs) {
-        const page = byId.get(doc.pageId); if (!page || !page.migrate || !page.newPath) continue;
+        const page = byId.get(doc.pageId);
+        if (!page || !page.migrate || !page.newPath) { fidelityRecords.push(unconvertedFidelityRecord(doc, 'not-migrated')); continue; }
         const hasBlocked = [...blockedTokens].some((t) => JSON.stringify(doc.children).includes(`UNRESOLVED SNIPPET ${t}`) || JSON.stringify(doc.children).includes(`"token":"${t}"`));
         if (hasBlocked) {
-          blocked++;
+          heldForSnippets++;
           walkBlocks(doc.children, (n) => { ledger.quarantined(doc.pageId, n.id, 'page held: blocked snippet token(s) unresolved'); });
-          writeJson(join(qDir, `${doc.pageId}.json`), { reason: 'blocked snippet token(s) unresolved', page: page.newPath });
+          writeQuarantine(workspace, doc.pageId, { kind: 'blocked-snippet', reason: 'blocked snippet token(s) unresolved', page: page.newPath });
+          fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const withSnippets = inlineSnippetBodies(doc, snippets);
+        const sourcePrepared = rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest);
+        const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
         const resolved = engine.resolveDoc(rewriteAssetRefs(withSnippets, manifest));
+        const sourceSnapshot = authoredContentSnapshot(sourcePrepared);
+        const resolvedSnapshot = authoredContentSnapshot(resolved);
+        const pass = fidelityEqual(sourceSnapshot, resolvedSnapshot);
+        const difference = pass ? undefined : firstFidelityDifference(sourceSnapshot, resolvedSnapshot);
+        fidelityRecords.push({ pageId: doc.pageId, source: doc.source, pass, difference, sourceSnapshot, resolvedSnapshot, expectedOutput: renderedDocSnapshot(resolved) });
+        if (!pass && (s.fidelityMode ?? 'exact') === 'exact') {
+          quarantinedForFidelity++;
+          writeQuarantine(workspace, doc.pageId, { kind: 'exact-fidelity', reason: `exact-fidelity violation at ${difference ?? 'unknown location'}`, page: page.newPath, sourceSnapshot, resolvedSnapshot });
+          continue;
+        }
         const mdx = docToMdx(resolved, { anchorShims: shims.get(doc.pageId) });
         const outPath = join(outDir, `${page.newPath}.mdx`);
         mkdirSync(dirname(outPath), { recursive: true, mode: 0o700 });
         writeFileSync(outPath, mdx, { mode: 0o600 });
         converted++;
       }
+      writeFidelityRecords(workspace, fidelityRecords);
       s.hashes.componentPlan = fileHash(join(workspace, 'plan', 'component-plan.yaml'));
       s.hashes.urlPlan = fileHash(join(workspace, 'plan', 'urls.yaml'));
       s.hashes.assetPlan = fileHash(join(workspace, 'plan', 'assets.yaml'));
+      s.hashes.blockExclusions = existsSync(blockExclusionsPath(workspace)) ? fileHash(blockExclusionsPath(workspace)) : undefined;
       s.hashes.canonicalOutput = undefined;
       writeSession(workspace, s);
       // determinism is proven by re-converting the same frozen inputs, not by re-reading the same files
       const outputHash = canonicalHash(outDir);
-      const inputsKey = sha256([s.hashes.snapshot ?? '', s.hashes.componentPlan ?? '', s.hashes.urlPlan ?? '', s.hashes.assetPlan ?? '', existsSync(join(workspace, 'plan', 'assets.json')) ? fileHash(join(workspace, 'plan', 'assets.json')) : ''].join('|'));
+      const inputsKey = sha256([s.hashes.snapshot ?? '', s.hashes.componentPlan ?? '', s.hashes.urlPlan ?? '', s.hashes.assetPlan ?? '', s.hashes.blockExclusions ?? '', existsSync(join(workspace, 'plan', 'assets.json')) ? fileHash(join(workspace, 'plan', 'assets.json')) : ''].join('|'));
       s.hashes.previousConvertOutput = s.hashes.convertInputs === inputsKey ? s.hashes.convertOutput : undefined;
       s.hashes.convertInputs = inputsKey; s.hashes.convertOutput = outputHash; writeSession(workspace, s);
-      markStage(workspace, 'convert', 'done', `${converted} converted, ${blocked} blocked`);
-      ok(`${converted} pages written to output/, ${blocked} pages held (blocked snippet tokens)`);
+      markStage(workspace, 'convert', 'done', `${converted} converted, ${heldForSnippets} held (blocked snippet tokens), ${quarantinedForFidelity} quarantined (exact-fidelity)`);
+      ok(`${converted} pages written to output/, ${heldForSnippets} pages held (blocked snippet tokens), ${quarantinedForFidelity} pages quarantined (exact-fidelity)`);
       break;
     }
     case 'nav': {
       const workspace = ws(); const s = readSession(workspace); requireStages(s, 'convert');
       const tree = applyUrlPlan(readTree(workspace), readUrlPlan(workspace) ?? defaultUrlPlan(readTree(workspace)));
-      const nav = buildNavigation(tree.pages.filter((p) => existsSync(join(workspace, 'output', `${p.newPath}.mdx`))), { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale });
       const docJsonPath = join(workspace, 'output', 'documentation.json');
-      const existing = existsSync(docJsonPath) ? readJson<Record<string, unknown>>(docJsonPath) : { name: 'Documentation', initialRoute: `/${tree.pages.find((p) => p.migrate && p.newPath)?.newPath ?? ''}` };
-      const metaPath = join(workspace, 'inventory', 'platform-meta.json');
-      const meta = existsSync(metaPath) ? readJson<{ name?: string; colors?: Record<string, string>; logo?: unknown; favicon?: string; redirects?: { exact: any[]; wildcard: any[] }; openapi?: Array<{ groupPath: string[]; spec: string }>; root?: string }>(metaPath) : {};
-      let navigation = nav;
-      const copiedSpecs: string[] = [];
-      for (const o of meta.openapi ?? []) {
-        const src = meta.root ? join(meta.root, o.spec) : undefined;
-        if (!src || !existsSync(src)) { console.log(`· openapi spec ${o.spec} not found in the source repo; group left without openapi`); continue; }
-        const dst = join(workspace, 'output', o.spec); mkdirSync(dirname(dst), { recursive: true, mode: 0o700 }); writeFileSync(dst, readFileSync(src), { mode: 0o600 }); copiedSpecs.push(o.spec);
-        try { navigation = attachGroupOpenapi(navigation, o.groupPath, o.spec, (o as any).version, (o as any).locale); } catch (e) { console.log(`· ${(e as Error).message}`); }
+      const existing = existsSync(docJsonPath) ? readJson<Record<string, unknown>>(docJsonPath) : { name: 'Documentation', initialRoute: tree.pages.find((p) => p.migrate && p.newPath)?.newPath ?? '' };
+      const meta = readPlatformMeta(workspace);
+      // the connected specs ship with the output; a reference the source repository cannot satisfy stops the stage instead of leaving the group without its API
+      for (const ref of meta.openapi ?? []) {
+        const group = ref.groupPath.join(' / ');
+        if (!meta.root) fail(`openapi spec ${ref.spec} for group ${group}: inventory/platform-meta.json records no source repository root to read it from`);
+        const root = resolve(meta.root); const src = resolve(root, ref.spec);
+        if (!src.startsWith(join(root, '/'))) fail(`openapi spec ${ref.spec} for group ${group} points outside the source repository`);
+        if (!existsSync(src)) fail(`openapi spec ${ref.spec} for group ${group} is not in the source repository at ${root}; fix the reference in inventory/platform-meta.json or restore the file`);
+        const dst = join(workspace, 'output', ref.spec); mkdirSync(dirname(dst), { recursive: true, mode: 0o700 }); writeFileSync(dst, readFileSync(src), { mode: 0o600 });
       }
-      const site = { ...(meta.name ? { name: meta.name } : {}), ...(meta.colors ? { colors: meta.colors } : {}), ...(meta.favicon ? { favicon: meta.favicon } : {}) };
-      writeJson(docJsonPath, { ...existing, ...site, ...navigation });
+      // A page the source placed but the output does not would disappear from the sidebar without a word.
+      const unplaced = pagesWithoutPlacement(tree).filter((page) => page.navMembership !== 'unlisted');
+      if (unplaced.length && (s.fidelityMode ?? 'exact') === 'exact') {
+        fail(`${unplaced.length} migrated page(s) have no placement in the source navigation and are not marked unlisted:\n${unplaced.map((page) => `  ${page.source} (${page.id})`).join('\n')}\nre-run discover so the navigation covers them, mark them unlisted in plan/tree.yaml, or re-run init with --fidelity permissive`);
+      }
+      const unlisted = pagesWithoutPlacement(tree).filter((page) => page.navMembership === 'unlisted');
+      const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta);
+      // Site presentation travels with the content; media URLs are the manifest's hosted ones, set by the assets stage.
+      const site = {
+        ...(meta.name ? { name: meta.name } : {}),
+        ...(meta.colors ? { colors: meta.colors } : {}),
+        ...(meta.favicon ? { favicon: meta.favicon } : {}),
+        ...(meta.logo ? { logo: meta.logo } : {}),
+        ...(meta.theme ? { theme: meta.theme } : {}),
+      };
+      // initialRoute is a page path without a leading slash; normalise values written by earlier runs
+      const initialRoute = typeof existing.initialRoute === 'string' ? existing.initialRoute.replace(/^\/+/, '') : undefined;
+      writeJson(docJsonPath, { ...existing, ...(initialRoute ? { initialRoute } : {}), ...site, ...navigation });
       const plan = readUrlPlan(workspace)!;
       const r = redirectMaps(plan);
       const platformExact = (meta.redirects?.exact ?? []).filter((x) => !r.exact.some((e) => e.source === x.source));
@@ -622,22 +808,29 @@ async function main() {
       r.exact.push(...platformExact); r.wildcard.push(...platformWildcard);
       writeJson(join(workspace, 'report', 'redirects.exact.json'), r.exact);
       writeJson(join(workspace, 'report', 'redirects.wildcard.json'), r.wildcard);
-      if (copiedSpecs.length) console.log(`· copied ${copiedSpecs.length} OpenAPI spec(s) into output and attached them to their groups`);
+      if (meta.openapi?.length) console.log(`· copied ${meta.openapi.length} OpenAPI spec(s) into output and attached them to their groups`);
       const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }> }>>(join(workspace, 'inventory', 'anchors.json')) : [];
       const links = existsSync(join(workspace, 'inventory', 'links.json')) ? readJson<Array<{ pageId: string; url: string }>>(join(workspace, 'inventory', 'links.json')) : [];
       const inbound = new Map<string, number>();
       for (const l of links) { const h = l.url.split('#')[1]; if (h) inbound.set(`#${h}`, (inbound.get(`#${h}`) ?? 0) + 1); }
       const am = anchorMap(anchors, inbound);
       writeJson(join(workspace, 'report', 'anchors.json'), am.entries);
+      if (unlisted.length) writeJson(join(workspace, 'report', 'unlisted-pages.json'), unlisted.map((page) => ({ id: page.id, source: page.source, newPath: page.newPath, title: page.title, reason: page.reason })));
       markStage(workspace, 'nav', 'done');
       ok(`documentation.json written; ${r.exact.length} exact redirects, ${r.wildcard.length} wildcard candidates, ${r.issues.length} issues; ${am.entries.filter((e) => e.needsShim).length} headings need anchor shims`);
-      console.log(`⏸ review output/documentation.json, plan/urls.yaml, report/redirects.*.json`);
+      if (unlisted.length) console.log(`· ${unlisted.length} page(s) the source publishes without a sidebar placement were migrated as files and listed in report/unlisted-pages.json`);
+      console.log('· navigation artifacts are ready; run local verify before requesting human gate 3');
       break;
     }
     case 'write': {
       const workspace = ws(); const s = readSession(workspace);
       requireStages(s, 'nav');
-      if (!v.repo) fail('--repo <dir> is required');
+      // exact output never points at a source host: a manifest that lost a hosted URL since the assets stage refuses the branch
+      if ((s.fidelityMode ?? 'exact') === 'exact') assertAssetsHosted(readManifest(workspace), 'write');
+      const remote = v.remote ?? s.target.repoRemote;
+      const repoDir = v.repo ? resolve(v.repo) : join(workspace, 'repo');
+      if (!v.repo && !remote) fail('--repo <dir> or a remote (from init --remote or --remote here) is required');
+      if (!v.repo) mkdirSync(repoDir, { recursive: true, mode: 0o700 }); // cloned by the writer on first use
       if (v.push) {
         const gateFile = join(workspace, 'report', 'gates.json');
         if (!existsSync(gateFile)) fail('--push requires a completed verify run');
@@ -648,7 +841,9 @@ async function main() {
           ['urls.yaml', s.hashes.urlPlan],
           ['assets.yaml', s.hashes.assetPlan],
         ] as const;
-        const stalePlans = pinnedPlans.filter(([file, expected]) => !expected || !existsSync(join(workspace, 'plan', file)) || fileHash(join(workspace, 'plan', file)) !== expected).map(([file]) => file);
+        const stalePlans: string[] = pinnedPlans.filter(([file, expected]) => !expected || !existsSync(join(workspace, 'plan', file)) || fileHash(join(workspace, 'plan', file)) !== expected).map(([file]) => file);
+        // block exclusions are optional, so pin presence as well as content
+        if ((existsSync(blockExclusionsPath(workspace)) ? fileHash(blockExclusionsPath(workspace)) : undefined) !== s.hashes.blockExclusions) stalePlans.push('block-exclusions.yaml');
         if (stalePlans.length) fail(`--push refused: plan changed after conversion (${stalePlans.join(', ')}); rerun convert and verify`);
         const gateReport = readJson<{ pass: boolean; outputHash?: string; gates: GateResult[] }>(gateFile);
         if (gateReport.outputHash !== currentOutputHash) fail('--push refused: report/gates.json does not belong to the current output; rerun verify');
@@ -657,10 +852,39 @@ async function main() {
         if (!gateReport.pass) console.log('· pushing the migration branch to create a preview; rendered-preview gates remain required before release');
       }
       const allowed = existsSync(join(workspace, 'plan', 'allowed-orgs.json')) ? readJson<string[]>(join(workspace, 'plan', 'allowed-orgs.json')) : [];
-      const r = writeMigrationBranch({ repoDir: resolve(v.repo), outputDir: join(workspace, 'output'), sessionId: s.migrationId, remote: v.remote, allowedRemoteOrgs: allowed, push: !!v.push });
-      s.target.repoRemote = v.remote ?? s.target.repoRemote; writeSession(workspace, s);
+      if (v.push && remote) {
+        // cheap and side-effect free; turns a cryptic git failure after a full build into a one-line fix
+        const probe = await probePushAccess(remote);
+        if (!probe.ok) fail(`cannot push to ${remote}: ${probe.detail}. Fix: ${probe.fix}. The branch can still be written locally without --push.`);
+      }
+      const r = writeMigrationBranch({ repoDir, outputDir: join(workspace, 'output'), sessionId: s.migrationId, remote, allowedRemoteOrgs: allowed, push: !!v.push });
+      s.target.repoRemote = remote ?? s.target.repoRemote; writeSession(workspace, s);
       markStage(workspace, 'write', 'done', `${r.branch}@${r.commit.slice(0, 8)}`);
       ok(`${r.branch} at ${r.commit.slice(0, 8)}${r.pushed ? ' (pushed)' : ' (not pushed; add --push)'}`);
+      // After a push the platform's webhook builds a preview; find it so the operator never has to hunt for the URL.
+      if (r.pushed && !v['no-wait']) {
+        if (!process.env.DAI_API_KEY || !s.target.apiBase) console.log('· DAI_API_KEY not configured: cannot discover the preview URL; read it from the dashboard Deployments → Preview tab and pass --preview-url to verify');
+        else {
+          const api = new DaiClient({ baseUrl: s.target.apiBase, apiKey: process.env.DAI_API_KEY });
+          const minutes = Number(v['preview-timeout']);
+          if (!Number.isFinite(minutes) || minutes < 1 || minutes > 120) fail('--preview-timeout must be 1..120 minutes');
+          console.log(`· waiting up to ${minutes} min for the preview deployment of ${r.branch}`);
+          let last = '';
+          const res = await api.waitForBranchDeployment(r.branch, { timeoutMs: minutes * 60_000, onTick: (d) => { const st = d ? `${d.status}${d.url ? ` ${d.url}` : ''}` : 'no deployment yet'; if (st !== last) { console.log(`  · ${st}`); last = st; } } });
+          if (res.outcome === 'ready' && res.deployment?.url) {
+            s.target.previewUrl = res.deployment.url.startsWith('http') ? res.deployment.url : `https://${res.deployment.url}`;
+            s.target.previewDeploymentId = res.deployment.deploymentId; s.target.previewsSeen = true; writeSession(workspace, s);
+            ok(`preview ready: ${s.target.previewUrl}`);
+            console.log(`  next: dai-migrate verify --workspace ${workspace} --preview`);
+          } else if (res.outcome === 'error' || res.outcome === 'cancelled') {
+            fail(`preview deployment ${res.deployment?.deploymentId ?? ''} ended with status ${res.outcome}; open it in the dashboard Deployments list for the build log`);
+          } else if (res.firstSeenMs !== undefined) {
+            fail(`preview deployment for ${r.branch} was created but did not reach ready within ${minutes} min; re-run verify --preview-url <url> once the dashboard shows it ready`);
+          } else {
+            fail(noDeploymentDiagnosis(r.branch, !!s.target.previewsSeen));
+          }
+        }
+      }
       break;
     }
     case 'verify': {
@@ -673,35 +897,68 @@ async function main() {
       const quarantined = new Set(existsSync(qDir) ? readdirSync(qDir).map((f) => f.replace(/\.json$/, '')) : []);
       const plan = readComponentPlan(workspace);
       const unreviewed = Object.values(plan).filter((c) => c.status === 'needs-review' || ((c.tier === 'T5' || c.tier === 'T6') && c.status !== 'approved' && c.status !== 'excluded' && c.status !== 'quarantined')).length;
+      // preview URL: explicit flag, else the one write --push discovered
+      const previewUrl = v['preview-url'] ?? (v.preview ? s.target.previewUrl : undefined);
+      if (v.preview && !previewUrl) fail('--preview requested but no preview URL is recorded; run write --push first or pass --preview-url');
+      // contract version: explicit flag, else read live from the platform, else assume the pinned version and say so
+      let previewContractVersion = v['preview-contract-version'];
+      let contractAssumed = false;
+      if (previewUrl && !previewContractVersion) {
+        if (process.env.DAI_API_KEY && s.target.apiBase) {
+          try { previewContractVersion = (await new DaiClient({ baseUrl: s.target.apiBase, apiKey: process.env.DAI_API_KEY }).config()).contentContractVersion; } catch { /* fall through to assumption */ }
+        }
+        if (!previewContractVersion) { previewContractVersion = s.versions.contentContract; contractAssumed = true; }
+      }
+      // What the source itself served, re-read from the freeze: the gates compare output against
+      // this, never only against the snapshot the same run produced.
+      const sourceEvidence = s.source.kind === 'url' ? buildSourceEvidence(workspace, tree) : undefined;
       const gates = runGates({
-        workspace, outputDir: join(workspace, 'output'),
+        workspace, outputDir: join(workspace, 'output'), sourceEvidence,
+        pinnedPlans: { componentPlan: s.hashes.componentPlan, urlPlan: s.hashes.urlPlan, assetPlan: s.hashes.assetPlan, blockExclusions: s.hashes.blockExclusions },
         sourceDocs: docs.map((doc) => ({ doc, outputFile: byId.get(doc.pageId)?.newPath ? join(workspace, 'output', `${byId.get(doc.pageId)!.newPath}.mdx`) : undefined })),
         treePages: tree.pages, quarantinedPages: quarantined, excludedPages: new Set(), unreviewed,
-        previousCanonicalHash: s.hashes.previousConvertOutput, convertOutputHash: s.hashes.convertOutput, previewUrl: v['preview-url'], pinnedContractVersion: s.versions.contentContract, previewContractVersion: v['preview-contract-version'],
+        previousCanonicalHash: s.hashes.previousConvertOutput, convertOutputHash: s.hashes.convertOutput, previewUrl, pinnedContractVersion: s.versions.contentContract, previewContractVersion,
+        fidelityMode: s.fidelityMode ?? 'exact', sourceKind: s.source.kind, navigationSource: tree.navigationSource,
+        pinnedMigrator: s.migrator, currentMigrator: captureMigratorProvenance({ repoRoot: PLUGIN_ROOT, packageVersion: CORE_VERSION }),
+        expectedNavigation: buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), readPlatformMeta(workspace)).navigation,
       });
-      if (v['preview-url']) {
+      if (previewUrl) {
+        if (contractAssumed) {
+          const g = gates.find((x) => x.id === 'preview-contract-version');
+          if (g) g.detail = `assumed: the platform does not expose contentContractVersion; pinned ${s.versions.contentContract} used (recorded in the report)`;
+          s.target.contractVersionAssumed = true; writeSession(workspace, s);
+        }
         const anchorFile = join(workspace, 'report', 'anchors.json');
         const browserAnchors = existsSync(anchorFile) ? readJson<BrowserAnchor[]>(anchorFile) : [];
-        const browser = await runBrowserFragmentGate(v['preview-url'], tree.pages, browserAnchors);
+        const browser = await runBrowserFragmentGate(previewUrl, tree.pages, browserAnchors);
         const index = gates.findIndex((g) => g.id === 'browser-fragments');
         if (index >= 0) gates[index] = browser; else gates.push(browser);
+        const browserContent = await runBrowserContentGate(previewUrl, tree.pages.map((page) => ({ ...page, doc: docs.find((doc) => doc.pageId === page.id) })));
+        const contentIndex = gates.findIndex((g) => g.id === 'browser-content');
+        if (contentIndex >= 0) gates[contentIndex] = browserContent; else gates.push(browserContent);
       }
-      const pinnedPlans = [
-        ['component-plan.yaml', s.hashes.componentPlan],
-        ['urls.yaml', s.hashes.urlPlan],
-        ['assets.yaml', s.hashes.assetPlan],
-      ] as const;
-      const changedPlans = pinnedPlans.filter(([file, expected]) => !expected || !existsSync(join(workspace, 'plan', file)) || fileHash(join(workspace, 'plan', file)) !== expected).map(([file]) => file);
-      gates.unshift({ id: 'plans-pinned', status: changedPlans.length ? 'fail' : 'pass', detail: changedPlans.length ? `plan changed after conversion: ${changedPlans.join(', ')}; rerun convert` : 'component, URL and asset plans match the converted snapshot', count: changedPlans.length, samples: changedPlans });
       writeGates(workspace, gates, canonicalHash(join(workspace, 'output')));
       const clusters = existsSync(join(workspace, 'inventory', 'components.json')) ? readJson<ClusterEntry[]>(join(workspace, 'inventory', 'components.json')) : [];
       writeReviewQueue(workspace, gates, clusters, Object.fromEntries(Object.entries(plan).map(([k, c]) => [k, c.status ?? 'auto'])));
       if (!s.hashes.canonicalOutput) { s.hashes.canonicalOutput = canonicalHash(join(workspace, 'output')); writeSession(workspace, s); }
       for (const g of gates) console.log(`  ${g.status === 'pass' ? '✔' : g.status === 'fail' ? '✖' : '·'} ${g.id}: ${g.detail}`);
       const blocked = gates.filter((g) => g.status !== 'pass').length;
-      markStage(workspace, 'verify', blocked ? 'failed' : 'done', `${blocked} failing or not run`);
-      console.log(blocked ? `✖ ${blocked} gate(s) failing or not run; release is blocked; see report/review-queue.md` : '✔ all release gates pass');
-      if (blocked) process.exitCode = 2;
+      const prePushBlockers = previewPushBlockers(gates);
+      const effectiveBlockers = previewUrl ? blocked : prePushBlockers.length;
+      markStage(workspace, 'verify', effectiveBlockers ? 'failed' : 'done', previewUrl ? `${blocked} release gates failing or not run` : `${prePushBlockers.length} pre-push gates failing`);
+      if (previewUrl) {
+        if (blocked) console.log(`✖ ${blocked} release gate(s) failing or not run; release is blocked; see report/review-queue.md`);
+        else {
+          ok('all automated release gates pass');
+          humanGate(4, 'preview and release', 'review the rendered preview, redirects and report; explicitly approve cutover/release');
+        }
+      } else if (prePushBlockers.length) {
+        console.log(`✖ ${prePushBlockers.length} pre-push gate(s) failing; preview push is blocked; see report/review-queue.md`);
+      } else {
+        ok('all pre-push automated gates pass; preview-only gates remain not-run');
+        humanGate(3, 'pre-push validation', 'review output/documentation.json, converted pages, redirects and report/review-queue.md; approve only the named migration-branch push');
+      }
+      if (effectiveBlockers) process.exitCode = 2;
       break;
     }
     case 'report': {
@@ -710,11 +967,12 @@ async function main() {
       const gates = existsSync(join(workspace, 'report', 'gates.json')) ? readJson<{ gates: any[] }>(join(workspace, 'report', 'gates.json')).gates : [];
       const clusters = existsSync(join(workspace, 'inventory', 'components.json')) ? readJson<ClusterEntry[]>(join(workspace, 'inventory', 'components.json')) : [];
       const manifest = readManifest(workspace);
-      const qDir = join(workspace, 'quarantine');
       const decisions = readDecisions(workspace);
       const shims = existsSync(join(workspace, 'report', 'anchors.json')) ? readJson<Array<{ needsShim: boolean }>>(join(workspace, 'report', 'anchors.json')).filter((a) => a.needsShim).length : 0;
       writePlatformGaps(workspace, decisions, shims);
-      writeSummary(workspace, { pages: tree.pages.filter((p) => p.migrate).length, converted: tree.pages.filter((p) => p.migrate && p.newPath && existsSync(join(workspace, 'output', `${p.newPath}.mdx`))).length, quarantined: existsSync(qDir) ? readdirSync(qDir).length : 0, clusters: clusters.length, assets: Object.keys(manifest.entries).length, gates, branch: s.stages.write?.note });
+      const provenance: RunProvenance = { fidelityMode: s.fidelityMode ?? 'exact', navigationSource: tree.navigationSource, migrator: s.migrator, quarantine: countQuarantine(workspace) };
+      writeConnectionSummary(workspace, s, provenance);
+      writeSummary(workspace, { pages: tree.pages.filter((p) => p.migrate).length, converted: tree.pages.filter((p) => p.migrate && p.newPath && existsSync(join(workspace, 'output', `${p.newPath}.mdx`))).length, clusters: clusters.length, assets: Object.keys(manifest.entries).length, gates, branch: s.stages.write?.note, provenance });
       markStage(workspace, 'report', 'done');
       ok('report/summary.md and report/platform-gaps.json written');
       break;

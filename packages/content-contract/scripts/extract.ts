@@ -177,8 +177,9 @@ function main() {
       optional: ['description', 'metaTitle', 'metaDescription', 'ogImage', 'canonical', 'jsonLd'],
     },
     navigation: {
-      rootKeys: ['languages', 'versions', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'],
-      rule: 'exactly one semantic property per container; containers recurse',
+      // hand-written from the published schema, not extracted from the renderer
+      rootKeys: ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'groups', 'pages'],
+      rule: 'exactly one child collection per container, nested in schema order products > versions > languages > tabs > dropdowns > groups > pages; pages are objects { title, path | href } or nested groups, never bare strings (schema: dashboard.documentation.ai/documentation.json)',
     },
     redirects: {
       supported: { exact: true, namedParam: true, trailingWildcard: false, splat: false },

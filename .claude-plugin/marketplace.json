@@ -1,0 +1,12 @@
+{
+  "name": "documentation-ai-migration",
+  "description": "Internal Documentation.AI migration skills for supported documentation platforms.",
+  "owner": { "name": "Documentation.AI" },
+  "plugins": [
+    {
+      "name": "documentation-ai-migration",
+      "source": "./",
+      "description": "Migrate documentation sites onto Documentation.AI"
+    }
+  ]
+}

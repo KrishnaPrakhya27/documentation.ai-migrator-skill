@@ -1,0 +1,130 @@
+/**
+ * Acquisition: freeze every in-scope page as served. On platforms that publish
+ * Markdown next to each page (profile.mdSuffix) the published .md is the
+ * authoritative content and the rendered HTML is kept beside it for
+ * reconciliation. In exact mode a page whose .md is missing or is not Markdown
+ * stops the run: nothing is written for that page and no HTML stands in.
+ */
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { sha256 } from '../session/ids.js';
+import type { TreePage } from '../nav/tree.js';
+import type { FetchedPage, Fetcher } from './fetcher.js';
+import type { ScrapeProfile } from './profiles.js';
+import { markdownAlternateUrl, markdownUrlOfPage, publishedMarkdownProblem, type LlmsEntry } from './published-markdown.js';
+
+export interface AcquiredPage {
+  url: string;
+  finalUrl?: string;
+  contentType?: string;
+  /** Rendered HTML as served. */
+  html?: string;
+  htmlSha256?: string;
+  /** Published Markdown as served: the authoritative content on mdSuffix platforms. */
+  markdown?: string;
+  markdownUrl?: string;
+  markdownSha256?: string;
+  /** The page's llms.txt entry, when the site publishes one. */
+  llms?: LlmsEntry;
+  title?: string;
+  description?: string;
+  /** Permissive mode only: why no published Markdown was acquired, so the rendered HTML stands in for it. */
+  markdownUnavailable?: string;
+}
+
+export interface AcquireInput {
+  workspace: string;
+  pages: TreePage[];
+  fetcher: Fetcher;
+  profile: ScrapeProfile;
+  fidelityMode: 'exact' | 'permissive';
+}
+
+export interface AcquiredPageSummary {
+  id: string;
+  url: string;
+  htmlSha256: string;
+  markdownUrl?: string;
+  markdownSha256?: string;
+}
+
+export interface AcquireResult {
+  /** One entry per frozen page, in tree order. */
+  pages: AcquiredPageSummary[];
+  /** Pages frozen from HTML alone. Empty in exact mode, where such a page raises AcquisitionError instead. */
+  markdownUnavailable: Array<{ url: string; reason: string }>;
+}
+
+export class AcquisitionError extends Error {
+  constructor(readonly pages: Array<{ url: string; reason: string }>) {
+    super(`published Markdown is required in exact mode but could not be acquired for ${pages.length} page(s):\n${pages.map((page) => `  ${page.url}: ${page.reason}`).join('\n')}`);
+    this.name = 'AcquisitionError';
+  }
+}
+
+export function acquiredPath(workspace: string, pageId: string): string {
+  return join(workspace, 'source-cache', 'acquired', `${pageId}.json`);
+}
+
+function writeAcquired(workspace: string, pageId: string, page: AcquiredPage): void {
+  writeFileSync(acquiredPath(workspace, pageId), JSON.stringify(page, null, 2) + '\n', { mode: 0o600 });
+}
+
+/** The page's own declaration wins (`<link rel="alternate" type="text/markdown">`), then its llms.txt entry on the page's origin, then the `<path>.md` convention. */
+function publishedMarkdownUrl(page: TreePage, html: string, pageUrl: string): string {
+  const declared = markdownAlternateUrl(html, pageUrl);
+  if (declared) return declared;
+  if (page.llms) {
+    const listed = new URL(page.llms.mdUrl);
+    const origin = new URL(page.source);
+    listed.protocol = origin.protocol;
+    listed.host = origin.host;
+    return listed.toString();
+  }
+  return markdownUrlOfPage(page.source);
+}
+
+/** Fetches the published Markdown into `record`; returns the reason when the response cannot stand as Markdown. */
+async function acquireMarkdown(fetcher: Fetcher, markdownUrl: string, record: AcquiredPage): Promise<string | undefined> {
+  let response: FetchedPage;
+  try { response = await fetcher.get(markdownUrl); }
+  catch (error) { return (error as Error).message; }
+  const problem = publishedMarkdownProblem(response);
+  if (problem) return problem;
+  record.markdown = response.body;
+  record.markdownUrl = response.finalUrl || markdownUrl;
+  record.markdownSha256 = sha256(response.body);
+  return undefined;
+}
+
+export async function acquirePages(input: AcquireInput): Promise<AcquireResult> {
+  mkdirSync(join(input.workspace, 'source-cache', 'acquired'), { recursive: true, mode: 0o700 });
+  const result: AcquireResult = { pages: [], markdownUnavailable: [] };
+  const missingMarkdown: Array<{ url: string; reason: string }> = [];
+  for (const page of input.pages) {
+    const html = await input.fetcher.get(page.source);
+    if (html.status < 200 || html.status >= 300) throw new Error(`HTTP ${html.status} for ${page.source}`);
+    const htmlSha256 = sha256(html.body);
+    const record: AcquiredPage = { url: page.source, finalUrl: html.finalUrl, contentType: html.contentType, html: html.body, htmlSha256, title: page.title, description: page.description };
+    if (page.llms) record.llms = page.llms;
+    if (input.profile.mdSuffix) {
+      const markdownUrl = publishedMarkdownUrl(page, html.body, html.finalUrl || page.source);
+      const problem = await acquireMarkdown(input.fetcher, markdownUrl, record);
+      if (problem) {
+        const reason = `${markdownUrl}: ${problem}`;
+        if (input.fidelityMode === 'exact') {
+          // A record from an earlier run must not outlive a failed acquisition.
+          rmSync(acquiredPath(input.workspace, page.id), { force: true });
+          missingMarkdown.push({ url: page.source, reason });
+          continue;
+        }
+        record.markdownUnavailable = reason;
+        result.markdownUnavailable.push({ url: page.source, reason });
+      }
+    }
+    writeAcquired(input.workspace, page.id, record);
+    result.pages.push({ id: page.id, url: page.source, htmlSha256, markdownUrl: record.markdownUrl, markdownSha256: record.markdownSha256 });
+  }
+  if (missingMarkdown.length) throw new AcquisitionError(missingMarkdown);
+  return result;
+}

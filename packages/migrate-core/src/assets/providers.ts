@@ -8,7 +8,12 @@ export interface AssetProviderOptions {
   workspace: string;
   provider: 'none' | 'local' | 's3' | 'dai-api';
   s3?: { bucket: string; region: string; prefix?: string; publicBase: string; endpoint?: string; accessKeyId?: string; secretAccessKey?: string };
-  dai?: { baseUrl: string; token: string; organizationId: string; documentationId: string };
+  /**
+   * Documentation.AI API-key media surface: `<baseUrl>/api/v1/media/{upload-url,confirm}` plus `GET /api/v1/media?search=`.
+   * The key is bound to one documentation, so no org or documentation id is needed. The dashboard's
+   * `/organizations/:org/documentation/:doc/images` routes accept sessions only and are never used here.
+   */
+  dai?: { baseUrl: string; token: string };
   fetchImpl?: typeof fetch;
   s3Client?: Pick<S3Client, 'send'>;
 }
@@ -31,10 +36,28 @@ async function existingDaiAsset(api: string, headers: Record<string, string>, en
   return body.images?.find((image) => image.fileHash === entry.hash)?.publicUrl;
 }
 
+export function mediaApi(baseUrl: string): string { return `${baseUrl.replace(/\/$/, '')}/api/v1/media`; }
+
+export class MediaApiUnavailable extends Error {
+  constructor(public readonly status: number, public readonly url: string) {
+    super(status === 401 || status === 403
+      ? `the Documentation.AI media API rejected the API key (${status}) at ${url}. The platform's media routes currently accept dashboard sessions only; API-key media upload is a platform dependency (G7). Use --provider s3 or --provider none until it ships.`
+      : status === 404
+        ? `the Documentation.AI media API is not available at ${url} (404). API-key media upload is a platform dependency (G7); use --provider s3 or --provider none until it ships.`
+        : `the Documentation.AI media API answered ${status} at ${url}`);
+  }
+}
+
+/** One authenticated call before any asset is touched: proves the key can drive the media surface at all. */
+export async function probeDaiMediaApi(opts: NonNullable<AssetProviderOptions['dai']>, fetchImpl: typeof fetch = fetch): Promise<void> {
+  const url = `${mediaApi(opts.baseUrl)}?limit=1`;
+  const res = await fetchImpl(url, { headers: { authorization: `Bearer ${opts.token}` }, signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new MediaApiUnavailable(res.status, url);
+}
+
 async function ingestDai(entry: AssetEntry, opts: NonNullable<AssetProviderOptions['dai']>, fetchImpl: typeof fetch): Promise<string> {
   if (!entry.localPath) throw new Error('downloaded asset has no local path');
-  const base = opts.baseUrl.replace(/\/$/, '');
-  const api = `${base}/organizations/${encodeURIComponent(opts.organizationId)}/documentation/${encodeURIComponent(opts.documentationId)}/images`;
+  const api = mediaApi(opts.baseUrl);
   const auth = { authorization: `Bearer ${opts.token}` };
   const jsonHeaders = { ...auth, 'content-type': 'application/json' };
   const bytes = readFileSync(entry.localPath);
@@ -67,6 +90,10 @@ async function ingestS3(entry: AssetEntry, opts: NonNullable<AssetProviderOption
 export async function ingestAssets(manifest: AssetManifest, options: AssetProviderOptions): Promise<AssetManifest> {
   manifest.provider = options.provider;
   const fetchImpl = options.fetchImpl ?? fetch;
+  if (options.provider === 'dai-api') {
+    if (!options.dai) throw new Error('DAI API provider configuration is missing');
+    await probeDaiMediaApi(options.dai, fetchImpl); // fail fast with the real reason, not one 401 per asset
+  }
   for (const entry of Object.values(manifest.entries)) {
     if (entry.status === 'ingested') continue;
     if (entry.status === 'failed' && !entry.localPath) continue; // nothing to retry without bytes

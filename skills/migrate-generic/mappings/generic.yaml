@@ -13,7 +13,8 @@ rules:
   - id: generic/video
     tier: T2
     match: { name: video }
-    to: { name: Video, props: { src: $src } }
+    # the HTML media attributes are content; src and poster are rehosted through the asset manifest
+    to: { name: Video, props: { src: $src, poster: $poster, controls: $controls, autoplay: $autoplay, loop: $loop, muted: $muted } }
   - id: generic/script-drop
     tier: T7
     match: { name: script }

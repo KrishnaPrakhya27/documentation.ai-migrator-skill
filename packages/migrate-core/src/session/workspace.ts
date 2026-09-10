@@ -18,6 +18,7 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, statSync
 import { join, resolve } from 'node:path';
 import { homedir, platform as osPlatform } from 'node:os';
 import { sha256 } from './ids.js';
+import type { MigratorProvenance } from './provenance.js';
 
 export const WORKSPACE_DIRS = ['source-cache', 'snapshot', 'inventory', 'plan', 'output', 'ledger', 'quarantine', 'logging', 'report', 'assets-original', 'assets-ready'] as const;
 
@@ -28,8 +29,21 @@ export interface SessionTarget {
   documentationId?: string;
   repoRemote?: string;
   subdomain?: string;
+  /** The repository's default branch: the live deployment branch. Migrations never push to it. */
   deploymentBranch?: string;
   contentContractVersion?: string;
+  /** Settled at init so later stages never re-ask. */
+  apiBase?: string;
+  connectedRepoVerified?: boolean;
+  pushAccessVerified?: boolean;
+  previewsSeen?: boolean;
+  mediaApiAvailable?: boolean;
+  assetProvider?: 'none' | 'local' | 's3' | 'dai-api';
+  /** True when the environment does not expose contentContractVersion and the pinned version is assumed at verify. */
+  contractVersionAssumed?: boolean;
+  /** Discovered after write --push by polling /api/v1/deployments. */
+  previewUrl?: string;
+  previewDeploymentId?: string;
 }
 
 export interface Session {
@@ -40,6 +54,10 @@ export interface Session {
   target: SessionTarget;
   scope: 'full' | 'partial';
   customerAuthorisedCrawl: boolean;
+  /** Exact is the release default: any authored-content loss blocks the migration. */
+  fidelityMode?: 'exact' | 'permissive';
+  /** The migrator build that created this session; verify certifies output from no other build. */
+  migrator: MigratorProvenance;
   versions: {
     core: string;
     contentContract: string;
@@ -52,6 +70,7 @@ export interface Session {
     componentPlan?: string;
     urlPlan?: string;
     assetPlan?: string;
+    blockExclusions?: string;
     canonicalOutput?: string;
     /** Inputs (snapshot + plans + asset manifest) of the last convert, and its output hash; a repeat over identical inputs proves determinism. */
     convertInputs?: string;
@@ -96,7 +115,9 @@ export function sessionPath(workspace: string): string {
 export function readSession(workspace: string): Session {
   const p = sessionPath(workspace);
   if (!existsSync(p)) throw new Error(`No session at ${p}. Run "dai-migrate init" first.`);
-  return JSON.parse(readFileSync(p, 'utf8')) as Session;
+  const session = JSON.parse(readFileSync(p, 'utf8')) as Session;
+  if (typeof session.migrator?.gitSha !== 'string') throw new Error(`${p} records no migrator provenance: it was created by a migrator build that predates provenance pinning. Re-run "dai-migrate init" with this migrator.`);
+  return session;
 }
 
 export function writeSession(workspace: string, session: Session): void {

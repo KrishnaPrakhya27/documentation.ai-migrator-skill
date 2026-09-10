@@ -60,26 +60,47 @@ export interface EngineOptions {
   iframeHosts?: string[];
 }
 
-type Handler = (node: ComponentNode, rule: MappingRule, ctx: EngineOptions) => Block[];
+interface HandlerResult { blocks: Block[]; lossy?: string[] }
+type Handler = (node: ComponentNode, rule: MappingRule, ctx: EngineOptions) => HandlerResult;
+/** A restructure handler with the source props it reads, so every other authored prop is reported as dropped. */
+interface RestructureHandler { reads: string[]; run: Handler }
 
-/** Resolve "$prop", "$map(prop)", "$count", literal. */
-function resolveProp(v: string | number | boolean, node: ComponentNode, target: string, targetProp: string, contract = loadContract()): string | number | boolean | null {
-  if (typeof v !== 'string' || !v.startsWith('$')) return v;
+type PropReference = { kind: 'count' } | { kind: 'copy'; prop: string } | { kind: 'map'; prop: string };
+
+/** "$count", "$prop" (copy) or "$map(prop)" (copy through the contract value map); anything else is a literal. */
+function propReference(v: string | number | boolean): PropReference | undefined {
+  if (typeof v !== 'string' || !v.startsWith('$')) return undefined;
   const m = v.match(/^\$(\w+)(?:\((\w+)\))?$/);
-  if (!m) return v;
+  if (!m) return undefined;
   const [, fn, arg] = m;
-  if (fn === 'count') return node.children.length;
-  if (fn === 'map' && arg) {
-    const raw = node.props[arg];
-    // the value map is keyed by the target component and target prop (e.g. Callout.kind), whatever the source prop was called
-    const map = contract.valueMaps[target]?.[targetProp] ?? contract.valueMaps[target]?.[arg] ?? {};
-    if (raw === null || raw === undefined) return null;
-    const s = String(raw).toLowerCase();
-    return map[s] ?? s;
-  }
-  // "$name" copies a source prop
-  const val = node.props[fn];
-  return val === undefined ? null : val;
+  if (fn === 'count') return { kind: 'count' };
+  if (fn === 'map' && arg) return { kind: 'map', prop: arg };
+  return { kind: 'copy', prop: fn };
+}
+
+function resolveProp(v: string | number | boolean, node: ComponentNode, target: string, targetProp: string, contract = loadContract()): string | number | boolean | null {
+  const reference = propReference(v);
+  if (!reference) return v;
+  if (reference.kind === 'count') return node.children.length;
+  const raw = node.props[reference.prop];
+  if (raw === null || raw === undefined) return null;
+  if (reference.kind === 'copy') return raw;
+  // the value map is keyed by the target component and target prop (e.g. Callout.kind), whatever the source prop was called
+  const map = contract.valueMaps[target]?.[targetProp] ?? contract.valueMaps[target]?.[reference.prop] ?? {};
+  const s = String(raw).toLowerCase();
+  return map[s] ?? s;
+}
+
+/** The column counts the contract renders and the count it uses when the author set none (the same default as Mintlify). */
+function columnsPolicy(contract = loadContract()): { allowed: number[]; fallback: number } {
+  const cols = contract.components.find((component) => component.name === 'Columns')?.props.cols;
+  const allowed = (cols?.enum ?? []).filter((value): value is number => typeof value === 'number');
+  if (!allowed.length || typeof cols?.default !== 'number') throw new Error('content contract does not declare Columns.cols enum and default');
+  return { allowed, fallback: cols.default };
+}
+
+function quarantined(node: ComponentNode, reason: string): HandlerResult {
+  return { blocks: [{ id: node.id, type: 'quarantined', reason, original: node }] };
 }
 
 function matches(rule: MappingRule, node: ComponentNode): boolean {
@@ -93,74 +114,85 @@ function matches(rule: MappingRule, node: ComponentNode): boolean {
 }
 
 /** Restructure handlers (T3). */
-const HANDLERS: Record<string, Handler> = {
-  /** Wrapper whose children are cards: <Cards columns={3}> → <Columns cols={3}> with Card children. */
-  'cards-to-columns': (node, rule) => {
-    const cols = Number(node.props.columns ?? node.props.cols ?? 2) || 2;
-    return [{ id: node.id, type: 'dai', name: 'Columns', props: { cols: [2, 3, 4].includes(cols) ? cols : 2 }, children: node.children, rule: rule.id }];
-  },
+const HANDLERS: Record<string, RestructureHandler> = {
+  /** Wrapper whose children are cards: <CardGroup cols={3}> → <Columns cols={3}> with Card children. */
+  'cards-to-columns': { reads: ['cols', 'columns'], run: (node, rule) => {
+    const { allowed, fallback } = columnsPolicy();
+    const authored = node.props.cols ?? node.props.columns;
+    if (authored !== undefined && authored !== null && !Number.isInteger(Number(authored))) return quarantined(node, `cols "${String(authored)}" is not a whole number`);
+    // an absent prop renders the platform default, so the source's own layout is kept rather than one derived from the card count
+    const requested = authored === undefined || authored === null ? fallback : Number(authored);
+    const [lowest, highest] = [Math.min(...allowed), Math.max(...allowed)];
+    const cols = Math.min(highest, Math.max(lowest, requested));
+    const lossy = cols === requested ? [] : [`cols ${requested} clamped to ${cols} (contract allows ${allowed.join(', ')})`];
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Columns', props: { cols }, children: node.children, rule: rule.id }], lossy };
+  } },
   /** ReadMe/Docusaurus <Column> children unwrap; parent Columns gets cols=$count. */
-  'columns-count-children': (node, rule) => {
+  'columns-count-children': { reads: [], run: (node, rule) => {
     const kids = node.children.flatMap((c) => (c.type === 'component' && c.name === 'Column' ? c.children : [c]));
     const count = node.children.filter((c) => c.type === 'component' && c.name === 'Column').length || 2;
-    return [{ id: node.id, type: 'dai', name: 'Columns', props: { cols: Math.min(4, Math.max(2, count)) }, children: kids, rule: rule.id }];
-  },
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Columns', props: { cols: Math.min(4, Math.max(2, count)) }, children: kids, rule: rule.id }] };
+  } },
   /** A tab-set whose tabs carry `title`; ensures each child is a Tab. */
-  'tabs': (node, rule) => {
+  'tabs': { reads: [], run: (node, rule) => {
     const tabs: Block[] = node.children.map((c) => {
       if (c.type === 'component') return { id: c.id, type: 'dai', name: 'Tab', props: { title: String(c.props.title ?? c.props.label ?? 'Tab') }, children: c.children, rule: rule.id } as DaiComponentNode;
       return c;
     });
-    return [{ id: node.id, type: 'dai', name: 'Tabs', props: {}, children: tabs, rule: rule.id }];
-  },
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Tabs', props: {}, children: tabs, rule: rule.id }] };
+  } },
   /** Numbered list → Steps/Step (title = first line of the item). */
-  'list-to-steps': (node, rule) => {
+  'list-to-steps': { reads: [], run: (node, rule) => {
     const list = node.children.find((c) => c.type === 'list' && c.ordered);
-    if (!list || list.type !== 'list') return [{ id: node.id, type: 'dai', name: 'Steps', props: {}, children: node.children, rule: rule.id }];
+    if (!list || list.type !== 'list') return { blocks: [{ id: node.id, type: 'dai', name: 'Steps', props: {}, children: node.children, rule: rule.id }] };
     const steps: Block[] = list.children.map((li) => {
       const [first, ...rest] = li.children;
       const title = first && first.type === 'paragraph' ? inlineText(first.children).slice(0, 120) : 'Step';
       return { id: li.id, type: 'dai', name: 'Step', props: { title }, children: rest.length ? rest : [], rule: rule.id } as DaiComponentNode;
     });
-    return [{ id: node.id, type: 'dai', name: 'Steps', props: {}, children: steps, rule: rule.id }];
-  },
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Steps', props: {}, children: steps, rule: rule.id }] };
+  } },
   /** FAQ container → ExpandableGroup of Expandable(question). */
-  'faq-to-expandable-group': (node, rule) => {
+  'faq-to-expandable-group': { reads: [], run: (node, rule) => {
     const items: Block[] = node.children.map((c) => {
       if (c.type === 'component') return { id: c.id, type: 'dai', name: 'Expandable', props: { title: String(c.props.summary ?? c.props.title ?? c.props.question ?? 'Details') }, children: c.children, rule: rule.id } as DaiComponentNode;
       return c;
     });
-    return [{ id: node.id, type: 'dai', name: 'ExpandableGroup', props: {}, children: items, rule: rule.id }];
-  },
+    return { blocks: [{ id: node.id, type: 'dai', name: 'ExpandableGroup', props: {}, children: items, rule: rule.id }] };
+  } },
   /** Embed with a URL → Iframe when host allowlisted, else quarantine. */
-  'embed-to-iframe': (node, rule, ctx) => {
+  'embed-to-iframe': { reads: ['src', 'url', 'title'], run: (node, rule, ctx) => {
     const src = String(node.props.src ?? node.props.url ?? '');
     let host = '';
     try { host = new URL(src).hostname; } catch { /* not a URL */ }
     const yt = src.match(/youtube\.com\/watch\?v=([\w-]+)/) ?? src.match(/youtu\.be\/([\w-]+)/);
     const finalSrc = yt ? `https://www.youtube.com/embed/${yt[1]}` : src;
     const allowed = (ctx.iframeHosts ?? ['www.youtube.com', 'youtube.com', 'youtu.be', 'player.vimeo.com', 'www.loom.com']).some((h) => host === h || host.endsWith('.' + h));
-    if (!allowed) return [{ id: node.id, type: 'quarantined', reason: `embed host "${host || 'unknown'}" not allowlisted`, original: node }];
-    return [{ id: node.id, type: 'dai', name: 'Iframe', props: { src: finalSrc, title: String(node.props.title ?? 'Embedded content') }, children: [], rule: rule.id }];
-  },
+    if (!allowed) return quarantined(node, `embed host "${host || 'unknown'}" not allowlisted`);
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Iframe', props: { src: finalSrc, title: String(node.props.title ?? 'Embedded content') }, children: [], rule: rule.id }] };
+  } },
   /** Tooltip/abbr compose (T4): text with <abbr title> */
-  'tooltip-to-abbr': (node, rule) => {
+  'tooltip-to-abbr': { reads: ['tip', 'title', 'content', 'text'], run: (node) => {
     const tip = String(node.props.tip ?? node.props.title ?? node.props.content ?? '');
     const text = blocksToMdx(node.children).trim() || String(node.props.text ?? '');
-    return [{ id: node.id, type: 'rawHtml', value: `<abbr title="${tip.replace(/"/g, '&quot;')}">${text.replace(/</g, '&lt;')}</abbr>`, reviewFlag: 'T4 compose: tooltip → abbr' }];
-  },
+    return { blocks: [{ id: node.id, type: 'rawHtml', value: `<abbr title="${tip.replace(/"/g, '&quot;')}">${text.replace(/</g, '&lt;')}</abbr>`, reviewFlag: 'T4 compose: tooltip → abbr' }] };
+  } },
   /** Badge compose (T4): inline span with a namespaced class; CSS rule emitted separately by the css policy. */
-  'badge-to-span': (node, rule) => {
+  'badge-to-span': { reads: ['text', 'label'], run: (node) => {
     const text = blocksToMdx(node.children).trim() || String(node.props.text ?? node.props.label ?? '');
-    return [{ id: node.id, type: 'rawHtml', value: `<span className="dai-mig-badge">${text.replace(/</g, '&lt;')}</span>`, reviewFlag: 'T4 compose: badge → span (custom CSS)' }];
-  },
-  /** Frame/figure with caption → Image + italic caption. */
-  'frame-to-image': (node, rule) => {
-    const out: Block[] = [...node.children];
-    const cap = node.props.caption;
-    if (cap) out.push({ id: node.id + ':cap', type: 'paragraph', children: [{ id: node.id + ':cap:t', type: 'emphasis', children: [{ id: node.id + ':cap:tt', type: 'text', value: String(cap) }] }] });
-    return out;
-  },
+    return { blocks: [{ id: node.id, type: 'rawHtml', value: `<span className="dai-mig-badge">${text.replace(/</g, '&lt;')}</span>`, reviewFlag: 'T4 compose: badge → span (custom CSS)' }] };
+  } },
+  /** Frame around one image: a figure when it carries a caption, otherwise the bare image (the frame itself is presentation). */
+  'frame-to-image': { reads: ['caption'], run: (node) => {
+    const caption = typeof node.props.caption === 'string' && node.props.caption.trim() ? node.props.caption : undefined;
+    const [onlyChild] = node.children;
+    if (node.children.length === 1 && onlyChild.type === 'image') {
+      return { blocks: caption ? [{ id: node.id, type: 'figure', image: onlyChild, caption: [{ id: node.id + ':cap:t', type: 'text', value: caption }] }] : [onlyChild] };
+    }
+    const blocks: Block[] = [...node.children];
+    if (caption) blocks.push({ id: node.id + ':cap', type: 'paragraph', children: [{ id: node.id + ':cap:t', type: 'emphasis', children: [{ id: node.id + ':cap:tt', type: 'text', value: caption }] }] });
+    return { blocks };
+  } },
 };
 
 export class RulesEngine {
@@ -243,19 +275,29 @@ export class RulesEngine {
 
   private apply(node: ComponentNode, rule: MappingRule, pageId: string): Block[] {
     let result: Block[];
+    /** Source props the rule carries into the output; every other authored prop is a recorded loss. */
+    let mapped: string[];
+    let handlerLossy: string[] = [];
     if (rule.handler) {
-      const h = HANDLERS[rule.handler];
-      if (!h) throw new Error(`Unknown handler ${rule.handler} in rule ${rule.id}`);
-      result = h(node, rule, this.opts);
+      const handler = HANDLERS[rule.handler];
+      if (!handler) throw new Error(`Unknown handler ${rule.handler} in rule ${rule.id}`);
+      const outcome = handler.run(node, rule, this.opts);
+      result = outcome.blocks;
+      handlerLossy = outcome.lossy ?? [];
+      mapped = handler.reads;
     } else if (rule.children === 'unwrap') {
       result = node.children;
+      mapped = [];
     } else if (rule.children === 'drop') {
       this.markSubtree(node, pageId, 'excluded', `dropped by rule ${rule.id}`, `rule:${rule.id}`);
       this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: node.id, signature: signatureOf(node).hash, tier: rule.tier, rule: rule.id, lossy: ['subtree dropped'] });
       return [];
     } else if (rule.to) {
       const props: Record<string, string | number | boolean | null> = {};
+      mapped = [];
       for (const [k, v] of Object.entries(rule.to.props ?? {})) {
+        const reference = propReference(v);
+        if (reference && reference.kind !== 'count') mapped.push(reference.prop);
         const rv = resolveProp(v, node, rule.to.name, k);
         if (rv !== null) props[k] = rv;
       }
@@ -263,8 +305,12 @@ export class RulesEngine {
     } else {
       throw new Error(`Rule ${rule.id} has neither to, handler nor children:unwrap`);
     }
+    const authored = Object.keys(node.props).filter((p) => node.props[p] !== undefined && node.props[p] !== null);
+    const dropped = rule.drop ?? [];
     const lossy = [
-      ...(rule.drop ?? []).filter((p) => node.props[p] !== undefined && node.props[p] !== null).map((p) => `${p} dropped`),
+      ...authored.filter((p) => dropped.includes(p)).map((p) => `${p} dropped`),
+      ...authored.filter((p) => !dropped.includes(p) && !mapped.includes(p)).map((p) => `${p} dropped (no mapping in ${rule.id})`),
+      ...handlerLossy,
       ...(node.styleDeps ?? []).filter((x) => x.startsWith('expression:')).map((x) => `${x} removed without evaluation`),
     ];
     const outIds = result.map((r) => r.id);

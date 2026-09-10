@@ -1,6 +1,6 @@
 ---
 name: migrate-readme
-description: Migrate a ReadMe project onto Documentation.AI from the bi-directional sync repository (docs/<category>/*.md with ReadMe frontmatter) or the API v2 (guides, reference, categories), then scrape-readme. Emoji callouts, Accordion, Cards, Columns, Image props and embeds map by rule.
+description: Migrate a ReadMe project onto Documentation.AI from its bi-directional sync repository with categorized Markdown and ReadMe frontmatter, or from API v2 guides, reference pages, and categories, then scrape-readme. Maps supported callouts and components by rule.
 ---
 # Migrate ReadMe
 
@@ -13,7 +13,7 @@ Implemented source preference: **sync repository** (`docs/<category>/*.md`, fron
 
 ## Procedure
 1. `dai-migrate init ... --repo <sync-repo> --platform readme` (or `--source https://<subdomain>.readme.io` for API or scrape).
-2. `dai-migrate discover` ⏸ review `plan/tree.yaml`; hidden pages are in `inventory/platform-meta.json`.
-3. `inventory` → `plan` ⏸ (variables, glossary terms, Recipes without bodies and marketplace components need a decision) → `assets` (rehost off `files.readme.io`) → `convert` → `convert` → `nav` ⏸ → `verify` → `write` → preview `verify` → `report`.
+2. `dai-migrate discover` → **human gate 1/4**: review `plan/tree.yaml`; hidden pages are in `inventory/platform-meta.json`.
+3. `inventory` → `plan` → **human gate 2/4** (variables, glossary terms, Recipes without bodies and marketplace components) → `assets` → `convert` twice → `nav` → local `verify` → **human gate 3/4** → `write --push` (waits for the preview) → `verify --preview` → **human gate 4/4** → `report`.
 
 Not implemented: API reference generation from ReadMe's OpenAPI uploads (export the spec and use the Mintlify-style group-level `openapi` in `documentation.json` manually), variables and glossary substitution, Changelog → Update conversion.

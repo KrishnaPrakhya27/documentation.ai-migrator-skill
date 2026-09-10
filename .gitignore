@@ -6,3 +6,5 @@ runs/
 .env
 .env.*
 !.env.example
+# Personal Claude Code settings may carry API keys
+.claude/settings.local.json

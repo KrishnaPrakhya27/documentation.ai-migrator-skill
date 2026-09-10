@@ -8,13 +8,59 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { sha256 } from '../session/ids.js';
 import { fetch as undiciFetch, Agent, ProxyAgent, type Dispatcher } from 'undici';
+import { gunzipSync } from 'node:zlib';
 
 export type FetchImpl = typeof undiciFetch;
+/** Resolves a hostname to its addresses for the public-address check. */
+export type HostLookup = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
 import type { CookieJar } from 'tough-cookie';
+
+/**
+ * Hosts that serve the same site as the seed origin: a platform's paired hosts
+ * and the hosts the site itself names in robots.txt Sitemap directives or
+ * llms.txt. The allowlist admits them, and discovery rewrites their URLs onto
+ * the seed origin so one page never enters scope twice under two hosts.
+ */
+export class CanonicalHosts {
+  readonly seedOrigin: string;
+  readonly seedHost: string;
+  private readonly aliases = new Set<string>();
+  constructor(seedOrigin: string, aliases: Iterable<string> = []) {
+    const seed = new URL(seedOrigin);
+    this.seedOrigin = seed.origin;
+    this.seedHost = seed.hostname;
+    for (const host of aliases) this.add(host);
+  }
+  add(host: string): void {
+    const hostname = host.toLowerCase();
+    if (hostname && hostname !== this.seedHost) this.aliases.add(hostname);
+  }
+  has(host: string): boolean {
+    const hostname = host.toLowerCase();
+    return hostname === this.seedHost || this.aliases.has(hostname);
+  }
+  /** Alias hosts only, sorted; the seed host is implied. */
+  list(): string[] {
+    return [...this.aliases].sort();
+  }
+  /** The same URL on the seed origin when it is on an alias host; unchanged otherwise. */
+  canonicalise(url: URL): URL {
+    if (!this.aliases.has(url.hostname.toLowerCase())) return url;
+    const seed = new URL(this.seedOrigin);
+    const canonical = new URL(url.toString());
+    canonical.protocol = seed.protocol;
+    canonical.host = seed.host;
+    return canonical;
+  }
+}
 
 export interface FetchOptions {
   /** HTTP implementation; defaults to undici fetch. Tests inject a stub so no request leaves the process. */
   fetchImpl?: FetchImpl;
+  /** Hostname resolution for the public-address check; defaults to DNS. Tests pair it with fetchImpl so named hosts resolve offline. */
+  lookup?: HostLookup;
+  /** Hosts serving the same site as the seed; admitted by the allowlist. Discovery adds the hosts the site itself names. */
+  canonicalHosts?: CanonicalHosts;
   workspace: string;
   userAgent?: string;
   /** Header map applied to every request (e.g. Cookie). Kept in memory only. */
@@ -78,11 +124,13 @@ export function pinnedLookup(hostname: string, options: any, callback: (err: Nod
   else callback(null, pinned[0].address, pinned[0].family);
 }
 
-export async function assertPublicHost(url: URL): Promise<string> {
+const dnsLookup: HostLookup = (hostname) => lookup(hostname, { all: true, verbatim: true });
+
+export async function assertPublicHost(url: URL, resolveHost: HostLookup = dnsLookup): Promise<string> {
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`refused non-http url ${url}`);
   const host = url.hostname;
   if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) throw new Error(`refused local host ${host}`);
-  const addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true, verbatim: true });
+  const addresses = isIP(host) ? [{ address: host }] : await resolveHost(host);
   if (!addresses.length) throw new Error(`no DNS addresses for ${host}`);
   const blocked = addresses.find((x) => !isPublicAddress(x.address));
   if (blocked) throw new Error(`refused non-public address ${blocked.address} for ${host}`);
@@ -122,6 +170,7 @@ class TokenBucket {
 export class Fetcher {
   private bucket: TokenBucket;
   private robots = new Map<string, string[]>();
+  private robotDocuments = new Map<string, string>();
   private cacheDir: string;
   private dispatcher?: Dispatcher;
   constructor(private opts: FetchOptions) {
@@ -147,8 +196,12 @@ export class Fetcher {
     writeFileSync(this.cachePath(page.url), JSON.stringify(page), { mode: 0o600 });
   }
 
+  /** Hosts this fetcher treats as the seed site; discovery extends it with the hosts the site names. */
+  get canonicalHosts(): CanonicalHosts | undefined { return this.opts.canonicalHosts; }
+
   private assertAllowedHost(url: URL): void {
-    if (this.opts.allowHosts && !this.opts.allowHosts.some((h) => url.hostname === h || url.hostname.endsWith('.' + h))) {
+    if (!this.opts.allowHosts || this.opts.canonicalHosts?.has(url.hostname)) return;
+    if (!this.opts.allowHosts.some((h) => url.hostname === h || url.hostname.endsWith('.' + h))) {
       throw new Error(`host ${url.hostname} not in allowlist`);
     }
   }
@@ -158,7 +211,7 @@ export class Fetcher {
     let current = new URL('/robots.txt', origin);
     for (let hop = 0; hop < 5; hop++) {
       this.assertAllowedHost(current);
-      await assertPublicHost(current);
+      await assertPublicHost(current, this.opts.lookup);
       await this.bucket.wait(current.hostname);
       const res = await (this.opts.fetchImpl ?? undiciFetch)(current, { headers: { 'user-agent': this.ua(), accept: 'text/plain,*/*;q=0.1' }, redirect: 'manual', signal: AbortSignal.timeout(8000), dispatcher: this.dispatcher });
       if ([301, 302, 303, 307, 308].includes(res.status)) {
@@ -178,26 +231,34 @@ export class Fetcher {
     throw new Error('too many robots.txt redirects');
   }
 
+  /** Cached, credential-free robots document for policy and Sitemap directives. */
+  async robotsDocument(origin: string): Promise<string> {
+    if (!this.robotDocuments.has(origin)) {
+      try {
+        this.robotDocuments.set(origin, await this.fetchRobots(origin));
+      } catch (error) {
+        throw new Error(`cannot verify robots.txt for ${origin}: ${(error as Error).message}; use --customer-authorised only with recorded owner authorization`);
+      }
+    }
+    return this.robotDocuments.get(origin)!;
+  }
+
   private async robotsAllows(url: URL): Promise<boolean> {
     if (this.opts.respectRobots === false || this.opts.customerAuthorised) return true;
     const origin = url.origin;
     if (!this.robots.has(origin)) {
       let disallow: string[] = [];
-      try {
-        const txt = await this.fetchRobots(origin);
-        if (txt) {
-          let applies = false;
-          for (const raw of txt.split('\n')) {
-            const line = raw.replace(/#.*/, '').trim();
-            const m = line.match(/^([A-Za-z-]+)\s*:\s*(.*)$/);
-            if (!m) continue;
-            const [, k, v] = m;
-            if (k.toLowerCase() === 'user-agent') applies = v.trim() === '*' || v.toLowerCase().includes('dai-migrate');
-            else if (applies && k.toLowerCase() === 'disallow' && v.trim()) disallow.push(v.trim());
-          }
+      const txt = await this.robotsDocument(origin);
+      if (txt) {
+        let applies = false;
+        for (const raw of txt.split('\n')) {
+          const line = raw.replace(/#.*/, '').trim();
+          const m = line.match(/^([A-Za-z-]+)\s*:\s*(.*)$/);
+          if (!m) continue;
+          const [, k, v] = m;
+          if (k.toLowerCase() === 'user-agent') applies = v.trim() === '*' || v.toLowerCase().includes('dai-migrate');
+          else if (applies && k.toLowerCase() === 'disallow' && v.trim()) disallow.push(v.trim());
         }
-      } catch (error) {
-        throw new Error(`cannot verify robots.txt for ${origin}: ${(error as Error).message}; use --customer-authorised only with recorded owner authorization`);
       }
       this.robots.set(origin, disallow);
     }
@@ -212,12 +273,12 @@ export class Fetcher {
     let current = new URL(url);
     const credentialOrigin = current.origin;
     this.assertAllowedHost(current);
-    await assertPublicHost(current);
+    await assertPublicHost(current, this.opts.lookup);
     if (!(await this.robotsAllows(current))) throw new Error(`robots.txt disallows ${url} (pass --customer-authorised if the customer owns this site)`);
 
     for (let hop = 0; hop < 5; hop++) {
       this.assertAllowedHost(current);
-      await assertPublicHost(current);
+      await assertPublicHost(current, this.opts.lookup);
       if (hop > 0 && !(await this.robotsAllows(current))) throw new Error(`robots.txt disallows redirect target ${current}`);
       await this.bucket.wait(current.hostname);
       // Authentication material is origin-bound. Cross-origin redirects never receive it.
@@ -261,22 +322,147 @@ export class Fetcher {
   }
 }
 
-/** Discover URLs from sitemap.xml (and sitemap indexes). */
-export async function sitemapUrls(fetcher: Fetcher, origin: string, seen = new Set<string>()): Promise<string[]> {
-  const out: string[] = [];
-  for (const path of ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-0.xml']) {
-    const u = origin + path;
-    if (seen.has(u)) continue; seen.add(u);
-    try {
-      const page = await fetcher.get(u);
-      if (page.status !== 200) continue;
-      const locs = [...page.body.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1]);
-      for (const l of locs) {
-        if (/sitemap.*\.xml$/i.test(l)) { if (!seen.has(l)) { seen.add(l); const sub = await fetcher.get(l); out.push(...[...sub.body.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)].map((m) => m[1])); } }
-        else out.push(l);
-      }
-      if (out.length) break;
-    } catch { /* try next */ }
+export interface SitemapAlternate { hreflang: string; href: string }
+export interface SitemapEntry {
+  url: string;
+  /** Global document order across the recursively traversed sitemap index. */
+  order: number;
+  sitemap: string;
+  /** Traversal path after the root sitemap, ending at the containing URL set. */
+  trail: string[];
+  lastmod?: string;
+  changefreq?: string;
+  priority?: number;
+  alternates: SitemapAlternate[];
+}
+
+export interface SitemapDiscovery {
+  entries: SitemapEntry[];
+  sources: string[];
+  failures: Array<{ url: string; error: string }>;
+  truncated: boolean;
+}
+
+function xmlDecode(value: string): string {
+  return value.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").trim();
+}
+
+function xmlValue(block: string, name: string): string | undefined {
+  const value = block.match(new RegExp(`<(?:(?:[A-Za-z_][\\w.-]*):)?${name}\\b[^>]*>([\\s\\S]*?)<\\/(?:(?:[A-Za-z_][\\w.-]*):)?${name}>`, 'i'))?.[1];
+  return value === undefined ? undefined : xmlDecode(value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1'));
+}
+
+function xmlBlocks(xml: string, name: string): string[] {
+  const re = new RegExp(`<(?:(?:[A-Za-z_][\\w.-]*):)?${name}\\b[^>]*>[\\s\\S]*?<\\/(?:(?:[A-Za-z_][\\w.-]*):)?${name}>`, 'gi');
+  return [...xml.matchAll(re)].map((match) => match[0]);
+}
+
+function xmlAttributes(tag: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const match of tag.matchAll(/([:\w.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) out[match[1].toLowerCase()] = xmlDecode(match[2] ?? match[3] ?? '');
+  return out;
+}
+
+function sitemapText(page: FetchedPage): string {
+  if (!page.bodyBase64) return page.body;
+  const bytes = Buffer.from(page.bodyBase64, 'base64');
+  // Fetch implementations may transparently decode Content-Encoding. Only
+  // gunzip when the returned bytes still carry the gzip magic number.
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    const uncompressed = gunzipSync(bytes, { maxOutputLength: 50 * 1024 * 1024 });
+    return uncompressed.toString('utf8');
   }
-  return [...new Set(out)];
+  return bytes.toString('utf8');
+}
+
+/** Absolute sitemap URLs named by `Sitemap:` directives; a site may declare them on another host it owns. */
+export function sitemapCandidatesFromRobots(body: string, origin: string): string[] {
+  const urls: string[] = [];
+  for (const raw of body.split(/\r?\n/)) {
+    const match = raw.replace(/#.*/, '').match(/^\s*sitemap\s*:\s*(\S+)\s*$/i);
+    if (!match) continue;
+    try { urls.push(new URL(match[1], origin).toString()); } catch { /* malformed directive */ }
+  }
+  return urls;
+}
+
+/**
+ * Recursively discover sitemap indexes and URL sets. Sitemaps are an ordered
+ * inventory, not authoritative navigation; consumers should prefer sidebar
+ * order and use sitemap hierarchy only as a fallback structure hint. Entry
+ * URLs on a canonical alias host are recorded on the seed origin.
+ */
+export async function discoverSitemaps(fetcher: Fetcher, origin: string, opts: { maxFiles?: number; maxUrls?: number; maxDepth?: number } = {}): Promise<SitemapDiscovery> {
+  const maxFiles = Math.max(1, Math.min(opts.maxFiles ?? 100, 1000));
+  const maxUrls = Math.max(1, Math.min(opts.maxUrls ?? 50_000, 500_000));
+  const maxDepth = Math.max(0, Math.min(opts.maxDepth ?? 8, 20));
+  const canonicalEntryUrl = (loc: string, sourceUrl: string): string => {
+    const url = new URL(loc, sourceUrl);
+    return (fetcher.canonicalHosts?.canonicalise(url) ?? url).toString();
+  };
+  const seeds = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap-0.xml'].map((path) => new URL(path, origin).toString());
+  try { seeds.unshift(...sitemapCandidatesFromRobots(await fetcher.robotsDocument(origin), origin)); }
+  catch { /* ordinary page acquisition will report an unverifiable robots policy */ }
+
+  const queue = [...new Set(seeds)].map((url) => ({ url, trail: [] as string[], depth: 0 }));
+  const seen = new Set<string>();
+  const sources: string[] = [];
+  const entries: SitemapEntry[] = [];
+  const failures: Array<{ url: string; error: string }> = [];
+  let truncated = false;
+
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (seen.has(current.url)) continue;
+    if (seen.size >= maxFiles) { truncated = true; break; }
+    seen.add(current.url);
+    try {
+      const page = await fetcher.get(current.url);
+      if (page.status === 404) continue;
+      if (page.status < 200 || page.status >= 300) { failures.push({ url: current.url, error: `HTTP ${page.status}` }); continue; }
+      const xml = sitemapText(page);
+      if (!/<(?:\w+:)?(?:urlset|sitemapindex)\b/i.test(xml)) { failures.push({ url: current.url, error: 'response is not a sitemap XML document' }); continue; }
+      const sourceUrl = page.finalUrl || current.url;
+      sources.push(sourceUrl);
+      if (/<(?:\w+:)?sitemapindex\b/i.test(xml)) {
+        if (current.depth >= maxDepth) { truncated = true; continue; }
+        for (const block of xmlBlocks(xml, 'sitemap')) {
+          const loc = xmlValue(block, 'loc');
+          if (!loc) continue;
+          try {
+            const child = new URL(loc, sourceUrl).toString();
+            queue.push({ url: child, trail: [...current.trail, child], depth: current.depth + 1 });
+          } catch { failures.push({ url: current.url, error: `invalid child sitemap location: ${loc}` }); }
+        }
+        continue;
+      }
+      for (const block of xmlBlocks(xml, 'url')) {
+        if (entries.length >= maxUrls) { truncated = true; break; }
+        const loc = xmlValue(block, 'loc');
+        if (!loc) continue;
+        const alternates = [...block.matchAll(/<(?:xhtml:)?link\b[^>]*>/gi)].map((match) => xmlAttributes(match[0]))
+          .filter((attrs) => attrs.rel?.toLowerCase() === 'alternate' && !!attrs.hreflang && !!attrs.href)
+          .map((attrs) => ({ hreflang: attrs.hreflang, href: attrs.href }));
+        const priorityRaw = xmlValue(block, 'priority');
+        const priority = priorityRaw === undefined ? undefined : Number(priorityRaw);
+        entries.push({
+          url: canonicalEntryUrl(loc, sourceUrl), order: entries.length, sitemap: sourceUrl,
+          trail: current.trail, lastmod: xmlValue(block, 'lastmod'), changefreq: xmlValue(block, 'changefreq'),
+          priority: Number.isFinite(priority) ? priority : undefined, alternates,
+        });
+      }
+    } catch (error) {
+      // Missing conventional paths are normal; report other acquisition/parsing failures.
+      if (!/HTTP 404/.test((error as Error).message)) failures.push({ url: current.url, error: (error as Error).message });
+    }
+  }
+
+  const byUrl = new Map<string, SitemapEntry>();
+  for (const entry of entries) if (!byUrl.has(entry.url)) byUrl.set(entry.url, entry);
+  return { entries: [...byUrl.values()], sources, failures, truncated };
+}
+
+/** Backwards-compatible flat URL view. */
+export async function sitemapUrls(fetcher: Fetcher, origin: string): Promise<string[]> {
+  return (await discoverSitemaps(fetcher, origin)).entries.map((entry) => entry.url);
 }
