@@ -46,7 +46,16 @@ difference:
 
 **Permissive** keeps the same pipeline but records what it could not prove: the
 exact-family gates report `not-run` rather than `pass`, and pushing a preview
-requires the operator to accept that explicitly.
+requires `write --push --allow-lossy`. That flag waives only gates a permissive
+session left unproven, never a gate that failed, and records the waiver in
+`report/lossy-push.json`. The branch it creates is not a certified migration.
+
+## Firecrawl data retention
+
+`acquire --fetcher firecrawl` does not request zero data retention unless
+`--zero-data-retention` or `FIRECRAWL_ZERO_DATA_RETENTION=1` is set, because
+Firecrawl rejects every job that asks for it on an account without a ZDR
+agreement. Without it, Firecrawl may retain the pages it scrapes.
 
 ## Verification
 

@@ -90,6 +90,22 @@ const MINTLIFY_CHROME_STRINGS: string[] = [
   'Powered by',
 ];
 
+/**
+ * Chrome every documentation theme renders around the article regardless of platform:
+ * the skip link, the on-page table of contents, the feedback prompt, the copy control and
+ * the edit link. Each profile spreads this and adds its own theme's strings.
+ */
+const COMMON_CHROME_STRINGS: string[] = [
+  'Skip to main content',
+  'On this page',
+  'Table of contents',
+  'Edit this page',
+  'Was this page helpful?',
+  'Copy',
+  'Previous',
+  'Next',
+];
+
 const EMOJI_CALLOUT: ComponentRecogniser[] = [
   { selector: 'blockquote.callout_info, blockquote.callout_default', name: 'Callout', props: { kind: 'info' } },
   { selector: 'blockquote.callout_okay', name: 'Callout', props: { kind: 'success' } },
@@ -114,6 +130,8 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     removeSelectors: ['.rm-Header', '.rm-ToC', '.rm-Pagination', '.rm-TryIt', '.rm-PlaygroundRequest', '.rm-PlaygroundResponse', 'nav', 'header', 'footer'],
     navSelector: '.rm-Sidebar',
     navLinkSelector: '.rm-Sidebar-link',
+    navGroupSelector: '.rm-Sidebar-heading',
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'Powered by ReadMe', 'Suggest Edits', 'Ask AI', 'Did this page help you?', 'Updated'],
     recognisers: [
       ...EMOJI_CALLOUT,
       { selector: 'details.rm-Accordion, .rm-Accordion', name: 'Accordion', props: { title: '@text:summary' }, strip: ['summary'] },
@@ -191,6 +209,8 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     removeSelectors: ['aside', 'nav', 'header', 'footer', '[data-testid="page-footer"]', '.toc'],
     navSelector: 'aside',
     navLinkSelector: 'aside a.toclink, aside a[href]',
+    navGroupSelector: 'aside [data-testid="table-of-contents-group"], aside li > .group-header',
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'Powered by GitBook', 'Was this helpful?', 'Last updated', 'Ask or search…', 'Ctrl K'],
     recognisers: [
       { selector: '.hint, [data-hint]', name: 'hint', props: { style: '@class-suffix:hint-' } },
       { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] },
@@ -215,6 +235,8 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     removeSelectors: ['nav', 'header', 'footer', '.breadcrumb', '.article-feedback', '.related-articles', '.article-info'],
     navSelector: '.category-tree, nav',
     navLinkSelector: 'a[href*="/docs/"]',
+    navGroupSelector: '.category-tree .category-name, .category-tree .tree-category',
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'Was this article helpful?', 'Print', 'Updated on', 'Table of Contents'],
     recognisers: [
       { selector: 'blockquote.infoBox', name: 'infoBox' },
       { selector: 'blockquote.warningBox', name: 'warningBox' },
@@ -240,6 +262,8 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     removeSelectors: ['.theme-doc-sidebar-container', '.theme-doc-toc-desktop', '.pagination-nav', 'nav', 'footer', '.theme-doc-footer'],
     navSelector: '.theme-doc-sidebar-container',
     navLinkSelector: '.theme-doc-sidebar-container a[href]',
+    navGroupSelector: '.theme-doc-sidebar-item-category > .menu__list-item-collapsible > .menu__link',
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'Was this helpful?', 'Last updated on', 'Scroll back to top'],
     recognisers: [
       { selector: '.theme-admonition', name: 'admonition', props: { kind: '@class-suffix:theme-admonition-' } },
       { selector: '.tabs-container', name: 'Tabs' },
@@ -258,6 +282,10 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     ],
     articleSelector: 'main',
     removeSelectors: ['nav', 'aside', 'footer', '.nextra-toc', '.nextra-sidebar-container'],
+    navSelector: '.nextra-sidebar-container',
+    navLinkSelector: '.nextra-sidebar-container a[href]',
+    navGroupSelector: '.nextra-sidebar-container .nextra-menu-desktop > li > button',
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'On This Page', 'Question? Give us feedback', 'Scroll to top'],
     recognisers: [{ selector: '.nextra-callout', name: 'Callout', props: { kind: '@attr:data-type' } }, { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] }],
     assetHosts: [],
   },
@@ -274,6 +302,8 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     removeSelectors: ['.wy-nav-side', '.rst-footer-buttons', 'footer', 'nav'],
     navSelector: '.wy-nav-side',
     navLinkSelector: '.wy-menu a[href]',
+    navGroupSelector: '.wy-menu > p.caption',
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'Read the Docs', 'Edit on GitHub', 'Built with Sphinx', 'Search docs'],
     recognisers: [{ selector: '.admonition', name: 'admonition', props: { kind: '@class-suffix:admonition-' }, strip: ['.admonition-title'] }],
     assetHosts: [],
   },
@@ -287,6 +317,10 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     ],
     articleSelector: '.fern-layout-main, main',
     removeSelectors: ['.fern-sidebar', '.fern-toc', 'nav', 'footer'],
+    navSelector: '.fern-sidebar',
+    navLinkSelector: '.fern-sidebar a[href]',
+    navGroupSelector: '.fern-sidebar .fern-sidebar-heading',
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'Built with Fern'],
     recognisers: [{ selector: '.fern-callout', name: 'Callout', props: { kind: '@attr:data-intent' } }, { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] }],
     assetHosts: [],
   },
@@ -297,6 +331,9 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     removeSelectors: ['nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript', '[role=navigation]', '.sidebar', '.toc', '.breadcrumb', '.breadcrumbs'],
     navSelector: 'nav, aside, .sidebar',
     navLinkSelector: 'nav a[href], aside a[href], .sidebar a[href]',
+    // A generic theme's sidebar headings have no shared markup: headings inside the navigation are the cross-theme floor.
+    navGroupSelector: 'nav h2, nav h3, nav h4, aside h2, aside h3, aside h4, .sidebar h2, .sidebar h3, .sidebar h4',
+    chromeStrings: COMMON_CHROME_STRINGS,
     recognisers: [
       { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] },
       { selector: '.admonition, .callout, .alert, .note, .warning, .tip, .info', name: 'admonition', props: { kind: '@class-suffix:' } },
@@ -305,8 +342,20 @@ export const PROFILES: Record<string, ScrapeProfile> = {
   },
 };
 
+/** Platform ids that have a scrape profile; anything else is a typo or an unsupported platform. */
+export function knownPlatforms(): string[] {
+  return Object.keys(PROFILES).sort();
+}
+
+/**
+ * The profile for a platform id. An unknown id is refused rather than served the generic
+ * profile: a substitute declares no published Markdown, no chrome and no navigation witness,
+ * and nothing downstream could tell its weaker checks from real ones.
+ */
 export function getProfile(platform: string): ScrapeProfile {
-  return PROFILES[platform] ?? PROFILES.generic;
+  const profile = PROFILES[platform];
+  if (!profile) throw new Error(`no scrape profile for platform "${platform}"; known platforms: ${knownPlatforms().join(', ')}. Pass one of these to --platform (or --profile), or add a profile.`);
+  return profile;
 }
 
 /** The adapter options a profile implies for one scraped page, so no call site can leave a profile field behind. */

@@ -14,6 +14,7 @@ import { loadContract } from '@dai/content-contract';
 import { nodeId } from '../session/ids.js';
 import { sanitizeHtmlToJsx } from '../components/sanitize.js';
 import type { Block, ComponentNode, DaiComponentNode, DocIR, Frontmatter, ImageNode, Inline, ListItemNode, TableCellNode, TableRowNode } from './types.js';
+import { readPixelDimension } from './dimensions.js';
 
 export interface MarkdownAdapterOptions {
   platform: string;
@@ -73,14 +74,15 @@ function snippetImports(tree: any): Map<string, string> {
   return out;
 }
 
-function splitFrontmatter(source: string): { data: Record<string, unknown>; body: string } {
+function splitFrontmatter(source: string, file: string): { data: Record<string, unknown>; body: string } {
   const m = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (!m) return { data: {}, body: source };
   try {
     const parsed = parseYaml(m[1]);
     return { data: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}, body: source.slice(m[0].length) };
   } catch (error) {
-    throw new Error(`Invalid YAML frontmatter in migration source ${(error as Error).message}`);
+    // The line and column the YAML parser reports are offsets inside the frontmatter block, not the file.
+    throw new Error(`${file}: invalid YAML frontmatter: ${(error as Error).message}`);
   }
 }
 
@@ -136,7 +138,7 @@ function literalExpression(value: string): string | number | boolean | null | un
 }
 
 export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocIR {
-  const { data, body } = splitFrontmatter(source);
+  const { data, body } = splitFrontmatter(source, opts.file);
   const prepared = preprocessPlatformMarkdown(body, opts.platform);
   const tree = fromMarkdown(prepared, {
     extensions: [gfm(), mdxjs()],
@@ -162,20 +164,17 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       else if (typeof attr.value === 'string') attrs[attr.name] = attr.value;
       else attrs[attr.name] = literalExpression(String(attr.value?.value ?? '')) ?? null;
     }
-    // A dimension the source states but this parser cannot read is a loss, not an absence:
-    // it stops the page rather than shipping an image the renderer will size differently.
-    const numeric = (name: 'width' | 'height') => {
-      const value = attrs[name];
-      if (value === undefined || value === null || value === '') return undefined;
-      if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
-      if (typeof value === 'string' && /^\d+$/.test(value) && Number(value) > 0) return Number(value);
-      throw new Error(`${opts.file}: image ${String(attrs.src ?? '')} has an unreadable ${name} ${JSON.stringify(value)}; the source states a dimension the migrator cannot carry`);
-    };
+    // A dimension the source states but the target's integer-pixel contract cannot carry is a loss,
+    // not an absence. It is recorded verbatim on the node; the stage that knows fidelityMode decides.
+    const width = readPixelDimension(attrs.width);
+    const height = readPixelDimension(attrs.height);
     return {
       id: idOf(node, path), src: srcOf(node), type: 'image',
       url: typeof attrs.src === 'string' ? attrs.src : '', alt: typeof attrs.alt === 'string' ? attrs.alt : '',
       title: typeof attrs.title === 'string' ? attrs.title : undefined,
-      width: numeric('width'), height: numeric('height'),
+      width: width.value, height: height.value,
+      ...(width.unreadable !== undefined ? { unreadableWidth: width.unreadable } : {}),
+      ...(height.unreadable !== undefined ? { unreadableHeight: height.unreadable } : {}),
     };
   };
 

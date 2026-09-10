@@ -60,7 +60,9 @@ export class Firecrawl {
       urls,
       ignoreInvalidURLs: false,
       maxConcurrency: this.opts.maxConcurrency,
-      zeroDataRetention: this.opts.zeroDataRetention ?? true, // customer content: retention is opt-out
+      // Opt-in: Firecrawl rejects the whole job when the account has no zero-data-retention agreement.
+      // Without it Firecrawl may retain scraped pages, so request it wherever the account allows.
+      zeroDataRetention: this.opts.zeroDataRetention ?? false,
       formats: ['html', 'markdown', 'links'],
       onlyMainContent: true,
       includeTags: this.opts.includeTags,

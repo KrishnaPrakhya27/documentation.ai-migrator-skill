@@ -24,7 +24,7 @@ Independent review of the hardened tree before the baseline commit. Every item w
 | 18 | Medium | document360 | Article lookup keyed by basename across workspaces | Fixed: keyed by workspace and basename |
 | 19 | Medium | fetcher | robots.txt checked for the first URL only | Fixed: checked on every redirect hop |
 | 20 | Medium | cli | Errors printed unredacted | Fixed: `fail()` redacts |
-| 21 | Medium | firecrawl | `zeroDataRetention` defaulted to false | Fixed: defaults to true; opt-out is explicit |
+| 21 | Medium | firecrawl | `zeroDataRetention` defaulted to false | Superseded 10 September 2026 by owner decision: the Firecrawl account has no ZDR agreement and Firecrawl rejects jobs that request it, so it is opt-in (`--zero-data-retention` or `FIRECRAWL_ZERO_DATA_RETENTION=1`). Without it Firecrawl may retain scraped pages |
 | 22 | Medium | contract validator | Snippet import allowlist accepted `..` paths and `export` | Fixed: strict single-import form under `/snippets/` without `..` |
 | 23 | Low | fetcher | Body size checked after full buffering | Fixed: streamed read with a byte cap |
 | 24 | Low | gates | Single-column tables never matched | Fixed |

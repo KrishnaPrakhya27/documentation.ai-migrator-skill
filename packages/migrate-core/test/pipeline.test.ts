@@ -13,7 +13,8 @@ import { RulesEngine, loadMappings, type MappingTable } from '../src/components/
 import { DecisionLog } from '../src/log/decisions.js';
 import { Fetcher, isPublicAddress, type FetchImpl } from '../src/scrape/fetcher.js';
 import { remoteOrg, assertRemoteAllowed } from '../src/write/migration-branch.js';
-import { EXACT_FAMILY_GATE_IDS, mdxTableSignatures, previewPushBlockers, REQUIRED_RELEASE_GATE_IDS, runGates, tableSignatures, type GateInput } from '../src/verify/gates.js';
+import { EXACT_FAMILY_GATE_IDS, mdxTableSignatures, previewPushBlockers, REQUIRED_RELEASE_GATE_IDS, runGates, tableSignatures, waivedExactnessGates, type GateInput } from '../src/verify/gates.js';
+import { unreadableImageDimensions } from '../src/ir/dimensions.js';
 import { chromeDump, pinnedResolverRules, runBrowserContentGate, runBrowserFragmentGate } from '../src/verify/browser.js';
 import { authoredContentSnapshot, fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from '../src/verify/fidelity.js';
 import { markdownToIr } from '../src/ir/from-markdown.js';
@@ -167,9 +168,23 @@ describe('gates', () => {
     }
     // A name the contract does not define stays an unresolved source component, so a rule must handle it.
     expect(markdownToIr('---\ntitle: T\n---\n\n<NotInContract>x</NotInContract>\n', { platform: 'dai', file: 'a.mdx', pageId: 'p' }).children[0].type).toBe('component');
-    // An unreadable dimension is a stated fact the migrator cannot carry: it stops rather than dropping it.
-    expect(() => markdownToIr('---\ntitle: T\n---\n\n<Image src="/a.png" alt="a" width="12rem" />\n', { platform: 'dai', file: 'a.mdx', pageId: 'p' })).toThrow(/unreadable width/);
-    expect(() => markdownToIr('---\ntitle: T\n---\n\n<Image src="/a.png" alt="a" height={0} />\n', { platform: 'dai', file: 'a.mdx', pageId: 'p' })).toThrow(/unreadable height/);
+    // A dimension the integer-pixel contract cannot carry is recorded verbatim, never guessed (parseInt('12rem') is 12)
+    // and never thrown from the parser; inventory stops on it in exact mode and reports it in permissive mode.
+    const rem = markdownToIr('---\ntitle: T\n---\n\n<Image src="/a.png" alt="a" width="12rem" />\n', { platform: 'dai', file: 'guides/a.mdx', pageId: 'p' });
+    const remImage = rem.children[0];
+    expect(remImage.type === 'image' && remImage.width).toBeUndefined();
+    expect(remImage.type === 'image' && remImage.unreadableWidth).toBe('12rem');
+    const zero = markdownToIr('---\ntitle: T\n---\n\n<Image src="/a.png" alt="a" height={0} />\n', { platform: 'dai', file: 'guides/a.mdx', pageId: 'p' }).children[0];
+    expect(zero.type === 'image' && zero.unreadableHeight).toBe('0');
+    expect(unreadableImageDimensions(rem)).toEqual([expect.objectContaining({ pageId: 'p', src: '/a.png', attribute: 'width', stated: '12rem' })]);
+    // The HTML adapter reads dimensions the same way, so a page's format cannot change its migrated size.
+    const htmlBlocks = htmlToIr('<article><img src="/b.png" alt="b" width="100%" height="240"></article>', { platform: 'generic', file: 'b.html', articleSelector: 'article' }).children;
+    const htmlImage = htmlBlocks.flatMap((block): ImageNode[] => {
+      if (block.type === 'image') return [block];
+      if (block.type === 'paragraph') return block.children.filter((node): node is ImageNode => node.type === 'image');
+      return [];
+    })[0];
+    expect(htmlImage ? [htmlImage.width, htmlImage.unreadableWidth, htmlImage.height] : []).toEqual([undefined, '100%', 240]);
     // An image that states no dimension is unchanged.
     const plain = markdownToIr('---\ntitle: T\n---\n\n<Image src="/a.png" alt="a" />\n', { platform: 'dai', file: 'a.mdx', pageId: 'p' }).children[0];
     expect(plain.type === 'image' && plain.width).toBeUndefined();
@@ -534,6 +549,13 @@ describe('gate semantics', () => {
     const permissive = runGates(gateInput(ws, { fidelityMode: 'permissive', sourceKind: 'url', navigationSource: 'url-path' }));
     for (const id of EXACT_FAMILY_GATE_IDS) expect(gate(permissive, id).status, id).toBe('not-run');
     expect(previewPushBlockers(permissive).map((g) => g.id)).toEqual(expect.arrayContaining([...EXACT_FAMILY_GATE_IDS]));
+    // An exploratory push may waive what permissive mode left unproven, and nothing else.
+    const family: readonly string[] = EXACT_FAMILY_GATE_IDS;
+    expect(previewPushBlockers(permissive, { allowUnprovenExactness: true }).map((g) => g.id).filter((id) => family.includes(id))).toEqual([]);
+    expect(waivedExactnessGates(permissive).map((g) => g.id).sort()).toEqual([...EXACT_FAMILY_GATE_IDS].sort());
+    const failedExact = permissive.map((g) => (g.id === 'chrome-absent' ? { ...g, status: 'fail' as const } : g));
+    expect(previewPushBlockers(failedExact, { allowUnprovenExactness: true }).map((g) => g.id)).toContain('chrome-absent');
+    expect(previewPushBlockers(permissive.filter((g) => g.id !== 'source-content-exact'), { allowUnprovenExactness: true }).map((g) => g.id)).toContain('source-content-exact');
     const exact = runGates(gateInput(ws, { sourceKind: 'url', navigationSource: 'url-path' }));
     expect(EXACT_FAMILY_GATE_IDS.map((id) => [id, gate(exact, id).status])).toEqual([
       ['no-authored-exclusions', 'pass'], ['conversion-fidelity', 'pass'], ['serialized-output-exact', 'pass'], ['navigation-exact', 'fail'], ['source-navigation-proven', 'fail'],

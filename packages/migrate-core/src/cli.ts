@@ -46,10 +46,11 @@ import { docToMdx } from './ir/to-dai-mdx.js';
 import type { DocIR } from './ir/types.js';
 import { walkBlocks, inlineText } from './ir/types.js';
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
+import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
 import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver, siteAssetReferences, type SiteMediaMeta } from './assets/manifest.js';
 import type { AssetProviderOptions } from './assets/providers.js';
 import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
-import { runGates, canonicalHash, previewPushBlockers, type GateResult, type SourceEvidence } from './verify/gates.js';
+import { runGates, canonicalHash, previewPushBlockers, waivedExactnessGates, type GateResult, type SourceEvidence } from './verify/gates.js';
 import { loadRawSourcePages, rawSourceIr, type RawSourcePage } from './verify/source-truth.js';
 import { runBrowserContentGate, runBrowserFragmentGate, type BrowserAnchor, type ExpectedNavigationEntry } from './verify/browser.js';
 import { authoredContentSnapshot, fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from './verify/fidelity.js';
@@ -68,13 +69,14 @@ Commands (run in order; the workflow has exactly four standard human gates):
                verifies the remote, the API key, the connected repository, previews and the media API up front; records the asset provider
   fingerprint  [--url <u>] [--export <zip|dir>] [--repo <dir>]     → plan/fingerprint.json
   discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] → plan/tree.yaml [gate 1: scope]
-  acquire      [--fetcher local|firecrawl] [--profile p] [--urls file] [--proxy url] [--headers-file json] [--cookies-file file] → source-cache/acquired/
+  acquire      [--fetcher local|firecrawl] [--zero-data-retention] [--profile p] [--urls file] [--proxy url] [--headers-file json] [--cookies-file file] → source-cache/acquired/
   inventory                                                         → snapshot/, inventory/*.json
   plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml [gate 2: conversion plan]
   assets       [--provider none|local|s3|dai-api]                   → plan/assets.json, assets-original/
   convert                                                           → output/, ledger/, quarantine/
   nav                                                               → output/documentation.json, report/redirects.*.json, report/anchors.json
-  write        [--repo <dir>] [--remote <url>] [--push] [--no-wait] [--preview-timeout min] → refs/heads/migration/<session>; with --push waits for the preview deployment and records its URL
+  write        [--repo <dir>] [--remote <url>] [--push] [--allow-lossy] [--no-wait] [--preview-timeout min] → refs/heads/migration/<session>; with --push waits for the preview deployment and records its URL
+               --allow-lossy (permissive sessions only) pushes an exploratory branch with unproven exactness gates waived; failed gates still block
   verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
   report                                                            → report/summary.md, report/platform-gaps.json
 
@@ -96,7 +98,7 @@ const { values: v, positionals } = parseArgs({
     'zero-data-retention': { type: 'boolean', default: process.env.FIRECRAWL_ZERO_DATA_RETENTION === '1' },
     proxy: { type: 'string', default: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY },
     'headers-file': { type: 'string', default: process.env.MIGRATION_HEADERS_FILE }, 'cookies-file': { type: 'string', default: process.env.MIGRATION_COOKIES_FILE }, 'auth-origin': { type: 'string', default: process.env.MIGRATION_AUTH_ORIGINS },
-    remote: { type: 'string' }, push: { type: 'boolean', default: false },
+    remote: { type: 'string' }, push: { type: 'boolean', default: false }, 'allow-lossy': { type: 'boolean', default: false },
     'no-wait': { type: 'boolean', default: false }, 'preview-timeout': { type: 'string', default: process.env.MIGRATION_PREVIEW_TIMEOUT_MIN ?? '15' },
     preview: { type: 'boolean', default: false }, 'preview-url': { type: 'string' }, 'preview-contract-version': { type: 'string' },
     'log-originals': { type: 'boolean', default: false },
@@ -583,7 +585,7 @@ async function main() {
             // The site's own statements only: its llms.txt entry, then the page's H1, then platform metadata.
             // A URL-derived placeholder is never a title, so exact mode stops rather than inventing one.
             const stated = p.llms?.title ?? published.title ?? (p.titleSource && p.titleSource !== 'path' ? p.title : undefined);
-            if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry, published Markdown H1 and platform metadata all lack one; re-run init with --fidelity permissive to fall back to the URL`);
+            if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry and published Markdown H1 lack one, and the tree title is a URL-derived placeholder (titleSource ${p.titleSource ?? 'unset'}); re-run init with --fidelity permissive to fall back to the URL`);
             const title = stated ?? p.title;
             docs.push(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}) }, codeMetaStrip: profile.codeMetaStrip }));
           }
@@ -593,11 +595,25 @@ async function main() {
             // No published Markdown here, so the page's own H1 is the H1 of the rendered article.
             const firstHeading = ir.children.find((block) => block.type === 'heading' && block.depth === 1);
             const h1 = firstHeading?.type === 'heading' ? inlineText(firstHeading.children).trim() || undefined : undefined;
-            const title = p.llms?.title ?? h1 ?? (p.titleSource && p.titleSource !== 'path' ? p.title : undefined) ?? p.title;
+            // The site's own statements only: its llms.txt entry, then the rendered article's H1, then platform metadata.
+            // A URL-derived placeholder is never a title, so exact mode stops rather than inventing one.
+            const stated = p.llms?.title ?? h1 ?? (p.titleSource && p.titleSource !== 'path' ? p.title : undefined);
+            if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry, rendered <h1> and platform metadata all lack one (titleSource ${p.titleSource ?? 'unset'}); re-run init with --fidelity permissive to fall back to the URL`);
+            const title = stated ?? p.title;
             const description = page.llms?.description ?? page.description ?? p.description;
             docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}) }, children: ir.children });
           }
         }
+      }
+      // Every offending page is reported in one message: an operator sees the whole list instead of
+      // bisecting a repository one failed run at a time.
+      const unreadableDimensions = docs.flatMap((doc) => unreadableImageDimensions(doc));
+      if (unreadableDimensions.length) {
+        if ((s.fidelityMode ?? 'exact') === 'exact') {
+          fail(`${unreadableDimensions.length} image dimension(s) the target Image contract cannot carry:\n${unreadableDimensions.map((entry) => `  ${describeUnreadableDimension(entry)}`).join('\n')}\nre-run init with --fidelity permissive to migrate these images without their stated dimension`);
+        }
+        writeJson(join(workspace, 'report', 'lossy-dimensions.json'), unreadableDimensions);
+        for (const entry of unreadableDimensions) console.log(`· ${describeUnreadableDimension(entry)}; permissive mode migrates the image without it`);
       }
       const comps: Array<{ pageId: string; node: any; depth: number; source?: string }> = [];
       const anchors: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }> }> = [];
@@ -852,6 +868,7 @@ async function main() {
       const repoDir = v.repo ? resolve(v.repo) : join(workspace, 'repo');
       if (!v.repo && !remote) fail('--repo <dir> or a remote (from init --remote or --remote here) is required');
       if (!v.repo) mkdirSync(repoDir, { recursive: true, mode: 0o700 }); // cloned by the writer on first use
+      if (v['allow-lossy'] && !v.push) fail('--allow-lossy only changes what --push accepts; without --push no gate is consulted');
       if (v.push) {
         const gateFile = join(workspace, 'report', 'gates.json');
         if (!existsSync(gateFile)) fail('--push requires a completed verify run');
@@ -868,8 +885,18 @@ async function main() {
         if (stalePlans.length) fail(`--push refused: plan changed after conversion (${stalePlans.join(', ')}); rerun convert and verify`);
         const gateReport = readJson<{ pass: boolean; outputHash?: string; gates: GateResult[] }>(gateFile);
         if (gateReport.outputHash !== currentOutputHash) fail('--push refused: report/gates.json does not belong to the current output; rerun verify');
-        const blockers = previewPushBlockers(gateReport.gates);
-        if (blockers.length) fail(`--push refused: non-preview gates must pass first (${blockers.map((g) => g.id).join(', ')})`);
+        // An exploratory push accepts that exactness is unproven, which only a permissive session can
+        // leave it. It waives "not proven", never a gate that actually failed.
+        const allowLossy = !!v['allow-lossy'];
+        if (allowLossy && (s.fidelityMode ?? 'exact') === 'exact') fail('--allow-lossy refused: this session is exact, where nothing is left unproven and nothing may be waived. Re-run init with --fidelity permissive for an exploratory migration.');
+        const blockers = previewPushBlockers(gateReport.gates, { allowUnprovenExactness: allowLossy });
+        if (blockers.length) fail(`--push refused: non-preview gates must pass first (${blockers.map((g) => g.id).join(', ')})${allowLossy ? '; these failed or are missing, which --allow-lossy cannot waive' : ''}`);
+        if (allowLossy) {
+          const waived = waivedExactnessGates(gateReport.gates).map((gate) => gate.id);
+          writeJson(join(workspace, 'report', 'lossy-push.json'), { at: new Date().toISOString(), outputHash: currentOutputHash, waivedGates: waived });
+          console.log(`· EXPLORATORY PUSH: ${waived.length} exactness gate(s) waived as unproven (${waived.join(', ')}); recorded in report/lossy-push.json`);
+          console.log('· this branch is NOT a certified migration: its preview may differ from the source and it must not be released to a customer');
+        }
         if (!gateReport.pass) console.log('· pushing the migration branch to create a preview; rendered-preview gates remain required before release');
       }
       const allowed = existsSync(join(workspace, 'plan', 'allowed-orgs.json')) ? readJson<string[]>(join(workspace, 'plan', 'allowed-orgs.json')) : [];

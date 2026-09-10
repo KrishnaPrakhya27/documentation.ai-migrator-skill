@@ -49,12 +49,31 @@ export function isHtmlChromeNode(block: Block | undefined): boolean {
 /** Reviewer recorded by the rules engine when a mapping rule, not a person, dropped a node. */
 const RULE_REVIEWER = /^rule:/;
 
+export interface PushBlockerOptions {
+  /**
+   * Waive the exact-fidelity gates a permissive session leaves `not-run`, so an operator
+   * can push an exploratory branch and look at a real preview. It waives only "not proven";
+   * a gate that actually failed still blocks, and so does a missing result. Never set this
+   * for a customer migration: the branch it produces is not a certified migration.
+   */
+  allowUnprovenExactness?: boolean;
+}
+
 /** A migration branch may be pushed to create its preview only after every
  * non-preview gate passes. Final release still requires every gate to pass. */
-export function previewPushBlockers(gates: GateResult[]): GateResult[] {
+export function previewPushBlockers(gates: GateResult[], options: PushBlockerOptions = {}): GateResult[] {
   const byId = new Map(gates.map((gate) => [gate.id, gate]));
   const missing = REQUIRED_RELEASE_GATE_IDS.filter((id) => !byId.has(id)).map((id): GateResult => ({ id, status: 'fail', detail: 'required gate result is missing' }));
-  return [...missing, ...gates.filter((gate) => gate.status !== 'pass' && !(gate.status === 'not-run' && PREVIEW_ONLY_GATES.has(gate.id)))];
+  const waived = new Set<string>(options.allowUnprovenExactness ? EXACT_FAMILY_GATE_IDS : []);
+  return [...missing, ...gates.filter((gate) => gate.status !== 'pass'
+    && !(gate.status === 'not-run' && PREVIEW_ONLY_GATES.has(gate.id))
+    && !(gate.status === 'not-run' && waived.has(gate.id)))];
+}
+
+/** The exact-fidelity gates a push waived, for the operator message and the run report. */
+export function waivedExactnessGates(gates: GateResult[]): GateResult[] {
+  const family = new Set<string>(EXACT_FAMILY_GATE_IDS);
+  return gates.filter((gate) => gate.status === 'not-run' && family.has(gate.id));
 }
 
 export function listMdx(dir: string, out: string[] = []): string[] {

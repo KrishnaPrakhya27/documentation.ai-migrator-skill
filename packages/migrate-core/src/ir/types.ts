@@ -22,7 +22,8 @@ export interface LinkNode extends BaseNode { type: 'link'; url: string; title?: 
 export interface BreakNode extends BaseNode { type: 'break' }
 export interface KbdNode extends BaseNode { type: 'kbd'; children: Inline[] }
 export interface InlineHtmlNode extends BaseNode { type: 'inlineHtml'; value: string }
-export interface ImageNode extends BaseNode { type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number }
+/** `unreadableWidth`/`unreadableHeight` hold a dimension the source states that the target's integer-pixel contract cannot carry (`100%`, `2rem`), so the loss stays visible instead of being guessed at or dropped. */
+export interface ImageNode extends BaseNode { type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number; unreadableWidth?: string; unreadableHeight?: string }
 
 export type Inline = TextNode | InlineCodeNode | StrongNode | EmphasisNode | DeleteNode | LinkNode | BreakNode | KbdNode | InlineHtmlNode | ImageNode;
 

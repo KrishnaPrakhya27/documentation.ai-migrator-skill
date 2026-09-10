@@ -32,7 +32,7 @@ Stop only at these four standard gates. Missing required inputs, ambiguous platf
 Run `assets` before `convert`, and run `convert` twice over identical inputs to prove determinism. Generate navigation, then run local `verify`; gate 3 occurs only when every pre-push automated check passes. `write --push` may then push only the approved migration branch; it clones the remote into the workspace if no `--repo` is given, then waits for the platform to build the preview and records the preview URL in the session (a missing deployment is diagnosed: GitHub App repository access, plan without previews, or wrong remote). Re-run `verify --preview`; the preview URL and the contract version come from the session (the version is read from the platform when exposed, otherwise the pinned version is assumed and the report says so). Gate 4 occurs only when every release check passes.
 
 ## Run sequence
-Every command after `init` takes `--workspace <path>` (or `MIGRATION_WORKSPACE`). Run them in this order; stop at the gate where one is marked.
+Run every command from the plugin root as `npx dai-migrate <command>`; `dai-migrate` is not installed globally. Every command after `init` takes `--workspace <path>` (or `MIGRATION_WORKSPACE`). Run them in this order; stop at the gate where one is marked.
 
 ```
 dai-migrate init --workspace <path> --source <src> --target <customer-org|demo-org> --remote <git url> --fidelity exact --allowed-orgs <owner>
@@ -51,6 +51,16 @@ dai-migrate report     --workspace <path>
 ```
 
 A stage that fails stops the run and names what to fix. Never skip a stage to get past a failure, and never hand-edit `output/`: change the plan the stage reads and run it again.
+
+## Exploratory test run
+Use this only when the user explicitly asks for a test or exploratory migration, or asks to skip asset hosting or push checks. Never for a customer release.
+
+- `init ... --fidelity permissive` instead of `--fidelity exact`.
+- `assets --provider none` when asset hosting is not available; permissive mode leaves assets on the source host instead of stopping.
+- `write --push --allow-lossy` to push the migration branch and get a preview. It waives only the exactness gates a permissive run leaves unproven; a gate that failed still blocks, and the waiver is recorded in `report/lossy-push.json`.
+- Say plainly in your summary that the result is not a certified migration and must not be released to a customer.
+
+If the user asks to skip checks while the session is exact, do not work around the stop: tell them to start a fresh workspace with `--fidelity permissive`.
 
 ## Rules you never break
 - No `.jsx` snippets or any executable output; T5 is static only.

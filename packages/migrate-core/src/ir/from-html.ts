@@ -5,6 +5,7 @@
  */
 import { Parser } from 'htmlparser2';
 import type { Block, Inline, ImageNode, ComponentNode, HeadingNode, ListItemNode, TableRowNode, Frontmatter, DocIR } from './types.js';
+import { readPixelDimension } from './dimensions.js';
 import { nodeId } from '../session/ids.js';
 
 /** Minimal DOM built from htmlparser2 events. */
@@ -264,8 +265,16 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
 
   const imageOf = (n: El, p: number[]): ImageNode => {
     const url = n.attribs.src ?? n.attribs['data-src'] ?? '';
-    const w = parseInt(n.attribs.width ?? '', 10); const h = parseInt(n.attribs.height ?? '', 10);
-    return { id: id(p, url), type: 'image', url, alt: (n.attribs.alt ?? '').trim(), title: n.attribs.title, width: Number.isFinite(w) ? w : undefined, height: Number.isFinite(h) ? h : undefined };
+    // The same reader the Markdown adapter uses: `parseInt` used to turn `100%` into 100 and `2rem` into 2,
+    // so one site migrated differently depending on which format the page arrived in.
+    const width = readPixelDimension(n.attribs.width);
+    const height = readPixelDimension(n.attribs.height);
+    return {
+      id: id(p, url), type: 'image', url, alt: (n.attribs.alt ?? '').trim(), title: n.attribs.title,
+      width: width.value, height: height.value,
+      ...(width.unreadable !== undefined ? { unreadableWidth: width.unreadable } : {}),
+      ...(height.unreadable !== undefined ? { unreadableHeight: height.unreadable } : {}),
+    };
   };
 
   const isParagraphElement = (n: El) => (opts.paragraphSelectors ?? []).some((s) => matchesSelector(n, s));
