@@ -18,7 +18,7 @@ import { unwrapPublishedMarkdown } from '../scrape/published-markdown.js';
 import { htmlAdapterOptions, type ScrapeProfile } from '../scrape/profiles.js';
 import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { authoredContentSnapshot, firstFidelityDifference } from './fidelity.js';
-import { inlineText, walkBlocks, type Block, type DocIR } from '../ir/types.js';
+import { inlineText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
 
 /** One page as the source served it, paired with the file the migration wrote for it. */
 export interface RawSourcePage {
@@ -145,10 +145,7 @@ export function documentLinks(doc: DocIR): string[] {
 }
 
 function collectLinks(block: Block, urls: string[]): void {
-  if (block.type === 'paragraph' || block.type === 'heading') {
-    for (const inline of block.children) if (inline.type === 'link') urls.push(inline.url);
-    return;
-  }
+  visitBlockInlines(block, (inline) => { if (inline.type === 'link') urls.push(inline.url); });
   if (block.type === 'component' || block.type === 'dai') {
     for (const [key, value] of Object.entries(block.props ?? {})) if (LINK_PROPS.has(key) && typeof value === 'string') urls.push(value);
   }
@@ -156,12 +153,27 @@ function collectLinks(block: Block, urls: string[]): void {
 
 const LINK_PROPS = new Set(['href', 'to', 'link', 'url']);
 
+/** Tables, captions and formatted inline content are authored content too. */
+function visitBlockInlines(block: Block, visit: (inline: Inline) => void): void {
+  const walk = (nodes: Inline[]): void => {
+    for (const node of nodes) {
+      visit(node);
+      if ('children' in node) walk(node.children);
+    }
+  };
+  if (block.type === 'paragraph' || block.type === 'heading') walk(block.children);
+  if (block.type === 'table') for (const row of block.children) for (const cell of row.children) walk(cell.children);
+  if (block.type === 'figure') walk(block.caption ?? []);
+}
+
 /** Ordered images of a document with the attributes that must survive. */
 export function documentImages(doc: DocIR): Array<{ src: string; alt?: string; title?: string; width?: number; height?: number }> {
   const images: Array<{ src: string; alt?: string; title?: string; width?: number; height?: number }> = [];
   walkBlocks(doc.children, (block) => {
-    if (block.type === 'image') images.push({ src: block.url, alt: block.alt, title: block.title, width: block.width, height: block.height });
-    else if (block.type === 'paragraph') for (const inline of block.children) if (inline.type === 'image') images.push({ src: inline.url, alt: inline.alt, title: inline.title, width: inline.width, height: inline.height });
+    const add = (image: Extract<Inline, { type: 'image' }>): void => { images.push({ src: image.url, alt: image.alt, title: image.title, width: image.width, height: image.height }); };
+    if (block.type === 'image') add(block);
+    if (block.type === 'figure') add(block.image);
+    visitBlockInlines(block, (inline) => { if (inline.type === 'image') add(inline); });
   });
   return images;
 }
@@ -200,7 +212,7 @@ export function documentTextSegments(doc: DocIR): string[] {
  * renderings of the same authored content, and the migration must match both.
  */
 export function htmlReconciliation(page: RawSourcePage, platform: string, profile: ScrapeProfile): SourceComparison {
-  if (page.html === undefined) return { pageId: page.pageId, path: page.path, pass: true, detail: 'no rendered HTML was frozen for this page' };
+  if (page.html === undefined) return { pageId: page.pageId, path: page.path, pass: false, detail: 'no rendered HTML was frozen for this page' };
   const output = outputIr(page);
   if (!output) return { pageId: page.pageId, path: page.path, pass: false, detail: `no output file at ${page.outputFile}` };
   const rendered = htmlToIr(page.html, htmlAdapterOptions(profile, { platform, file: page.path }));
@@ -229,6 +241,7 @@ function sameSequence(a: string[], b: string[]): boolean {
 
 /** No string the platform's own theme renders may appear anywhere in the migrated output. */
 export function chromeAbsent(page: RawSourcePage, chromeStrings: readonly string[]): SourceComparison {
+  if (!chromeStrings.some((value) => value.trim())) return { pageId: page.pageId, path: page.path, pass: false, detail: 'no platform chrome evidence was supplied' };
   if (!existsSync(page.outputFile)) return { pageId: page.pageId, path: page.path, pass: false, detail: `no output file at ${page.outputFile}` };
   const text = normaliseProse(readFileSync(page.outputFile, 'utf8'));
   const found = chromeStrings.filter((chrome) => chrome && text.includes(normaliseProse(chrome)));

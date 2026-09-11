@@ -75,9 +75,9 @@ describe('discovery', () => {
     const html = `<html><script>self.__next_f.push([1,${JSON.stringify(payload)}])</script></html>`;
     const found = extractMintlifyNavigation(html, 'https://docs.example/');
     expect(found?.navigation).toEqual([
-      { type: 'group', label: 'v2', children: [
-        { type: 'group', label: 'Guides', children: [{ type: 'group', label: 'Basics', children: [{ type: 'page', url: 'https://docs.example/guides/setup', title: 'Setup' }] }] },
-        { type: 'group', label: 'API', children: [{ type: 'group', label: 'REST', children: [{ type: 'page', url: 'https://docs.example/api/tokens', title: 'Tokens' }] }] },
+      { type: 'group', kind: 'version', label: 'v2', children: [
+        { type: 'group', kind: 'tab', label: 'Guides', children: [{ type: 'group', label: 'Basics', children: [{ type: 'page', url: 'https://docs.example/guides/setup', title: 'Setup' }] }] },
+        { type: 'group', kind: 'tab', label: 'API', children: [{ type: 'group', kind: 'menu', label: 'REST', children: [{ type: 'page', url: 'https://docs.example/api/tokens', title: 'Tokens' }] }] },
       ] },
     ]);
     expect(found?.pages.map((page) => page.groups)).toEqual([['v2', 'Guides', 'Basics'], ['v2', 'API', 'REST']]);

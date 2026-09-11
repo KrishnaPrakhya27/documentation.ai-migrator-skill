@@ -2,7 +2,7 @@
  * Release gates. Any failure blocks release. Gates that need a preview or a
  * browser report `not-run` and count as failed unless explicitly allowed.
  */
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, statSync, lstatSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { validateMdx, validateNavigation } from '@dai/content-contract';
 import { Ledger, effectiveExclusions, summarize, type LedgerSummary } from '../ledger/dispositions.js';
@@ -18,11 +18,16 @@ import { isConvertedFidelityRecord, readFidelityRecords } from './fidelity-recor
 import { describeMigrator, migratorDrift, type MigratorProvenance } from '../session/provenance.js';
 import { chromeAbsent, htmlReconciliation, sourceContentExact, sourceMetadataExact, type RawSourcePage, type SourceComparison } from './source-truth.js';
 import type { ScrapeProfile } from '../scrape/profiles.js';
+import { requireSourceManifest, sourceUniverseProblems } from '../evidence/verify.js';
+import { requireAcquisition } from '../evidence/acquisition.js';
+import type { SpecManifest } from '../openapi/graph.js';
 
 export interface GateResult { id: string; status: 'pass' | 'fail' | 'not-run'; detail: string; count?: number; samples?: string[] }
 
 const PREVIEW_ONLY_GATES = new Set(['preview-contract-version', 'browser-fragments', 'browser-content']);
 export const REQUIRED_RELEASE_GATE_IDS = [
+  'openapi-preserved',
+  'source-manifest-pinned', 'source-universe-accounted',
   'plans-pinned', 'pages-accounted', 'block-dispositions', 'exclusions-attributed',
   'no-authored-exclusions', 'conversion-fidelity', 'serialized-output-exact',
   'no-unsafe-urls', 'assets-ready', 'prose-match', 'code-blocks-exact', 'tables-exact',
@@ -35,6 +40,8 @@ export const REQUIRED_RELEASE_GATE_IDS = [
 
 /** Gates that certify exactness against the source. A permissive session reports them `not-run`; it never passes them. */
 export const EXACT_FAMILY_GATE_IDS = [
+  'openapi-preserved',
+  'source-manifest-pinned', 'source-universe-accounted',
   'no-authored-exclusions', 'conversion-fidelity', 'serialized-output-exact', 'navigation-exact', 'source-navigation-proven',
   'source-content-exact', 'source-metadata-exact', 'html-reconciliation', 'chrome-absent',
 ] as const;
@@ -236,10 +243,13 @@ export interface GateInput {
    * output no longer follows the reviewed decisions, so the gate fails; omitting these
    * reports the gate `not-run`, never `pass`.
    */
-  pinnedPlans?: { componentPlan?: string; urlPlan?: string; assetPlan?: string; blockExclusions?: string };
+  pinnedPlans?: { componentPlan?: string; urlPlan?: string; assetPlan?: string; blockExclusions?: string; scopeDecisions?: string };
+  pinnedSourceManifest?: string;
+  pinnedAcquisition?: string;
+  pinnedOpenapi?: string;
   /** Source docs from the snapshot (IR JSON). */
   sourceDocs: Array<{ doc: DocIR; outputFile?: string }>;
-  treePages: Array<{ id: string; migrate: boolean; newPath?: string }>;
+  treePages: Array<{ id: string; source?: string; migrate: boolean; newPath?: string }>;
   quarantinedPages: Set<string>;
   excludedPages: Set<string>;
   unreviewed: number;
@@ -259,7 +269,16 @@ export interface GateInput {
 }
 
 export function canonicalHash(outputDir: string): string {
-  const files = listMdx(outputDir).concat(existsSync(join(outputDir, 'documentation.json')) ? [join(outputDir, 'documentation.json')] : []).sort();
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir).sort()) {
+      const file = join(dir, name); const stat = lstatSync(file);
+      if (stat.isSymbolicLink()) throw new Error(`output contains a symbolic link: ${file}`);
+      if (stat.isDirectory()) walk(file); else if (stat.isFile()) files.push(file);
+    }
+  };
+  walk(outputDir);
   const h = files.map((f) => `${relative(outputDir, f)}\n${sha256(readFileSync(f))}`).join('\n');
   return sha256(h);
 }
@@ -268,6 +287,42 @@ export function runGates(input: GateInput): GateResult[] {
   const gates: GateResult[] = [];
   const outMdx = listMdx(input.outputDir);
   const outByPath = new Map(outMdx.map((f) => [relative(input.outputDir, f).replace(/\.mdx?$/, ''), f]));
+  const specProblems: string[] = [];
+  const specFile = join(input.workspace, 'inventory', 'openapi.json');
+  if (existsSync(specFile) || input.pinnedOpenapi) {
+    if (!existsSync(specFile) || !input.pinnedOpenapi || sha256(readFileSync(specFile)) !== input.pinnedOpenapi) specProblems.push('OpenAPI manifest is missing, changed or unpinned');
+    else {
+      const specs = JSON.parse(readFileSync(specFile, 'utf8')) as SpecManifest;
+      for (const spec of specs.documents) {
+        if (spec.file !== `${sha256(spec.source)}.json`) { specProblems.push('OpenAPI manifest has an invalid file path'); continue; }
+        const source = join(input.workspace, 'source-cache', 'openapi', `${sha256(spec.source)}.source`);
+        const output = join(input.outputDir, 'openapi', spec.file);
+        if (!existsSync(source) || sha256(readFileSync(source)) !== spec.sourceHash) specProblems.push(`${spec.source}: frozen spec changed`);
+        if (!existsSync(output) || sha256(readFileSync(output)) !== spec.outputHash) specProblems.push(`${spec.source}: output spec missing or changed`);
+      }
+    }
+  }
+  const catalogFile = join(input.workspace, 'inventory', 'readme-api-catalog.json');
+  if (existsSync(catalogFile) && input.treePages.some((page) => page.migrate && /\/reference\//.test(page.source ?? ''))) {
+    const catalog = JSON.parse(readFileSync(catalogFile, 'utf8')) as { issue?: string };
+    if (catalog.issue && !input.pinnedOpenapi) specProblems.push(catalog.issue);
+  }
+  gates.push({ id: 'openapi-preserved', status: input.fidelityMode === 'permissive' ? 'not-run' : specProblems.length ? 'fail' : 'pass', detail: specProblems.length ? specProblems.join('; ') : input.pinnedOpenapi ? 'all captured OpenAPI source and output documents match their pins' : 'no captured OpenAPI documents declared by acquisition', samples: specProblems.slice(0, 8), count: specProblems.length });
+  if (input.fidelityMode === 'permissive') {
+    for (const id of ['source-manifest-pinned', 'source-universe-accounted']) gates.push({ id, status: 'not-run', detail: 'permissive mode; source universe is not certified' });
+  } else {
+    try {
+      const manifest = requireSourceManifest(input.workspace, input.pinnedSourceManifest);
+      requireAcquisition(input.workspace, manifest, input.pinnedAcquisition, input.treePages);
+      gates.push({ id: 'source-manifest-pinned', status: 'pass', detail: 'source manifest and frozen files match the discovery pin' });
+      const problems = sourceUniverseProblems({ workspace: input.workspace, manifest, treePages: input.treePages, written: new Set(outByPath.keys()), quarantined: input.quarantinedPages });
+      gates.push({ id: 'source-universe-accounted', status: problems.length ? 'fail' : 'pass', detail: problems.length ? `${problems.length} source universe problems` : `${manifest.pages.length} source identities accounted independently of the plan`, count: problems.length, samples: problems.slice(0, 8) });
+    } catch (error) {
+      const detail = (error as Error).message;
+      if (!gates.some((gate) => gate.id === 'source-manifest-pinned')) gates.push({ id: 'source-manifest-pinned', status: 'fail', detail });
+      gates.push({ id: 'source-universe-accounted', status: 'fail', detail });
+    }
+  }
 
   // 0. the reviewed plans still describe this output
   if (!input.pinnedPlans) {
@@ -283,6 +338,7 @@ export function runGates(input: GateInput): GateResult[] {
     ] as Array<[string, string | undefined]>).filter(([file, expected]) => !expected || hashOf(planFile(file)) !== expected).map(([file]) => file);
     // Block exclusions are pinned by absence too: a file that appears after convert is a change.
     if (hashOf(planFile('block-exclusions.yaml')) !== pinned.blockExclusions) changed.push('block-exclusions.yaml');
+    if (hashOf(planFile('scope-decisions.yaml')) !== pinned.scopeDecisions) changed.push('scope-decisions.yaml');
     gates.push({ id: 'plans-pinned', status: changed.length ? 'fail' : 'pass', detail: changed.length ? `plan changed after conversion: ${changed.join(', ')}; rerun convert` : 'component, URL and asset plans match the converted snapshot', count: changed.length, samples: changed });
   }
 
@@ -407,6 +463,11 @@ export function runGates(input: GateInput): GateResult[] {
   const sourceGate = (id: string, results: SourceComparison[], summary: (failures: SourceComparison[]) => string): void => {
     if (!exact) { gates.push({ id, status: 'not-run', detail: 'permissive mode; the source is not re-read' }); return; }
     if (!evidence) { gates.push({ id, status: 'fail', detail: 'no raw source evidence was supplied; exact mode certifies output only against the acquired source' }); return; }
+    const requiredIds = input.treePages.filter((page) => page.migrate).map((page) => page.id);
+    const resultIds = new Set(results.map((result) => result.pageId));
+    if (!results.length || resultIds.size !== results.length || requiredIds.some((id) => !resultIds.has(id))) {
+      gates.push({ id, status: 'fail', detail: 'raw source evidence is empty, duplicated, or missing migrated pages' }); return;
+    }
     const failures = results.filter((result) => !result.pass);
     gates.push({
       id,
@@ -439,10 +500,11 @@ export function runGates(input: GateInput): GateResult[] {
     const expected = input.expectedNavigation;
     const matchesTree = !!expected && written === canonical(expected);
     const reExtracted = evidence?.navigation;
-    const matchesSource = !reExtracted || written === canonical(reExtracted);
+    const matchesSource = !!reExtracted && written === canonical(reExtracted);
     const same = matchesTree && matchesSource;
     const why = !expected ? 'expected navigation was not supplied'
       : !matchesTree ? 'output navigation differs from the reviewed source tree'
+      : !reExtracted ? 'no independently extracted source navigation was supplied'
       : !matchesSource ? `output navigation differs from the navigation re-extracted from the acquired source (${evidence?.navigationSource ?? 'source'})`
       : reExtracted ? `output navigation matches the reviewed tree and the navigation re-extracted from the acquired source (${evidence?.navigationSource ?? 'source'})`
       : 'output navigation exactly matches the reviewed source tree';

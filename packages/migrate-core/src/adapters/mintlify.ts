@@ -10,7 +10,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import type { SourceNavigationNode, Tree, TreePage } from '../nav/tree.js';
+import { navigationMetadata, type NavigationContainerKind, type SourceNavigationNode, type Tree, type TreePage } from '../nav/tree.js';
 import type { RedirectRule } from '../urls/plan.js';
 import { pageIdFromPlatform } from '../session/ids.js';
 
@@ -30,7 +30,7 @@ export interface MintlifyRepo {
   missing: string[];
 }
 
-const DIVISIONS = ['versions', 'languages', 'tabs', 'anchors', 'dropdowns', 'products', 'groups', 'pages'] as const;
+const DIVISIONS = ['versions', 'languages', 'tabs', 'anchors', 'dropdowns', 'products', 'menus', 'groups', 'pages'] as const;
 
 function pageFile(root: string, page: string): string | undefined {
   for (const ext of ['.mdx', '.md']) { const p = join(root, `${page}${ext}`); if (existsSync(p)) return p; }
@@ -38,7 +38,7 @@ function pageFile(root: string, page: string): string | undefined {
 }
 
 function labelOf(node: any): string | undefined {
-  return node.group ?? node.tab ?? node.anchor ?? node.dropdown ?? node.product ?? node.version ?? node.language;
+  return node.group ?? node.tab ?? node.anchor ?? node.dropdown ?? node.product ?? node.version ?? node.language ?? node.menu;
 }
 
 export function readMintlifyRepo(rootIn: string): MintlifyRepo {
@@ -75,11 +75,15 @@ export function readMintlifyRepo(rootIn: string): MintlifyRepo {
     if (label && !node.version && !node.language) next.group = [...ctx.group, String(label)];
     if (typeof node.openapi === 'string') { next.openapi = node.openapi; openapi.push({ groupPath: next.group, spec: node.openapi, version: next.version, locale: next.locale }); }
     else if (node.openapi && typeof node.openapi === 'object' && typeof node.openapi.source === 'string') { openapi.push({ groupPath: next.group, spec: node.openapi.source, version: next.version, locale: next.locale }); }
-    if (typeof node.href === 'string' && !DIVISIONS.some((k) => k in node)) return []; // external link entry
+    const kind = (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string') ?? (typeof node.anchor === 'string' ? 'menu' : undefined);
+    if (typeof node.href === 'string' && !DIVISIONS.some((k) => k in node)) {
+      if (!label || !kind) throw new Error(`${configFile}: external navigation entry ${node.href} has no supported container label`);
+      return [{ type: 'group', kind, label, ...navigationMetadata(node), children: [] }];
+    }
     const children: SourceNavigationNode[] = [];
     for (const k of DIVISIONS) if (k in node) children.push(...walk(node[k], next));
     if (node.global && typeof node.global === 'object') children.push(...walk(node.global, next));
-    return label && !node.version && !node.language && children.length ? [{ type: 'group', label: String(label), children }] : children;
+    return label && children.length ? [{ type: 'group', kind: kind as NavigationContainerKind, label: String(label), ...navigationMetadata(node), children }] : children;
   };
   const navigation = walk(cfg.navigation ?? {}, { group: [] });
 
@@ -92,6 +96,7 @@ export function readMintlifyRepo(rootIn: string): MintlifyRepo {
     if (typeof data?.title === 'string') p.title = data.title;
     if (typeof data?.sidebarTitle === 'string') p.sidebarTitle = data.sidebarTitle;
     if (typeof data?.description === 'string') p.description = data.description;
+    for (const key of ['icon', 'tags', 'badge', 'method'] as const) if (typeof data?.[key] === 'string') p[key] = data[key];
   }
 
   // redirects: Mintlify supports :slug, :slug* and a trailing *; the platform supports exact and :param only

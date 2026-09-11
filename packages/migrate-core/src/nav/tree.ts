@@ -19,6 +19,10 @@ export interface TreePage {
   titleSource?: 'llms-txt' | 'platform-metadata' | 'source-config' | 'published-markdown' | 'path';
   /** Exact label shown in source navigation. It may intentionally differ from the page title. */
   sidebarTitle?: string;
+  icon?: string;
+  tags?: string;
+  badge?: string;
+  method?: string;
   /** Sidebar anchor text as the source renders it. Cross-checked against `sidebarTitle`; never used in its place. */
   domSidebarTitle?: string;
   /**
@@ -60,8 +64,20 @@ export interface TreePage {
 
 /** Navigation placements are separate from page entities: one page may appear in several groups. */
 export type SourceNavigationNode =
-  | { type: 'page'; pageId: string; title?: string }
-  | { type: 'group'; label: string; children: SourceNavigationNode[] };
+  | { type: 'page'; pageId: string; title?: string; icon?: string; tags?: string; badge?: string; method?: string }
+  | { type: 'group'; kind?: NavigationContainerKind; label: string; children: SourceNavigationNode[]; icon?: string; href?: string; expandable?: boolean; description?: string };
+
+export type NavigationContainerKind = 'product' | 'language' | 'version' | 'tab' | 'dropdown' | 'menu' | 'group';
+
+/** Only authored presentation metadata crosses this boundary. Undefined fields are omitted. */
+export function navigationMetadata(source: Record<string, unknown>): { icon?: string; href?: string; expandable?: boolean; description?: string; tags?: string; badge?: string; method?: string } {
+  const result: ReturnType<typeof navigationMetadata> = {};
+  for (const key of ['icon', 'href', 'description', 'tags', 'badge', 'method'] as const) {
+    if (typeof source[key] === 'string') result[key] = source[key];
+  }
+  if (typeof source.expandable === 'boolean') result.expandable = source.expandable;
+  return result;
+}
 
 export interface Tree {
   scope: 'full' | 'partial';
@@ -114,21 +130,22 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
   type Node = { group: string; pages: Array<PageRef | Node>; _order: number };
   const eligible = new Map(pages.filter((p) => p.migrate && p.newPath).map((p) => [p.id, p]));
   if (sourceNavigation?.length) {
-    const convert = (nodes: SourceNavigationNode[]): Array<PageRef | { group: string; pages: unknown[] }> => {
-      const out: Array<PageRef | { group: string; pages: unknown[] }> = [];
+    const convert = (nodes: SourceNavigationNode[]): Record<string, unknown>[] => {
+      const out: Record<string, unknown>[] = [];
       for (const node of nodes) {
       if (node.type === 'page') {
         const page = eligible.get(node.pageId);
-        if (page) out.push({ title: node.title ?? page.sidebarTitle ?? page.title ?? page.newPath!, path: page.newPath! });
+        if (page) out.push({ ...pageMetadata(page), ...pageMetadata(node), title: node.title ?? page.sidebarTitle ?? page.title, path: page.newPath! });
         continue;
       }
       const children = convert(node.children);
-      if (children.length) out.push({ group: node.label, pages: children });
+      const kind = node.kind ?? 'group';
+      if (children.length || node.href) out.push({ [kind]: node.label, ...navigationMetadata(node), ...(children.length ? collection(children, kind) : {}) });
       }
       return out;
     };
     const top = convert(sourceNavigation);
-    if (top.length) return top.every((item) => 'group' in item) ? { groups: top } : { pages: top };
+    return collection(top, 'navigation');
   }
   const roots: Array<PageRef | Node> = [];
   const byPath = new Map<string, Node>();
@@ -142,12 +159,28 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
       if (!node) { node = { group: g, pages: [], _order: p.order }; byPath.set(key, node); container.push(node); }
       container = node.pages;
     }
-    container.push({ title: p.sidebarTitle ?? p.title ?? p.newPath!, path: p.newPath! }); // the renderer rejects bare path strings
+    container.push({ ...pageMetadata(p), title: p.sidebarTitle ?? p.title, path: p.newPath! }); // the renderer rejects bare path strings
   }
   const clean = (items: Array<PageRef | Node>): Array<PageRef | { group: string; pages: unknown[] }> => items.map((it) => ('group' in it ? { group: it.group, pages: clean(it.pages) } : it));
   const top = clean(roots);
   const allGroups = top.every((t) => 'group' in t);
   return allGroups && top.length ? { groups: top } : { pages: top };
+}
+
+function pageMetadata(page: { icon?: string; tags?: string; badge?: string; method?: string }): Record<string, string> {
+  return Object.fromEntries(Object.entries({ icon: page.icon, tags: page.tags, badge: page.badge, method: page.method }).filter((entry): entry is [string, string] => entry[1] !== undefined));
+}
+
+function collection(items: Record<string, unknown>[], parent: string): Record<string, unknown> {
+  const kinds: NavigationContainerKind[] = ['product', 'language', 'version', 'tab', 'dropdown', 'menu', 'group'];
+  const types = new Set(items.map((item) => kinds.find((kind) => kind in item) ?? 'page'));
+  if (parent === 'group' || [...types].every((kind) => kind === 'page' || kind === 'group') && types.has('page')) {
+    if ([...types].some((kind) => kind !== 'page' && kind !== 'group')) throw new Error(`navigation ${parent}: cannot preserve dimension containers inside pages`);
+    return { pages: items };
+  }
+  if (types.size > 1) throw new Error(`navigation ${parent}: mixed child kinds ${[...types].join(', ')} cannot be represented without changing structure`);
+  const kind = [...types][0] ?? 'page';
+  return { [kind === 'page' ? 'pages' : `${kind}s`]: items };
 }
 
 /**
@@ -157,6 +190,8 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
  */
 export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: string; defaultLocale?: string; sourceNavigation?: SourceNavigationNode[] } = {}): { navigation: Record<string, unknown> } {
   const inScope = pages.filter((p) => p.migrate && p.newPath);
+  const hasDimensions = (nodes: SourceNavigationNode[]): boolean => nodes.some((node) => node.type === 'group' && (node.kind === 'language' || node.kind === 'version' || hasDimensions(node.children)));
+  if (hasDimensions(defaults.sourceNavigation ?? [])) return { navigation: buildSlice(inScope, defaults.sourceNavigation) };
   const locales = [...new Set(inScope.map((p) => p.locale).filter((x): x is string => !!x))];
   const versions = [...new Set(inScope.map((p) => p.version).filter((x): x is string => !!x))];
   const orderFirst = <T,>(items: T[], first?: T) => (first && items.includes(first) ? [first, ...items.filter((x) => x !== first)] : items);
@@ -174,19 +209,24 @@ export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: 
 
 /** Attach a group-level `openapi` property to the group at `groupPath` (DAI group-level OpenAPI connection). */
 export function attachGroupOpenapi(nav: { navigation: Record<string, unknown> }, groupPath: string[], spec: string, version?: string, locale?: string): { navigation: Record<string, unknown> } {
-  const clone = JSON.parse(JSON.stringify(nav)) as { navigation: Record<string, unknown> };
-  // descend through languages/versions containers first (any of them, by name if given)
-  let level: any = clone.navigation;
-  const dims = ['languages', 'versions'] as const;
-  for (const d of dims) if (Array.isArray(level[d])) { const wanted = d === 'versions' ? version : locale; level = level[d].find((x: any) => wanted ? x[d === 'versions' ? 'version' : 'language'] === wanted : true) ?? level[d][0]; }
-  let items: any[] | undefined = (level.groups as any[]) ?? (level.pages as any[]);
-  let target: any;
-  for (const name of groupPath) {
-    target = items?.find((it) => it && typeof it === 'object' && it.group === name);
-    if (!target) throw new Error(`group path not found in navigation: ${groupPath.join(' / ')}`);
-    items = target.pages;
-  }
-  target.openapi = spec;
+  const clone = structuredClone(nav);
+  const kinds = ['product', 'language', 'version', 'tab', 'dropdown', 'menu', 'group'];
+  const matches: Record<string, unknown>[] = [];
+  const walk = (node: Record<string, unknown>, path: string[], currentVersion?: string, currentLocale?: string): void => {
+    const v = typeof node.version === 'string' ? node.version : currentVersion;
+    const l = typeof node.language === 'string' ? node.language : currentLocale;
+    const kind = kinds.find((key) => typeof node[key] === 'string');
+    const next = kind && kind !== 'version' && kind !== 'language' ? [...path, String(node[kind])] : path;
+    if (kind === 'group' && next.join('\0') === groupPath.join('\0') && (version === undefined || v === version) && (locale === undefined || l === locale)) matches.push(node);
+    for (const key of ['products', 'languages', 'versions', 'tabs', 'dropdowns', 'menus', 'groups', 'pages']) {
+      const children = node[key];
+      if (Array.isArray(children)) for (const child of children) if (child && typeof child === 'object') walk(child as Record<string, unknown>, next, v, l);
+    }
+  };
+  walk(clone.navigation, []);
+  if (!matches.length) throw new Error(`group path not found in navigation: ${groupPath.join(' / ')}`);
+  if (matches.length !== 1) throw new Error(`group path ${groupPath.join(' / ')} resolves to ${matches.length} groups; specify an unambiguous version and locale`);
+  matches[0].openapi = spec;
   return clone;
 }
 

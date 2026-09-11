@@ -171,9 +171,11 @@ export class Fetcher {
   private bucket: TokenBucket;
   private robots = new Map<string, string[]>();
   private robotDocuments = new Map<string, string>();
+  private pendingRobots = new Map<string, Promise<string>>();
   private cacheDir: string;
   private dispatcher?: Dispatcher;
   constructor(private opts: FetchOptions) {
+    if (opts.rps !== undefined && (!Number.isFinite(opts.rps) || opts.rps <= 0)) throw new Error('requests per second must be a positive finite number');
     if (opts.headers && Object.keys(opts.headers).length && !opts.credentialOrigins?.length) throw new Error('credentialOrigins is required when custom request headers are configured');
     this.bucket = new TokenBucket(opts.rps ?? 2);
     this.cacheDir = join(opts.workspace, 'source-cache');
@@ -233,6 +235,14 @@ export class Fetcher {
 
   /** Cached, credential-free robots document for policy and Sitemap directives. */
   async robotsDocument(origin: string): Promise<string> {
+    const pending = this.pendingRobots.get(origin);
+    if (pending) return pending;
+    const request = this.loadRobotsDocument(origin);
+    this.pendingRobots.set(origin, request);
+    try { return await request; } finally { this.pendingRobots.delete(origin); }
+  }
+
+  private async loadRobotsDocument(origin: string): Promise<string> {
     if (!this.robotDocuments.has(origin)) {
       try {
         this.robotDocuments.set(origin, await this.fetchRobots(origin));

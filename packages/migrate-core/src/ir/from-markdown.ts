@@ -32,6 +32,8 @@ export interface MarkdownAdapterOptions {
    * reject as an expression, and preserved on the node as `sourceMeta`. Declared by the scrape profile.
    */
   codeMetaStrip?: string[];
+  /** Import ancestry prevents recursive snippets from exhausting the process. */
+  snippetStack?: string[];
 }
 
 /** Removes the platform's theming directives from a fence info string, returning undefined when nothing authored remains. */
@@ -276,6 +278,17 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
   };
   const idOf = (node: any, path: number[]) => nodeId(opts.file, path, sourceSlice(node));
   const imports = snippetImports(tree);
+  const definitions = new Map<string, { url: string; title?: string }>();
+  const collectDefinitions = (nodes: ReadonlyArray<{ type: string; identifier?: string; url?: string; title?: string | null; children?: typeof nodes }>): void => {
+    for (const node of nodes) {
+      if (node.type === 'definition' && node.identifier && node.url !== undefined && !definitions.has(node.identifier)) definitions.set(node.identifier, { url: node.url, title: node.title ?? undefined });
+      if (node.children) collectDefinitions(node.children);
+    }
+  };
+  collectDefinitions(tree.children);
+  const unsupported = (node: { type: string; position?: { start?: { line?: number } } }): never => {
+    throw new Error(`${opts.file}:${node.position?.start?.line ?? '?'}: unsupported Markdown node ${node.type}; add a lossless mapping before migrating this page`);
+  };
   const srcOf = (node: any) => ({ file: opts.file, line: node.position?.start?.line, col: node.position?.start?.column });
 
   const imageFromMarkdown = (node: any, path: number[]): ImageNode => ({ id: idOf(node, path), src: srcOf(node), type: 'image', url: node.url ?? '', alt: node.alt ?? '', title: node.title ?? undefined });
@@ -312,6 +325,16 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       case 'emphasis': return [{ ...base, type: 'emphasis', children: inline(node.children ?? [], p) }];
       case 'delete': return [{ ...base, type: 'delete', children: inline(node.children ?? [], p) }];
       case 'link': return [{ ...base, type: 'link', url: node.url ?? '', title: node.title ?? undefined, children: inline(node.children ?? [], p) }];
+      case 'linkReference': {
+        const definition = definitions.get(node.identifier);
+        if (!definition) return unsupported(node);
+        return [{ ...base, type: 'link', ...definition, children: inline(node.children ?? [], p) }];
+      }
+      case 'imageReference': {
+        const definition = definitions.get(node.identifier);
+        if (!definition) return unsupported(node);
+        return [imageFromMarkdown({ ...node, ...definition }, p)];
+      }
       case 'image': return [imageFromMarkdown(node, p)];
       case 'break': return [{ ...base, type: 'break' }];
       case 'html': {
@@ -334,7 +357,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         return [{ ...base, type: 'inlineHtml', value: `{/* UNSUPPORTED INLINE COMPONENT ${node.name ?? 'fragment'} */}` }, ...text];
       }
       default:
-        return node.children ? inline(node.children, p) : [];
+        return unsupported(node);
     }
   });
 
@@ -416,8 +439,10 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     if (importPath && /\.mdx?$/.test(importPath) && !(node.attributes ?? []).length && opts.resolveSnippet) {
       const body = opts.resolveSnippet(importPath);
       if (body !== undefined) {
-        // inline the snippet's blocks; ids are derived from the snippet file so they are stable and distinct
-        const sub = markdownToIr(body, { ...opts, file: `${opts.file}::${importPath}`, resolveSnippet: opts.resolveSnippet });
+        const stack = opts.snippetStack ?? [];
+        if (stack.includes(importPath)) throw new Error(`${opts.file}: recursive snippet import ${[...stack, importPath].join(' -> ')}`);
+        // Each occurrence needs distinct ledger identities, including reuse on one page.
+        const sub = markdownToIr(body, { ...opts, file: `${opts.file}::${idOf(node, path)}::${importPath}`, snippetStack: [...stack, importPath] });
         return sub.children;
       }
     }
@@ -426,7 +451,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     return [element];
   };
 
-  const INLINE_TYPES = new Set(['text', 'strong', 'emphasis', 'delete', 'inlineCode', 'link', 'image', 'break', 'html', 'mdxTextExpression', 'mdxJsxTextElement']);
+  const INLINE_TYPES = new Set(['text', 'strong', 'emphasis', 'delete', 'inlineCode', 'link', 'linkReference', 'image', 'imageReference', 'break', 'html', 'mdxTextExpression', 'mdxJsxTextElement']);
   /** JSX flow elements may hold inline nodes directly (<Note>text</Note>); wrap each run of them in a synthetic paragraph so no text is lost. */
   const groupInline = (nodes: any[]): any[] => {
     const out: any[] = []; let run: any[] = [];
@@ -449,6 +474,11 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         const only = meaningful.length === 1 ? meaningful[0] : undefined;
         // an image alone on its line is a block image whichever syntax wrote it, the normal form the HTML adapter also uses
         if (only?.type === 'image') return [imageFromMarkdown(only, p)];
+        if (only?.type === 'imageReference') {
+          const definition = definitions.get(only.identifier);
+          if (!definition) return unsupported(only);
+          return [imageFromMarkdown({ ...only, ...definition }, p)];
+        }
         return [{ ...base, type: 'paragraph', children: inline(node.children ?? [], p) }];
       }
       case 'heading': {
@@ -500,6 +530,8 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         return [{ ...base, type: 'table', align: node.align ?? undefined, children: rows }];
       }
       case 'thematicBreak': return [{ ...base, type: 'thematicBreak' }];
+      // Definition targets are consumed by reference nodes, never rendered independently.
+      case 'definition': return [];
       case 'html': return [{ ...base, type: 'html', value: node.value ?? '' }];
       case 'mdxJsxFlowElement': return jsxFlow(node, p);
       case 'mdxjsEsm': {
@@ -511,7 +543,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       case 'mdxFlowExpression':
         return [{ ...base, type: 'component', name: node.type === 'mdxjsEsm' ? 'esm' : 'expression', platform: opts.platform, props: { contentHash: idOf(node, p) }, children: [], styleDeps: ['expression:executable'] }];
       default:
-        return node.children ? blocks(node.children, p) : [];
+        return unsupported(node);
     }
   });
 

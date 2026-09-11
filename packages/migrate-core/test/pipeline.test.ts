@@ -511,13 +511,13 @@ describe('gate semantics', () => {
     expect(gate(gates, 'pages-accounted')).toMatchObject({ status: 'pass', detail: '2/2 scoped pages converted, excluded or quarantined' });
     expect(gate(gates, 'conversion-fidelity')).toMatchObject({ status: 'pass', count: 0, detail: '0 pages changed during component conversion; 0 pages lack a fidelity record; 1 pages held or not migrated' });
     expect(gate(gates, 'serialized-output-exact')).toMatchObject({ status: 'pass', count: 0 });
-    expect(gate(gates, 'navigation-exact')).toMatchObject({ status: 'pass' });
+    expect(gate(gates, 'navigation-exact')).toMatchObject({ status: 'fail', detail: 'no independently extracted source navigation was supplied' });
     // a held page convert never recorded is still missing: every snapshot page must be accounted for
     writeFidelityRecords(ws, [convertedRecord]);
     expect(gate(runGates(input), 'conversion-fidelity')).toMatchObject({ status: 'fail', count: 1, samples: ['guides/faq.md: missing fidelity record'] });
   });
 
-  it('passes navigation-exact for a versioned source whose group carries an openapi connection, because nav and verify share one builder', () => {
+  it('preserves versioned tabs and OpenAPI groups but refuses navigation exactness without independent evidence', () => {
     const repo = readMintlifyRepo(join(fixtures, 'mintlify-repo'));
     const tree = applyUrlPlan(repo.tree, defaultUrlPlan(repo.tree));
     const ws = mkdtempSync(join(tmpdir(), 'dai-openapi-')); ensureWorkspace(ws);
@@ -527,9 +527,9 @@ describe('gate semantics', () => {
     const written = new Set(tree.pages.map((page) => page.newPath!));
     const navigation = buildDocumentationNavigation(tree, written, { openapi: repo.openapi });
     expect(navigation.navigation).toEqual({ versions: [
-      { version: 'v2', groups: [
-        { group: 'Guides', pages: [{ group: 'Get started', pages: [{ title: 'Introduction', path: 'introduction' }, { title: 'Setup guide', path: 'guides/setup' }] }] },
-        { group: 'API', pages: [{ group: 'Endpoints', pages: [{ title: 'API overview', path: 'api-reference/overview' }], openapi: 'api-reference/openapi.yaml' }] },
+      { version: 'v2', tabs: [
+        { tab: 'Guides', groups: [{ group: 'Get started', pages: [{ title: 'Introduction', path: 'introduction' }, { title: 'Setup guide', path: 'guides/setup' }] }] },
+        { tab: 'API', groups: [{ group: 'Endpoints', pages: [{ title: 'API overview', path: 'api-reference/overview' }], openapi: 'api-reference/openapi.yaml' }] },
       ] },
       { version: 'v1', pages: [{ title: 'Introduction', path: 'v1/introduction' }] },
     ] });
@@ -537,7 +537,7 @@ describe('gate semantics', () => {
     const input = gateInput(ws, { treePages: tree.pages, sourceKind: 'repo', navigationSource: tree.navigationSource, expectedNavigation: buildDocumentationNavigation(tree, written, { openapi: repo.openapi }).navigation });
     const gates = runGates(input);
     expect(gate(gates, 'navigation-valid')).toMatchObject({ status: 'pass', count: 0 });
-    expect(gate(gates, 'navigation-exact')).toMatchObject({ status: 'pass', count: 0, detail: 'output navigation exactly matches the reviewed source tree' });
+    expect(gate(gates, 'navigation-exact')).toMatchObject({ status: 'fail', count: 1, detail: 'no independently extracted source navigation was supplied' });
     expect(gate(gates, 'source-navigation-proven')).toMatchObject({ status: 'pass' });
     // the bare tree navigation, which verify used to expect, lacks the connection and must not match the written file
     const bare = buildNavigation(tree.pages, { defaultVersion: tree.defaultVersion, sourceNavigation: tree.navigation }).navigation;
@@ -603,6 +603,8 @@ describe('gate semantics', () => {
     expect(previewPushBlockers(permissive.filter((g) => g.id !== 'source-content-exact'), { allowUnprovenExactness: true }).map((g) => g.id)).toContain('source-content-exact');
     const exact = runGates(gateInput(ws, { sourceKind: 'url', navigationSource: 'url-path' }));
     expect(EXACT_FAMILY_GATE_IDS.map((id) => [id, gate(exact, id).status])).toEqual([
+      ['openapi-preserved', 'pass'],
+      ['source-manifest-pinned', 'fail'], ['source-universe-accounted', 'fail'],
       ['no-authored-exclusions', 'pass'], ['conversion-fidelity', 'pass'], ['serialized-output-exact', 'pass'], ['navigation-exact', 'fail'], ['source-navigation-proven', 'fail'],
       // Exact mode certifies output against the acquired source; with no source evidence these cannot pass.
       ['source-content-exact', 'fail'], ['source-metadata-exact', 'fail'], ['html-reconciliation', 'fail'], ['chrome-absent', 'fail'],

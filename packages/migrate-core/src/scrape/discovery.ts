@@ -8,6 +8,7 @@ import type { ScrapeProfile } from './profiles.js';
 import type { Fetcher, FetchedPage } from './fetcher.js';
 import { CanonicalHosts, discoverSitemaps, sitemapCandidatesFromRobots, type SitemapEntry } from './fetcher.js';
 import { parseLlmsTxt, type LlmsEntry } from './published-markdown.js';
+import { mapConcurrent } from './concurrency.js';
 
 export interface DiscoveredUrl {
   url: string;
@@ -38,7 +39,7 @@ export interface DiscoveredUrl {
 
 export type DiscoveredNavigationNode =
   | { type: 'page'; url: string; title?: string }
-  | { type: 'group'; label: string; children: DiscoveredNavigationNode[] };
+  | { type: 'group'; kind?: import('../nav/tree.js').NavigationContainerKind; label: string; children: DiscoveredNavigationNode[]; icon?: string; href?: string; expandable?: boolean; description?: string };
 
 /** Site presentation as the source platform declares it. Recorded as evidence; only the name is carried into the migrated site. */
 export interface SiteConfig {
@@ -138,11 +139,11 @@ function flightPayloads(html: string): string[] {
 }
 
 /** Keys Mintlify nests navigation under, outermost first; the same set the repository adapter walks. */
-const CONTAINER_KEYS = ['versions', 'languages', 'products', 'dropdowns', 'anchors', 'tabs', 'groups', 'pages'] as const;
+const CONTAINER_KEYS = ['versions', 'languages', 'products', 'dropdowns', 'anchors', 'tabs', 'menus', 'groups', 'pages'] as const;
 
 /** The label a navigation container carries, whatever kind of container it is. */
 function containerLabel(node: Record<string, unknown>): string | undefined {
-  for (const key of ['group', 'tab', 'anchor', 'dropdown', 'product', 'version', 'language'] as const) {
+  for (const key of ['group', 'tab', 'anchor', 'dropdown', 'product', 'version', 'language', 'menu'] as const) {
     const value = node[key];
     if (typeof value === 'string' && value) return value;
   }
@@ -239,7 +240,7 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
     }
     if (!value || typeof value !== 'object') return [];
     const node = value as Record<string, unknown>;
-    if (typeof node.href === 'string') {
+    if (typeof node.href === 'string' && !containerLabel(node)) {
       const url = mintlifyNavigationUrl(node.href, base.origin);
       const title = typeof node.title === 'string' ? node.title : undefined;
       const sidebarTitle = typeof node.sidebarTitle === 'string' ? node.sidebarTitle : undefined;
@@ -247,11 +248,13 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
       pages.push({ url, title, sidebarTitle, description, groups });
       return [{ type: 'page' as const, url, title: sidebarTitle ?? title }];
     }
-    // Every container Mintlify nests navigation under: a labelled one becomes a group, an unlabelled one is transparent.
+    // Container kinds survive discovery; flattening switchers changes source structure.
     const label = containerLabel(node);
     const children = CONTAINER_KEYS.flatMap((key) => (Array.isArray(node[key]) ? walk(node[key] as unknown[], label ? [...groups, label] : groups) : []));
-    if (!children.length) return [];
-    return label ? [{ type: 'group' as const, label, children }] : children;
+    if (!children.length && typeof node.href !== 'string') return [];
+    const kind = (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string') ?? (typeof node.anchor === 'string' ? 'menu' : undefined);
+    const metadata = Object.fromEntries(['icon', 'href', 'expandable', 'description'].filter((key) => node[key] !== undefined).map((key) => [key, node[key]]));
+    return label ? [{ type: 'group' as const, ...(kind && kind !== 'group' ? { kind } : {}), label, ...metadata, children }] : children;
   });
   const navigation = walk(candidate, []);
   return navigation.length ? { navigation, pages } : undefined;
@@ -401,7 +404,10 @@ export async function discoverLiveSite(input: {
   profile: ScrapeProfile;
   map?: (url: string, limit: number) => Promise<string[]>;
   limit?: number;
+  concurrency?: number;
 }): Promise<DiscoveryResult> {
+  const concurrency = input.concurrency ?? 4;
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 64) throw new Error('discovery concurrency must be an integer from 1 to 64');
   const seed = new URL(input.seedUrl);
   const origin = seed.origin;
   const canonicalHosts = input.fetcher.canonicalHosts ?? new CanonicalHosts(origin);
@@ -506,11 +512,16 @@ export async function discoverLiveSite(input: {
   };
 
   while (queue.length && crawled.size < limit) {
-    const url = queue.shift()!;
-    if (crawled.has(url)) continue;
-    crawled.add(url);
+    const batch = queue.splice(0, Math.min(concurrency, limit - crawled.size)).filter((url) => !crawled.has(url));
+    for (const url of batch) crawled.add(url);
+    const responses = await mapConcurrent(batch, concurrency, async (url) => {
+      try { return { url, response: await input.fetcher.get(url) }; }
+      catch (error) { return { url, error: (error as Error).message }; }
+    });
+    // Apply results in queue order so timing never changes sidebar precedence or discovered order.
+    for (const { url, response, error } of responses) {
     try {
-      const response = await input.fetcher.get(url);
+      if (!response) throw new Error(error);
       // A page's published Markdown (`/page.md`) is that page in another format, never a page of its own.
       if (response.status >= 200 && response.status < 300 && PUBLISHED_MARKDOWN.test(new URL(url).pathname) && /^text\/(?:markdown|plain)\b/i.test(response.contentType)) { records.delete(url); continue; }
       const finalUrl = response.finalUrl ? normaliseDiscoveryUrl(response.finalUrl, url, origin, canonicalHosts) : undefined;
@@ -547,6 +558,7 @@ export async function discoverLiveSite(input: {
       }
     } catch (error) {
       failures.push({ url, error: (error as Error).message });
+    }
     }
   }
 
