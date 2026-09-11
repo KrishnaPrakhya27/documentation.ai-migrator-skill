@@ -22,7 +22,8 @@ rules:
   - id: gitbook/embed
     tier: T3
     match: { name: embed }
-    handler: embed-to-iframe
+    handler: embed-to-iframe-or-link
+    note: "a URL whose host is not allowlisted for iframes (a GitHub repository, say) stays a link"
   - id: gitbook/content-ref
     tier: T4
     match: { name: content-ref }
@@ -32,3 +33,44 @@ rules:
     tier: T3
     match: { name: stepper }
     handler: list-to-steps
+  - id: gitbook/step
+    tier: T3
+    match: { name: step }
+    handler: step-title-from-heading
+    note: "GitBook steps carry no title; the leading heading becomes the required Step title"
+  - id: gitbook/cards
+    tier: T3
+    match: { name: cards }
+    handler: cards-to-columns
+    note: "a card table (<table data-view=\"cards\">) the Markdown adapter reads into cards; data-card-size is presentation"
+  - id: gitbook/card
+    tier: T2
+    match: { name: card }
+    to: { name: Card, props: { title: $title, href: $href, icon: $icon, image: $image } }
+    note: "href is the card target column, image the cover column, icon the Font Awesome name without fa-"
+  - id: gitbook/columns
+    tier: T4
+    match: { name: columns }
+    children: unwrap
+    note: "Documentation.AI has no per-column container; the columns' content is kept in reading order"
+  - id: gitbook/column
+    tier: T4
+    match: { name: column }
+    children: unwrap
+    drop: [width, valign]
+  - id: gitbook/updates
+    tier: T4
+    match: { name: updates }
+    children: unwrap
+    drop: [format]
+  - id: gitbook/update
+    tier: T2
+    match: { name: update }
+    to: { name: Update, props: { label: $date } }
+    drop: [tags]
+    note: "Update.tags is an array, which the MDX contract cannot express as a literal prop; the tags are recorded as dropped"
+  - id: gitbook/ask-button
+    tier: T7
+    match: { name: button, props: { data-action: ask } }
+    children: drop
+    note: "GitBook Assistant prompt: it works only inside GitBook, so verify treats it as platform chrome like script and style"

@@ -32,6 +32,8 @@ export interface DiscoveredUrl {
   locale?: string;
   version?: string;
   sitemap?: { source: string; order: number; lastmod?: string; changefreq?: string; priority?: number };
+  /** Discovered URLs that redirect to this page; their evidence was folded into it. */
+  aliases?: string[];
 }
 
 export type DiscoveredNavigationNode =
@@ -474,12 +476,45 @@ export async function discoverLiveSite(input: {
     }
   }
 
+  /** URLs that redirect to a discovered page, by the page they stand for. */
+  const aliasesOf = new Map<string, string[]>();
+  /** A URL that redirects to another page of the site is that page under another name: its evidence moves onto the target, which is crawled in its place. */
+  const foldAlias = (alias: string, target: string) => {
+    const from = records.get(alias)!;
+    records.delete(alias);
+    let to = records.get(target);
+    if (!to) {
+      to = { reasons: new Set(), discoveredOrder: from.discoveredOrder };
+      records.set(target, to);
+      if (!crawled.has(target)) queue.push(target);
+    }
+    for (const reason of from.reasons) to.reasons.add(reason);
+    to.discoveredOrder = Math.min(to.discoveredOrder, from.discoveredOrder);
+    if (from.sidebarOrder !== undefined) to.sidebarOrder = Math.min(to.sidebarOrder ?? Number.MAX_SAFE_INTEGER, from.sidebarOrder);
+    if (from.platformOrder !== undefined) to.platformOrder = Math.min(to.platformOrder ?? Number.MAX_SAFE_INTEGER, from.platformOrder);
+    to.title ??= from.title;
+    to.description ??= from.description;
+    to.llms ??= from.llms;
+    to.sidebarTitle ??= from.sidebarTitle;
+    to.domSidebarTitle ??= from.domSidebarTitle;
+    to.groupHint ??= from.groupHint;
+    if (from.sitemap && (!to.sitemap || from.sitemap.order < to.sitemap.order)) to.sitemap = from.sitemap;
+    to.locale ??= from.locale;
+    to.version ??= from.version;
+    aliasesOf.set(target, [...(aliasesOf.get(target) ?? []), ...(aliasesOf.get(alias) ?? []), alias]);
+    aliasesOf.delete(alias);
+  };
+
   while (queue.length && crawled.size < limit) {
     const url = queue.shift()!;
     if (crawled.has(url)) continue;
     crawled.add(url);
     try {
       const response = await input.fetcher.get(url);
+      // A page's published Markdown (`/page.md`) is that page in another format, never a page of its own.
+      if (response.status >= 200 && response.status < 300 && PUBLISHED_MARKDOWN.test(new URL(url).pathname) && /^text\/(?:markdown|plain)\b/i.test(response.contentType)) { records.delete(url); continue; }
+      const finalUrl = response.finalUrl ? normaliseDiscoveryUrl(response.finalUrl, url, origin, canonicalHosts) : undefined;
+      if (finalUrl && finalUrl !== url) { foldAlias(url, finalUrl); continue; }
       if (response.status < 200 || response.status >= 300 || !/html|xhtml/i.test(response.contentType || 'text/html')) continue;
       const root = parseHtml(response.body);
       // The theme decorates <title> ("Page - Site"), so it is recorded as evidence and never becomes the page title.
@@ -523,6 +558,7 @@ export async function discoverLiveSite(input: {
       groupHint: value.groupHint?.length ? value.groupHint : undefined,
       locale: value.locale, version: value.version,
       sitemap: value.sitemap ? { source: value.sitemap.sitemap, order: value.sitemap.order, lastmod: value.sitemap.lastmod, changefreq: value.sitemap.changefreq, priority: value.sitemap.priority } : undefined,
+      ...(aliasesOf.get(url)?.length ? { aliases: aliasesOf.get(url) } : {}),
     })),
     failures,
     sitemaps: { sources: sitemaps.sources, entries: sitemaps.entries, truncated: sitemaps.truncated },

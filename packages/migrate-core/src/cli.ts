@@ -469,6 +469,13 @@ async function main() {
             };
           });
           const pageIdByUrl = new Map(pages.map((page) => [page.source.replace(/\/$/, ''), page.id]));
+          // A URL that redirects to a discovered page names that page: the navigation may still link the old name.
+          for (const found of discovery.pages) {
+            if (!found.aliases?.length) continue;
+            const page = pages.find((entry) => entry.source === found.url)!;
+            page.aliases = found.aliases.map((alias) => new URL(alias).pathname);
+            for (const alias of found.aliases) pageIdByUrl.set(alias.replace(/\/$/, ''), page.id);
+          }
           // A navigation entry the page set cannot account for means discovery missed a page.
           // Dropping it silently is how a group vanished from the last migration, so exact mode stops here.
           const unmappedNavigationUrls: string[] = [];

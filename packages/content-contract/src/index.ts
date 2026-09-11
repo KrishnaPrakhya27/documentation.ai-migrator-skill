@@ -96,9 +96,9 @@ export function splitFrontmatter(mdx: string): { frontmatter: string | null; bod
 
 /** Remove fenced code and inline code so tag scanning does not see examples. */
 function stripCode(body: string): string {
-  // fences count only at line start (a mid-line ``` must not hide the rest of the document)
+  // fences count only at line start (a mid-line ``` must not hide the rest of the document); a component's children indent theirs
   return body
-    .replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n {0,3}\1[ \t]*$/gm, (s) => s.replace(/[^\n]/g, ' '))
+    .replace(/^ *(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n *\1[ \t]*$/gm, (s) => s.replace(/[^\n]/g, ' '))
     .replace(/`[^`\n]*`/g, (s) => ' '.repeat(s.length));
 }
 

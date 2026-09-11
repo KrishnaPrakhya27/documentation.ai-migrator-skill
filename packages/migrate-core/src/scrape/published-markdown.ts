@@ -11,7 +11,9 @@ export interface PublishedMarkdownPage {
   body: string;
   title?: string;
   description?: string;
-  wrapper: 'mintlify-documentation-index' | 'none';
+  wrapper: 'mintlify-documentation-index' | 'gitbook-documentation-index' | 'none';
+  /** A platform-generated trailer removed from the end of the body. */
+  footer?: 'gitbook-agent-instructions';
 }
 
 /** One `- [title](url): description` entry of /llms.txt. */
@@ -123,6 +125,7 @@ function leadingBlockquote(lines: string[], cursor: number): string[] {
  * normalisation; any other blockquote is authored content and stays in the body.
  */
 export function unwrapPublishedMarkdown(source: string, platform: string, options: UnwrapOptions = {}): PublishedMarkdownPage {
+  if (platform === 'gitbook') return unwrapGitbookMarkdown(source, options);
   if (platform !== 'mintlify') return { body: source, wrapper: 'none' };
   const lines = source.replace(/^\uFEFF/, '').split(/\r?\n/);
   let cursor = skipBlankLines(lines, 0);
@@ -146,4 +149,68 @@ export function unwrapPublishedMarkdown(source: string, platform: string, option
     cursor = skipBlankLines(lines, cursor + quote.length);
   }
   return { body: lines.slice(cursor).join('\n').replace(/\s+$/, '') + '\n', title, description, wrapper };
+}
+
+const GITBOOK_INDEX_WRAPPER = /^>\s*For the complete documentation index, see \[llms\.txt\]\([^)]*\)/i;
+const GITBOOK_AGENT_HEADING = /^#\s+Agent Instructions\s*$/;
+const GITBOOK_QUERY_HEADING = /^##\s+Querying This Documentation\s*$/;
+const THEMATIC_BREAK = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+
+/**
+ * Where GitBook's generated trailer starts: the last `# Agent Instructions` section, identified
+ * by its `## Querying This Documentation` subsection and `?ask=` endpoint, together with the
+ * thematic break GitBook puts before it. An authored section of the same name lacks the endpoint.
+ */
+function gitbookAgentFooterStart(lines: string[]): number | undefined {
+  let heading = -1;
+  for (let i = lines.length - 1; i >= 0 && heading < 0; i--) if (GITBOOK_AGENT_HEADING.test(lines[i])) heading = i;
+  if (heading < 0) return undefined;
+  const rest = lines.slice(heading + 1);
+  if (!rest.some((line) => GITBOOK_QUERY_HEADING.test(line)) || !rest.some((line) => line.includes('?ask=<question>'))) return undefined;
+  let before = heading - 1;
+  while (before >= 0 && !lines[before].trim()) before--;
+  return before >= 0 && THEMATIC_BREAK.test(lines[before]) ? before : heading;
+}
+
+/** The paragraph lines starting exactly at `cursor`, up to the next blank line. */
+function leadingParagraph(lines: string[], cursor: number): string[] {
+  const paragraph: string[] = [];
+  while (cursor < lines.length && lines[cursor].trim()) paragraph.push(lines[cursor++]);
+  return paragraph;
+}
+
+/**
+ * GitBook's published .md is a `> For the complete documentation index, see [llms.txt](…)`
+ * wrapper, then `# <title>`, then the description as a plain paragraph when the page has
+ * one, then the authored body, then a generated `# Agent Instructions` trailer. The H1 is
+ * lifted as the title; the paragraph after it is lifted as the description only when it
+ * equals `expectedDescription` after whitespace normalisation.
+ */
+function unwrapGitbookMarkdown(source: string, options: UnwrapOptions): PublishedMarkdownPage {
+  let lines = source.replace(/^﻿/, '').split(/\r?\n/);
+  const footerStart = gitbookAgentFooterStart(lines);
+  if (footerStart !== undefined) lines = lines.slice(0, footerStart);
+  let cursor = skipBlankLines(lines, 0);
+  let wrapper: PublishedMarkdownPage['wrapper'] = 'none';
+  if (GITBOOK_INDEX_WRAPPER.test(lines[cursor] ?? '')) {
+    wrapper = 'gitbook-documentation-index';
+    cursor = skipBlankLines(lines, cursor + leadingBlockquote(lines, cursor).length);
+  }
+
+  let title: string | undefined;
+  const heading = lines[cursor]?.match(/^#\s+(.+?)\s*$/);
+  if (heading) {
+    title = heading[1];
+    cursor = skipBlankLines(lines, cursor + 1);
+  }
+
+  let description: string | undefined;
+  const paragraph = leadingParagraph(lines, cursor);
+  if (paragraph.length && options.expectedDescription !== undefined && normaliseWhitespace(paragraph.join('\n')) === normaliseWhitespace(options.expectedDescription)) {
+    description = paragraph.join('\n').trim();
+    cursor = skipBlankLines(lines, cursor + paragraph.length);
+  }
+  const page: PublishedMarkdownPage = { body: lines.slice(cursor).join('\n').replace(/\s+$/, '') + '\n', title, description, wrapper };
+  if (footerStart !== undefined) page.footer = 'gitbook-agent-instructions';
+  return page;
 }

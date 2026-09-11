@@ -111,6 +111,15 @@ describe('discovery', () => {
     // an H1-only page keeps its title and an empty body
     expect(unwrapPublishedMarkdown('> ## Documentation Index\n> Fetch the index.\n\n# Untitled\n\n', 'mintlify')).toEqual({ body: '\n', title: 'Untitled', wrapper: 'mintlify-documentation-index' });
   });
+  it('removes only GitBook’s generated index wrapper and agent-instructions footer, lifting the H1 and the declared description paragraph', () => {
+    const footer = '\n---\n\n# Agent Instructions\nThis documentation is published with GitBook.\n\n## Querying This Documentation\nPerform an HTTP GET request:\n\n```\nGET https://docs.example/p.md?ask=<question>&goal=<endgoal>\n```\n';
+    const source = `> For the complete documentation index, see [llms.txt](https://docs.example/llms.txt). Markdown versions are available.\n\n# Automations\n\nExact description.\n\nBody.\n\n---\n\nAuthored after a rule.\n${footer}`;
+    expect(unwrapPublishedMarkdown(source, 'gitbook', { expectedDescription: 'Exact   description.' })).toEqual({ body: 'Body.\n\n---\n\nAuthored after a rule.\n', title: 'Automations', description: 'Exact description.', wrapper: 'gitbook-documentation-index', footer: 'gitbook-agent-instructions' });
+    // without a declared description the paragraph after the H1 is authored content
+    expect(unwrapPublishedMarkdown(source, 'gitbook').body).toBe('Exact description.\n\nBody.\n\n---\n\nAuthored after a rule.\n');
+    // an authored "Agent Instructions" section without GitBook's querying endpoint stays
+    expect(unwrapPublishedMarkdown('# T\n\nBody.\n\n# Agent Instructions\n\nRun the linter.\n', 'gitbook')).toEqual({ body: 'Body.\n\n# Agent Instructions\n\nRun the linter.\n', title: 'T', wrapper: 'none' });
+  });
   it('normalises candidates: same origin only, hash and tracking params stripped, non-pages dropped', () => {
     const o = 'http://8.8.8.8';
     expect(normaliseDiscoveryUrl('/docs/a#x?utm_source=z', o + '/', o)).toBe('http://8.8.8.8/docs/a');
@@ -147,6 +156,30 @@ describe('discovery', () => {
     const limited = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('generic'), limit: 2 });
     expect(limited.pages.length).toBe(2);
     expect(limited.truncated).toBe(true);
+  });
+  it('folds published-Markdown copies and redirecting URLs into the pages they stand for', async () => {
+    const html = (body: string) => new Response(`<html>${body}</html>`, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+    const site = (async (input: any) => {
+      const { pathname } = new URL(typeof input === 'string' ? input : input.toString());
+      if (pathname === '/llms.txt') return new Response('# Site\n\n- [Welcome](http://8.8.8.8/section/welcome.md): The section home.\n- [Setup](http://8.8.8.8/section/group/setup.md)\n', { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      if (pathname === '/') return html('<aside><a href="/section/welcome">Section</a></aside><a href="/section/group">Group</a><a href="/section/group/setup.md">Markdown</a>');
+      if (pathname === '/section') return html('<a href="/section/group/setup">Setup</a>');
+      if (pathname === '/section/group/setup') return html('<p>Setup</p>');
+      // GitBook serves a section's landing page at the section root and a group's URL as its first page
+      if (pathname === '/section/welcome') return new Response('', { status: 307, headers: { location: 'http://8.8.8.8/section' } });
+      if (pathname === '/section/group') return new Response('', { status: 307, headers: { location: '/section/group/setup' } });
+      if (pathname.endsWith('.md')) return new Response('# Page\n', { status: 200, headers: { 'content-type': 'text/markdown; charset=utf-8' } });
+      return new Response('nope', { status: 404 });
+    }) as unknown as FetchImpl;
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('gitbook') });
+    const byUrl = Object.fromEntries(found.pages.map((page) => [page.url, page]));
+    expect(Object.keys(byUrl).sort()).toEqual(['http://8.8.8.8/', 'http://8.8.8.8/section', 'http://8.8.8.8/section/group/setup']);
+    // the llms.txt title and description listed under the redirecting name belong to the page it lands on
+    expect(byUrl['http://8.8.8.8/section']).toMatchObject({ title: 'Welcome', description: 'The section home.', aliases: ['http://8.8.8.8/section/welcome'] });
+    // the sidebar placement made under the old name carries over, even though the target is only reached through the redirect
+    expect(byUrl['http://8.8.8.8/section'].reasons).toEqual(['link-graph', 'llms-txt', 'sidebar']);
+    expect(byUrl['http://8.8.8.8/section'].orderSource).toBe('sidebar');
+    expect(byUrl['http://8.8.8.8/section/group/setup']).toMatchObject({ title: 'Setup', aliases: ['http://8.8.8.8/section/group'] });
   });
   it('uses recursive sitemap indexes for order, section, locale, version and SEO evidence', async () => {
     const site = fakeSite({

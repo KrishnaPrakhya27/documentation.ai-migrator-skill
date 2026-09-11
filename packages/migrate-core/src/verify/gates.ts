@@ -42,8 +42,13 @@ export const EXACT_FAMILY_GATE_IDS = [
 /** HTML elements whose subtree is never authored content, so a rule may drop them in exact mode; dropping anything else is an authored exclusion. */
 export const HTML_CHROME_ELEMENTS: ReadonlySet<string> = new Set(['script', 'style']);
 
+/** A GitBook Assistant prompt (`<button data-action="ask">`) works only inside GitBook: platform chrome, like script and style. */
+function isPlatformChromeButton(block: Block): boolean {
+  return block.type === 'component' && block.name === 'button' && block.props['data-action'] === 'ask';
+}
+
 export function isHtmlChromeNode(block: Block | undefined): boolean {
-  return block?.type === 'component' && HTML_CHROME_ELEMENTS.has(block.name);
+  return block?.type === 'component' && (HTML_CHROME_ELEMENTS.has(block.name) || isPlatformChromeButton(block));
 }
 
 /** Reviewer recorded by the rules engine when a mapping rule, not a person, dropped a node. */
@@ -87,10 +92,19 @@ export function listMdx(dir: string, out: string[] = []): string[] {
 }
 
 /** Normalised prose segments: paragraphs, list items, headings, table cells. */
+/** Ids of the blocks inside platform chrome (script, style, a GitBook assistant prompt): their text is not content the output must carry. */
+function chromeContentIds(doc: DocIR): Set<string> {
+  const ids = new Set<string>();
+  walkBlocks(doc.children, (b) => { if (b.type === 'component' && isHtmlChromeNode(b)) walkBlocks(b.children, (inner) => { ids.add(inner.id); }); });
+  return ids;
+}
+
 export function proseSegments(doc: DocIR): string[] {
   const segs: string[] = [];
   const norm = (s: string) => normaliseMdxText(s).trim();
+  const chrome = chromeContentIds(doc);
   walkBlocks(doc.children, (b) => {
+    if (chrome.has(b.id)) return;
     if (b.type === 'paragraph' || b.type === 'heading') { const t = norm(inlineText(b.children)); if (t.length >= 12) segs.push(t); }
     else if (b.type === 'table') for (const r of b.children) for (const c of r.children) { const t = norm(inlineText(c.children)); if (t.length >= 12) segs.push(t); }
   });
@@ -104,6 +118,7 @@ export function normaliseMdxText(mdx: string): string {
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, ' ')
     .replace(/\{[^{}\n]*\}/g, ' ')
     .replace(/<Image\b[^>]*\balt="([^"]*)"[^>]*\/?>/gi, ' $1 ')
+    .replace(/<Step\b[^>]*\btitle="([^"]*)"[^>]*>/g, ' $1 ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -116,15 +131,33 @@ export function normaliseMdxText(mdx: string): string {
 }
 
 /** Ordered outline: heading depth + normalised text. Structure must survive one to one, not just the words. */
+/**
+ * A step with no title of its own (GitBook) opens with the heading that becomes its Step title, and a
+ * Step whose title renders as a heading (`titleType="h2"|"h3"`) stands for that heading: both outlines
+ * record the pair as `step:<text>`. A source step that carries a title (Mintlify) keeps its headings as headings.
+ */
 export function headingOutline(doc: DocIR): string[] {
   const out: string[] = [];
-  walkBlocks(doc.children, (b) => { if (b.type === 'heading') out.push(`${b.depth}:${normaliseMdxText(inlineText(b.children)).trim()}`); });
+  const chrome = chromeContentIds(doc);
+  const stepTitles = new Set<string>();
+  walkBlocks(doc.children, (b) => {
+    if (b.type === 'component' && b.name.toLowerCase() === 'step' && !b.props.title && b.children[0]?.type === 'heading') stepTitles.add(b.children[0].id);
+  });
+  walkBlocks(doc.children, (b) => {
+    if (b.type !== 'heading' || chrome.has(b.id)) return;
+    const text = normaliseMdxText(inlineText(b.children)).trim();
+    out.push(stepTitles.has(b.id) ? `step:${text}` : `${b.depth}:${text}`);
+  });
   return out;
 }
 
 export function mdxHeadingOutline(mdx: string): string[] {
   const body = mdx.replace(/^---[\s\S]*?---\n/, '').replace(/^ {0,8}(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n {0,8}\1[ \t]*$/gm, '');
-  return [...body.matchAll(/^\s*(#{1,6})\s+(.+?)\s*$/gm)].map((m) => `${m[1].length}:${normaliseMdxText(m[2]).trim()}`);
+  return [...body.matchAll(/^\s*(#{1,6})\s+(.+?)\s*$|<Step\b([^>]*)>/gm)].flatMap((m) => {
+    if (m[1]) return [`${m[1].length}:${normaliseMdxText(m[2]).trim()}`];
+    const title = m[3].match(/\btitle="([^"]*)"/)?.[1];
+    return title !== undefined && /\btitleType="h[23]"/.test(m[3]) ? [`step:${normaliseMdxText(title).trim()}`] : [];
+  });
 }
 
 export function codeBlocks(doc: DocIR): string[] {
@@ -261,7 +294,12 @@ export function runGates(input: GateInput): GateResult[] {
   // 2. ledger coverage
   const ids: Array<{ pageId: string; nodeId: string }> = [];
   const sourceBlocks = new Map<string, Block>();
-  for (const { doc } of input.sourceDocs) walkBlocks(doc.children, (n) => { ids.push({ pageId: doc.pageId, nodeId: n.id }); sourceBlocks.set(`${doc.pageId}:${n.id}`, n); });
+  /** Nodes inside a chrome element: a rule that drops the element drops them with it. */
+  const chromeContent = new Set<string>();
+  for (const { doc } of input.sourceDocs) walkBlocks(doc.children, (n) => {
+    ids.push({ pageId: doc.pageId, nodeId: n.id }); sourceBlocks.set(`${doc.pageId}:${n.id}`, n);
+    if (n.type === 'component' && isHtmlChromeNode(n)) walkBlocks(n.children, (inner) => { chromeContent.add(`${doc.pageId}:${inner.id}`); });
+  });
   const dispositions = Ledger.read(input.workspace);
   const summary: LedgerSummary = summarize(dispositions, ids);
   gates.push({ id: 'block-dispositions', status: summary.missing.length ? 'fail' : 'pass', detail: `${summary.covered}/${summary.totalSource} source blocks have a disposition (identical ${summary.identical}, transformed ${summary.transformed}, excluded ${summary.excluded}, quarantined ${summary.quarantined})`, count: summary.missing.length, samples: summary.missing.slice(0, 5).map((m) => m.sourceNodeId) });
@@ -271,7 +309,7 @@ export function runGates(input: GateInput): GateResult[] {
   const exact = (input.fidelityMode ?? 'exact') === 'exact';
   // A rule may drop script and style elements, which carry nothing the author wrote; any other exclusion, whoever made it, removes authored content.
   const exclusions = effectiveExclusions(dispositions, ids);
-  const authoredExclusions = exclusions.filter((d) => !(d.reviewer !== undefined && RULE_REVIEWER.test(d.reviewer) && isHtmlChromeNode(sourceBlocks.get(`${d.pageId}:${d.sourceNodeId}`))));
+  const authoredExclusions = exclusions.filter((d) => !(d.reviewer !== undefined && RULE_REVIEWER.test(d.reviewer) && (isHtmlChromeNode(sourceBlocks.get(`${d.pageId}:${d.sourceNodeId}`)) || chromeContent.has(`${d.pageId}:${d.sourceNodeId}`))));
   gates.push({
     id: 'no-authored-exclusions',
     status: !exact ? 'not-run' : authoredExclusions.length ? 'fail' : 'pass',
