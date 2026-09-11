@@ -70,7 +70,8 @@ type PropReference = { kind: 'count' } | { kind: 'copy'; prop: string } | { kind
 /** "$count", "$prop" (copy) or "$map(prop)" (copy through the contract value map); anything else is a literal. */
 function propReference(v: string | number | boolean): PropReference | undefined {
   if (typeof v !== 'string' || !v.startsWith('$')) return undefined;
-  const m = v.match(/^\$(\w+)(?:\((\w+)\))?$/);
+  // prop names may be hyphenated, as the contract's own API fields are (param-type, field-type)
+  const m = v.match(/^\$([\w-]+)(?:\(([\w-]+)\))?$/);
   if (!m) return undefined;
   const [, fn, arg] = m;
   if (fn === 'count') return { kind: 'count' };

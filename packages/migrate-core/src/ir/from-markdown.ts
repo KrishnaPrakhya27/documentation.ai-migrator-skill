@@ -16,6 +16,7 @@ import { sanitizeHtmlToJsx } from '../components/sanitize.js';
 import type { Block, ComponentNode, DaiComponentNode, DocIR, Frontmatter, ImageNode, Inline, ListItemNode, TableCellNode, TableRowNode } from './types.js';
 import { readPixelDimension } from './dimensions.js';
 import { gitbookHtmlBlockToIr, isGitbookHtmlBlock, isGitbookHtmlInline, TRANSPARENT_HTML } from './gitbook-html.js';
+import { gitbookOpenApiBlocks } from './gitbook-openapi.js';
 
 export interface MarkdownAdapterOptions {
   platform: string;
@@ -442,6 +443,12 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         return [{ ...base, type: 'heading', depth: node.depth, children, sourceId }];
       }
       case 'code': {
+        // GitBook writes an API operation, or a models-page schema, as a fenced OpenAPI document
+        if (opts.platform === 'gitbook' && (!node.lang || node.lang === 'json')) {
+          const scope = `${opts.file}::${idOf(node, p)}`;
+          const api = gitbookOpenApiBlocks(String(node.value ?? ''), { file: scope, markdown: (text, key) => markdownToIr(text, { platform: opts.platform, file: `${scope}:${key}`, pageId: opts.pageId, codeMetaStrip: opts.codeMetaStrip }).children });
+          if (api) return api;
+        }
         const sourceMeta = node.meta ?? undefined;
         const meta = stripPlatformCodeMeta(sourceMeta, opts.codeMetaStrip);
         return [{ ...base, type: 'code', lang: node.lang ?? undefined, meta, ...(sourceMeta !== undefined && sourceMeta !== meta ? { sourceMeta } : {}), value: node.value ?? '' }];

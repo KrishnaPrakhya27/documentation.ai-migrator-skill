@@ -237,6 +237,58 @@ describe('GitBook repo adapter', () => {
     expect(card).toMatchObject({ name: 'card', props: { title: 'Guides' } });
     expect(card.props.href).toBeUndefined();
   });
+  it('escapes an ordered-list marker at its period, so a numbered heading keeps no visible backslash', () => {
+    const mdx = docToMdx(markdownToIr('## 1. Plan the project\n\n2\\. Not a list\n', { platform: 'gitbook', file: 'p.md', pageId: 'p' }));
+    expect(mdx).toContain('## 1\\. Plan the project');
+    expect(mdx).toContain('2\\. Not a list');
+    expect(mdx).not.toContain('\\1.');
+    const reparsed = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' });
+    expect(reparsed.children.map((b) => (b.type === 'heading' || b.type === 'paragraph' ? inlineText(b.children) : b.type))).toEqual(['1. Plan the project', '2. Not a list']);
+  });
+  it('reads GitBook OpenAPI fences as API reference: an operation\'s parameters, request body and responses, and a models-page schema', () => {
+    const operation = {
+      openapi: '3.0.3', info: { title: 'Petstore', version: '1' }, security: [{ bearerAuth: [] }],
+      components: {
+        securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', description: 'Pass your API key as a Bearer token.' } },
+        schemas: {
+          NewPet: { type: 'object', required: ['name'], properties: { name: { type: 'string', description: "The animal's `name`." }, status: { $ref: '#/components/schemas/PetStatus' }, tags: { type: 'array', items: { type: 'string' } } } },
+          PetStatus: { type: 'string', enum: ['available', 'sold'] },
+          Pet: { allOf: [{ $ref: '#/components/schemas/NewPet' }, { type: 'object', required: ['id'], properties: { id: { type: 'integer', description: 'Unique id.' } } }] },
+        },
+        responses: { Unauthorized: { description: 'Missing or invalid API key.' } },
+      },
+      paths: { '/pets/{petId}': { patch: {
+        parameters: [{ name: 'petId', in: 'path', required: true, description: 'The pet.', schema: { type: 'integer' } }, { name: 'dryRun', in: 'query', schema: { type: 'boolean' } }],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/NewPet' } } } },
+        responses: { '200': { description: 'Updated.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } } }, '401': { $ref: '#/components/responses/Unauthorized' } },
+      } } },
+    };
+    const models = { openapi: '3.0.3', info: { title: 'Petstore', version: '1' }, components: { schemas: { PetStatus: { type: 'string', enum: ['available', 'sold'] } } } };
+    const source = ['## Update a pet', '', '```json', JSON.stringify(operation), '```', '', '## The PetStatus object', '', '```json', JSON.stringify(models), '```', '', '```json', '{"error": {"code": "not_found"}}', '```'].join('\n');
+    const doc = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' });
+    const w = mkdtempSync(join(tmpdir(), 'dai-gb-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'gitbook', mappings: loadMappings([join(repoRoot, 'skills/migrate-gitbook/mappings/gitbook.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const mdx = docToMdx(engine.resolveDoc(doc));
+    expect(validateMdx(mdx)).toEqual([]);
+    for (const expected of [
+      '**PATCH** `/pets/{petId}`',
+      '<ParamField header="Authorization" param-type="string" required={true}>',
+      'Pass your API key as a Bearer token.',
+      '<ParamField path="petId" param-type="integer" required={true}>',
+      '<ParamField query="dryRun" param-type="boolean" />',
+      '<ParamField body="name" param-type="string" required={true}>',
+      "The animal's `name`.",
+      '<ParamField body="status" param-type="string" enum="available,sold" />',
+      '<ParamField body="tags" param-type="string[]" />',
+      '`200` Updated.',
+      '<ResponseField name="id" field-type="integer" required={true}>',
+      '<ResponseField name="name" field-type="string" required={true}>',
+      '`401` Missing or invalid API key.',
+      '`string`, one of: `available`, `sold`',
+      '```json\n{"error": {"code": "not_found"}}\n```',
+    ]) expect(mdx).toContain(expected);
+    expect(mdx).not.toContain('"openapi"');
+  });
   it('converts a hint to a Callout through the gitbook mapping', () => {
     const w = mkdtempSync(join(tmpdir(), 'dai-gb-')); ensureWorkspace(w);
     const d = markdownToIr(readFileSync(fx('gitbook-repo/guide/first.md'), 'utf8'), { platform: 'gitbook', file: 'guide/first.md', pageId: 'g1' });

@@ -356,6 +356,38 @@ describe('gates', () => {
     const allowed = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'a', migrate: true, doc }], { render: async () => '<html><body><main><h1>T</h1><p>One.</p><button>Copy</button></main></body></html>' });
     expect(allowed.gate.status).toBe('pass');
   });
+  it('reads only the page content on a Documentation.AI preview: tab labels first, collapsed text optional, dropped chrome, step titles, embeds and card covers', async () => {
+    const source = [
+      '---', 'title: Guide', '---', '',
+      '<button type="button" class="button primary" data-action="ask">Ask a question</button>', '',
+      '{% tabs %}', '{% tab title="Upload" %}', 'Drag a folder here.', '{% endtab %}', '{% tab title="Template" %}', 'Pick a template to start.', '{% endtab %}', '{% endtabs %}', '',
+      '<details>', '', '<summary>Troubleshooting</summary>', '', 'Click Re-verify to try again.', '', '</details>', '',
+      '{% stepper %}', '{% step %}', '#### Create your key', '', 'Open settings.', '{% endstep %}', '{% endstepper %}', '',
+      '{% embed url="https://github.com/example/repo" %}', '',
+      '<table data-view="cards"><thead><tr><th></th><th data-hidden data-card-cover data-type="files"></th></tr></thead><tbody><tr><td><strong>No code</strong></td><td><a href="https://x.example/cover.jpg">cover.jpg</a></td></tr></tbody></table>',
+    ].join('\n');
+    const doc = markdownToIr(source, { platform: 'gitbook', file: 'guide.md', pageId: 'p' });
+    const page = { id: 'p', newPath: 'guide', migrate: true, doc };
+    // the theme's breadcrumbs, feedback, prev/next and footer surround the content; an inactive tab panel is hidden by class; a closed Expandable has no body
+    const html = [
+      '<html><body><article><nav aria-label="Breadcrumb">Documentation/Guides</nav><h1 class="page-title">Guide</h1><div class="mt-8 mdx-container">',
+      '<div role="tablist"><button>Upload</button><button>Template</button></div><div><p>Drag a folder here.</p></div><div class="hidden"><p>Pick a template to start.</p></div>',
+      '<div><button aria-expanded="false">Troubleshooting</button></div>',
+      '<div><h3>Create your key</h3><p>Open settings.</p></div>',
+      '<p><a href="https://github.com/example/repo">https://github.com/example/repo</a></p>',
+      '<div><img src="https://x.example/cover.jpg" alt="No code"><div>No code</div></div>',
+      '</div><div class="mt-16">Was this page helpful? Previous Guides Next Automations<footer>Last updated today <a href="https://documentation.ai/?utm_campaign=footer">Built with Documentation.AI</a></footer></div></article></body></html>',
+    ].join('');
+    const contentSelectors = ['.page-title', '.page-description', '.mdx-container'];
+    const scoped = await runBrowserContentGate('https://preview.example/', [page], { render: async () => html, contentSelectors });
+    expect(scoped.routes).toEqual([{ route: 'guide', status: 'pass', problems: [] }]);
+    // read as a whole article, the theme's own text and footer link are unaccounted for
+    const unscoped = await runBrowserContentGate('https://preview.example/', [page], { render: async () => html });
+    expect(unscoped.routes[0].problems.join(' ')).toMatch(/rendered text with no source.*external link https:\/\/documentation\.ai/);
+    // a required segment still fails when it is missing
+    const missing = await runBrowserContentGate('https://preview.example/', [page], { render: async () => html.replace('<p>Open settings.</p>', ''), contentSelectors });
+    expect(missing.routes[0].problems).toEqual(['missing or out of order: “open settings.”']);
+  });
   it('fails a route whose card link, image alt or heading outline differs, and one with no source document', async () => {
     const doc = markdownToIr(`---\ntitle: T\n---\n\n## Section\n\n![Alt text](https://cdn.source/a.png)\n\n[Guide](/guides/setup)\n`, { platform: 'mintlify', file: 'a.md', pageId: 'p' });
     const page = { id: 'p', newPath: 'a', migrate: true, doc };

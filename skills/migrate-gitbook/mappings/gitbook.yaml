@@ -74,3 +74,18 @@ rules:
     match: { name: button, props: { data-action: ask } }
     children: drop
     note: "GitBook Assistant prompt: it works only inside GitBook, so verify treats it as platform chrome like script and style"
+  - id: gitbook/api-param
+    tier: T2
+    match: { name: api-param }
+    to: { name: ParamField, props: { path: $path, query: $query, header: $header, body: $body, param-type: $param-type, required: $required, deprecated: $deprecated, enum: $enum } }
+    note: "an operation parameter or request-body field the Markdown adapter read from GitBook's OpenAPI fence"
+  - id: gitbook/api-field
+    tier: T2
+    match: { name: api-field }
+    to: { name: ResponseField, props: { name: $name, field-type: $field-type, required: $required, deprecated: $deprecated, enum: $enum } }
+    note: "a response or models-page schema field read from GitBook's OpenAPI fence"
+  - id: gitbook/api-properties
+    tier: T1
+    match: { name: api-properties }
+    to: { name: Expandable, props: { title: $title } }
+    note: "the nested properties of an object or array field, as Documentation.AI's generated API pages show them"
