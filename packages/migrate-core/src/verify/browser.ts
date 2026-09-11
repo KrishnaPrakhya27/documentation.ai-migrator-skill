@@ -231,11 +231,23 @@ function documentSegments(doc: DocIR): DocumentSegment[] {
         case 'snippetRef': visit(block.body ?? []); break;
         case 'component': case 'dai': {
           for (const key of ['title', 'summary', 'description', 'label', 'cta']) { const value = block.props[key]; if (typeof value === 'string') push(value, optional); }
-          // an API field renders its name and type beside its description
-          if (/^(?:paramfield|responsefield|api-param|api-field)$/.test(block.name.toLowerCase())) for (const key of ['path', 'query', 'header', 'body', 'name', 'param-type', 'field-type']) { const value = block.props[key]; if (typeof value === 'string') push(value, true); }
+          // an API field renders its location badge, name and type above its description, and its allowed values below it
+          const apiField = /^(?:paramfield|responsefield|api-param|api-field)$/.test(block.name.toLowerCase());
+          if (apiField) {
+            for (const key of ['path', 'query', 'header', 'body', 'name', 'param-type', 'field-type']) {
+              const value = block.props[key];
+              if (typeof value !== 'string') continue;
+              if (key !== 'name' && !key.endsWith('-type')) push(key, true);
+              push(value, true);
+            }
+          }
           // an embed the target cannot frame shows its URL as link text; one it frames shows none
           if (block.name.toLowerCase() === 'embed') for (const key of ['src', 'url']) { const value = block.props[key]; if (typeof value === 'string') push(value, true); }
-          if (block.name.toLowerCase() !== 'tabs') { visit(block.children); break; }
+          if (block.name.toLowerCase() !== 'tabs') {
+            visit(block.children);
+            if (apiField && typeof block.props.enum === 'string') { push('allowed values:', true); for (const value of block.props.enum.split(',')) push(value, true); }
+            break;
+          }
           for (const tab of block.children) if ((tab.type === 'component' || tab.type === 'dai') && typeof tab.props.title === 'string') push(tab.props.title, optional);
           for (const tab of block.children) visit(tab.type === 'component' || tab.type === 'dai' ? tab.children : [tab]);
           break;

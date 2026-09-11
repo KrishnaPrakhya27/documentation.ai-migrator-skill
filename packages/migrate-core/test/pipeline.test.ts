@@ -389,6 +389,18 @@ describe('gates', () => {
     const missing = await runBrowserContentGate('https://preview.example/', [page], { render: async () => html.replace('<p>Open settings.</p>', ''), contentSelectors });
     expect(missing.routes[0].problems).toEqual(['missing or out of order: “open settings.”']);
   });
+  it('accepts the labels an API field renders from its props: location badge, name, type and allowed values', async () => {
+    const operation = { openapi: '3.0.3', info: { title: 'T', version: '1' }, paths: { '/pets': { get: { parameters: [{ name: 'status', in: 'query', description: 'Filter by status.', schema: { type: 'string', enum: ['available', 'sold'] } }], responses: {} } } } };
+    const doc = markdownToIr(['---', 'title: Pets', '---', '', '```json', JSON.stringify(operation), '```'].join('\n'), { platform: 'gitbook', file: 'pets.md', pageId: 'p' });
+    const field = (extra: string) => `<html><body><article><h1 class="page-title">Pets</h1><div class="mdx-container"><p><strong>GET</strong> <code>/pets</code></p><p><strong>Parameters</strong></p><div><div><span>query</span><span>status</span><span>string</span></div><div><p>Filter by status.</p></div>${extra}</div></div></article></body></html>`;
+    const contentSelectors = ['.page-title', '.page-description', '.mdx-container'];
+    const page = { id: 'p', newPath: 'pets', migrate: true, doc };
+    const labelled = await runBrowserContentGate('https://preview.example/', [page], { render: async () => field('<div><span>Allowed values:</span><span>available</span><span>sold</span></div>'), contentSelectors });
+    expect(labelled.routes).toEqual([{ route: 'pets', status: 'pass', problems: [] }]);
+    // a value the source never allowed is still text with no source
+    const invented = await runBrowserContentGate('https://preview.example/', [page], { render: async () => field('<div><span>Allowed values:</span><span>available</span><span>sold</span><span>archived</span></div>'), contentSelectors });
+    expect(invented.routes[0].problems.join(' ')).toContain('archived');
+  });
   it('fails a route whose card link, image alt or heading outline differs, and one with no source document', async () => {
     const doc = markdownToIr(`---\ntitle: T\n---\n\n## Section\n\n![Alt text](https://cdn.source/a.png)\n\n[Guide](/guides/setup)\n`, { platform: 'mintlify', file: 'a.md', pageId: 'p' });
     const page = { id: 'p', newPath: 'a', migrate: true, doc };
