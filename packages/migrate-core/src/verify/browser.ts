@@ -221,7 +221,8 @@ function documentSegments(doc: DocIR): DocumentSegment[] {
       const optional = unrendered.has(block.id);
       switch (block.type) {
         case 'paragraph': case 'heading': push(inlineText(block.children), optional); break;
-        case 'code': push(block.value, optional); break;
+        // a mermaid fence renders as a diagram, not as its source text
+        case 'code': push(block.value, optional || block.lang === 'mermaid'); break;
         case 'table': for (const row of block.children) for (const cell of row.children) push(inlineText(cell.children), optional); break;
         // Image alt text is not rendered text; it is compared attribute to attribute below.
         case 'figure': if (block.caption) push(inlineText(block.caption), optional); break;
@@ -323,7 +324,10 @@ export async function runBrowserContentGate(
     const root = parseHtml(html);
     const article = find(root, 'article') ?? find(root, 'main') ?? find(root, '[role=main]') ?? find(root, 'body') ?? root;
     // With content selectors only the page itself is read, not the platform chrome around it (breadcrumbs, feedback, prev/next, footer).
-    const selected = (opts.contentSelectors ?? []).flatMap((selector) => findAll(root, selector));
+    // A match that contains another match is a wrapper (the theme nests its body container inside an outer one around the whole page), so only the innermost are read.
+    const matches = (opts.contentSelectors ?? []).flatMap((selector) => findAll(root, selector));
+    const contains = (outer: Dom, inner: Dom): boolean => { for (let node = inner.parent; node; node = node.parent) if (node === outer) return true; return false; };
+    const selected = matches.filter((candidate) => !matches.some((other) => other !== candidate && contains(candidate, other)));
     const content = selected.length ? selected : [article];
     const rendered = normaliseVisible(content.map(visibleText).join('\n'));
 

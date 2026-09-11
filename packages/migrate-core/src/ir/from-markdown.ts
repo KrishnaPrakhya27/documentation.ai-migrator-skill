@@ -110,7 +110,28 @@ function outsideCode(source: string, fn: (segment: string) => string): string {
 }
 
 export function preprocessPlatformMarkdown(source: string, platform: string): string {
-  return outsideCode(source, (segment) => preprocessSegment(segment, platform));
+  const prepared = platform === 'gitbook' ? gitbookQuotedMarkdown(source) : source;
+  return outsideCode(prepared, (segment) => preprocessSegment(segment, platform));
+}
+
+/**
+ * GitBook quotes an OpenAPI operation's description above its fence and escapes the Markdown the
+ * description was written in (\`limit\`, \*\*deprecated\*\*). The escapes are the export's, not the
+ * author's, so on quoted lines outside a fence they are read as the code and bold they encode. This
+ * runs before code spans are set aside, which would otherwise take an escaped backtick as one.
+ */
+function gitbookQuotedMarkdown(source: string): string {
+  let fence: string | undefined;
+  return source.split('\n').map((line) => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/)?.[1];
+    if (marker) {
+      if (!fence) fence = marker;
+      else if (marker[0] === fence[0] && marker.length >= fence.length) fence = undefined;
+      return line;
+    }
+    if (fence || !/^\s*>/.test(line)) return line;
+    return line.replace(/\\`([^`\n]+?)\\`/g, '`$1`').replace(/\\\*\\\*(.+?)\\\*\\\*/g, '**$1**');
+  }).join('\n');
 }
 
 function preprocessSegment(source: string, platform: string): string {

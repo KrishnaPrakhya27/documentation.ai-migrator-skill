@@ -370,13 +370,14 @@ describe('gates', () => {
     const page = { id: 'p', newPath: 'guide', migrate: true, doc };
     // the theme's breadcrumbs, feedback, prev/next and footer surround the content; an inactive tab panel is hidden by class; a closed Expandable has no body
     const html = [
-      '<html><body><article><nav aria-label="Breadcrumb">Documentation/Guides</nav><h1 class="page-title">Guide</h1><div class="mt-8 mdx-container">',
+      // the theme also wraps the whole page in an outer .mdx-container, so only the innermost matches are the content
+      '<html><body><article><div class="mdx-container"><nav aria-label="Breadcrumb">Documentation/Guides</nav><h1 class="page-title">Guide</h1><div class="mt-8 mdx-container">',
       '<div role="tablist"><button>Upload</button><button>Template</button></div><div><p>Drag a folder here.</p></div><div class="hidden"><p>Pick a template to start.</p></div>',
       '<div><button aria-expanded="false">Troubleshooting</button></div>',
       '<div><h3>Create your key</h3><p>Open settings.</p></div>',
       '<p><a href="https://github.com/example/repo">https://github.com/example/repo</a></p>',
       '<div><img src="https://x.example/cover.jpg" alt="No code"><div>No code</div></div>',
-      '</div><div class="mt-16">Was this page helpful? Previous Guides Next Automations<footer>Last updated today <a href="https://documentation.ai/?utm_campaign=footer">Built with Documentation.AI</a></footer></div></article></body></html>',
+      '</div><div class="mt-16">Was this page helpful? Previous Guides Next Automations<footer>Last updated today <a href="https://documentation.ai/?utm_campaign=footer">Built with Documentation.AI</a></footer></div></div></article></body></html>',
     ].join('');
     const contentSelectors = ['.page-title', '.page-description', '.mdx-container'];
     const scoped = await runBrowserContentGate('https://preview.example/', [page], { render: async () => html, contentSelectors });

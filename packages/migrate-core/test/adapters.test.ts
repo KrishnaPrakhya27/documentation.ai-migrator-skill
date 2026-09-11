@@ -289,6 +289,15 @@ describe('GitBook repo adapter', () => {
     ]) expect(mdx).toContain(expected);
     expect(mdx).not.toContain('"openapi"');
   });
+  it('reads the Markdown GitBook escapes in a quoted API description as the code and bold it encodes', () => {
+    const source = ['> \\*\\*This endpoint is deprecated\\*\\*. Use \\`GET /pets\\` with a \\`status\\` filter.', '', 'Outside a quote, \\`literal\\` stays literal.'].join('\n');
+    const [quote, paragraph] = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' }).children;
+    const inlines = quote.type === 'blockquote' && quote.children[0]?.type === 'paragraph' ? quote.children[0].children : [];
+    expect(inlines.map((i) => i.type)).toEqual(['strong', 'text', 'inlineCode', 'text', 'inlineCode', 'text']);
+    expect(inlineText(inlines)).toBe('This endpoint is deprecated. Use GET /pets with a status filter.');
+    // an escaped backtick the author wrote outside a quoted description is kept as written
+    expect(paragraph.type === 'paragraph' && inlineText(paragraph.children)).toBe('Outside a quote, `literal` stays literal.');
+  });
   it('converts a hint to a Callout through the gitbook mapping', () => {
     const w = mkdtempSync(join(tmpdir(), 'dai-gb-')); ensureWorkspace(w);
     const d = markdownToIr(readFileSync(fx('gitbook-repo/guide/first.md'), 'utf8'), { platform: 'gitbook', file: 'guide/first.md', pageId: 'g1' });
