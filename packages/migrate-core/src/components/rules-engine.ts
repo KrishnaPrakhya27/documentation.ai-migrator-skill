@@ -70,7 +70,8 @@ type PropReference = { kind: 'count' } | { kind: 'copy'; prop: string } | { kind
 /** "$count", "$prop" (copy) or "$map(prop)" (copy through the contract value map); anything else is a literal. */
 function propReference(v: string | number | boolean): PropReference | undefined {
   if (typeof v !== 'string' || !v.startsWith('$')) return undefined;
-  const m = v.match(/^\$(\w+)(?:\((\w+)\))?$/);
+  // prop names may be hyphenated, as the contract's own API fields are (param-type, field-type)
+  const m = v.match(/^\$([\w-]+)(?:\(([\w-]+)\))?$/);
   if (!m) return undefined;
   const [, fn, arg] = m;
   if (fn === 'count') return { kind: 'count' };
@@ -192,6 +193,24 @@ const HANDLERS: Record<string, RestructureHandler> = {
     const blocks: Block[] = [...node.children];
     if (caption) blocks.push({ id: node.id + ':cap', type: 'paragraph', children: [{ id: node.id + ':cap:t', type: 'emphasis', children: [{ id: node.id + ':cap:tt', type: 'text', value: caption }] }] });
     return { blocks };
+  } },
+  /** GitBook step: it has no title of its own, so its leading heading becomes the title the Step contract requires. */
+  'step-title-from-heading': { reads: [], run: (node, rule) => {
+    const [first, ...rest] = node.children;
+    const title = first?.type === 'heading' ? inlineText(first.children).trim() : '';
+    if (!title || first?.type !== 'heading') return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title: 'Step' }, children: node.children, rule: rule.id }], lossy: ['no leading heading; Step title defaulted to "Step"'] };
+    // the title renders as a heading element, at the source level where the contract has one (h2, h3)
+    const titleType = first.depth <= 2 ? 'h2' : 'h3';
+    const lossy = [`leading heading "${title}" became the Step title`, ...(first.depth > 3 ? [`heading level ${first.depth} rendered as h3`] : [])];
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title, titleType }, children: rest, rule: rule.id }], lossy };
+  } },
+  /** Embed: an Iframe when the host may be framed, otherwise the link a reader of the source followed. */
+  'embed-to-iframe-or-link': { reads: ['src', 'url', 'title'], run: (node, rule, ctx) => {
+    const framed = HANDLERS['embed-to-iframe'].run(node, rule, ctx);
+    const src = String(node.props.src ?? node.props.url ?? '');
+    if (framed.blocks[0]?.type !== 'quarantined' || !/^https?:\/\//i.test(src)) return framed;
+    const link: Inline = { id: `${node.id}:link`, type: 'link', url: src, title: typeof node.props.title === 'string' ? node.props.title : undefined, children: [{ id: `${node.id}:text`, type: 'text', value: src }] };
+    return { blocks: [{ id: node.id, type: 'paragraph', children: [link] }], lossy: [`embed of ${new URL(src).hostname} kept as a link: the host is not allowlisted for iframes`] };
   } },
 };
 

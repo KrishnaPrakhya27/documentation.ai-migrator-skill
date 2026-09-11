@@ -7,10 +7,10 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { GateResult } from './gates.js';
+import { isHtmlChromeNode, type GateResult } from './gates.js';
 import { assertPublicHost } from '../scrape/fetcher.js';
 import { find, findAll, parseHtml, type Dom } from '../ir/from-html.js';
-import { inlineText, walkBlocks, type DocIR } from '../ir/types.js';
+import { inlineText, walkBlocks, type Block, type DocIR } from '../ir/types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -182,33 +182,98 @@ export interface BrowserContentOptions {
   /** Selector for the rendered navigation; the check is skipped, and reported, when the target platform declares none. */
   navSelector?: string;
   siteName?: string;
+  /** Selectors of the rendered page's own content (title, description, body), in page order; the platform chrome around them is not read. Default: the whole article. */
+  contentSelectors?: string[];
 }
 
 const DEFAULT_PREVIEW_CHROME = ['copy', 'copied', 'copy to clipboard', 'ask ai', 'on this page', 'edit this page', 'was this page helpful?', 'yes', 'no', 'previous', 'next'];
 /** What remains between matched segments that carries no information: punctuation, list markers, digits from generated numbering. */
 const INSIGNIFICANT_RESIDUAL = /^[\s\p{P}\p{S}\d]*$/u;
 
-/** The authored segments of a document, in reading order: what the preview must show and nothing more. */
-function documentSegments(doc: DocIR): string[] {
-  const segments: string[] = [];
-  const push = (value: string | undefined) => { const text = normaliseVisible(value ?? ''); if (text) segments.push(text); };
-  push(doc.frontmatter.title);
-  push(doc.frontmatter.description);
+/** Components whose content mounts only when a reader opens them, so a static render does not contain it. */
+const COLLAPSED_BY_DEFAULT = new Set(['details', 'expandable', 'accordion']);
+
+/** Blocks a static render cannot show: the content of a collapsed block, and platform chrome the migration dropped (a GitBook assistant prompt). */
+function unrenderedBlockIds(doc: DocIR): Set<string> {
+  const ids = new Set<string>();
   walkBlocks(doc.children, (block) => {
-    if (block.type === 'paragraph' || block.type === 'heading') push(inlineText(block.children));
-    else if (block.type === 'code') push(block.value);
-    else if (block.type === 'table') for (const row of block.children) for (const cell of row.children) push(inlineText(cell.children));
-    else if (block.type === 'component' || block.type === 'dai') for (const key of ['title', 'summary', 'description', 'label', 'cta']) { const value = block.props[key]; if (typeof value === 'string') push(value); }
-    // Image alt text is not rendered text; it is compared attribute to attribute below.
-    else if (block.type === 'figure' && block.caption) push(inlineText(block.caption));
+    if (block.type !== 'component' && block.type !== 'dai') return;
+    if (isHtmlChromeNode(block)) { ids.add(block.id); walkBlocks(block.children, (inner) => { ids.add(inner.id); }); }
+    else if (COLLAPSED_BY_DEFAULT.has(block.name.toLowerCase()) && block.props.defaultOpen !== true) walkBlocks(block.children, (inner) => { ids.add(inner.id); });
   });
+  return ids;
+}
+
+interface DocumentSegment { text: string; optional: boolean }
+
+/**
+ * The authored segments of a document, in reading order: what the preview must show and nothing more.
+ * Text inside a collapsed block may be absent from a static render, so it is optional; a tab set renders
+ * every tab label before its panels, so its titles come first; dropped platform chrome is not content.
+ */
+function documentSegments(doc: DocIR): DocumentSegment[] {
+  const segments: DocumentSegment[] = [];
+  const unrendered = unrenderedBlockIds(doc);
+  const push = (value: string | undefined, optional: boolean) => { const text = normaliseVisible(value ?? ''); if (text) segments.push({ text, optional }); };
+  const visit = (blocks: Block[]): void => {
+    for (const block of blocks) {
+      if (isHtmlChromeNode(block)) continue;
+      const optional = unrendered.has(block.id);
+      switch (block.type) {
+        case 'paragraph': case 'heading': push(inlineText(block.children), optional); break;
+        // a mermaid fence renders as a diagram, not as its source text
+        case 'code': push(block.value, optional || block.lang === 'mermaid'); break;
+        case 'table': for (const row of block.children) for (const cell of row.children) push(inlineText(cell.children), optional); break;
+        // Image alt text is not rendered text; it is compared attribute to attribute below.
+        case 'figure': if (block.caption) push(inlineText(block.caption), optional); break;
+        case 'blockquote': visit(block.children); break;
+        case 'list': for (const item of block.children) visit(item.children); break;
+        case 'snippetRef': visit(block.body ?? []); break;
+        case 'component': case 'dai': {
+          for (const key of ['title', 'summary', 'description', 'label', 'cta']) { const value = block.props[key]; if (typeof value === 'string') push(value, optional); }
+          // an API field renders its location badge, name and type above its description, and its allowed values below it
+          const apiField = /^(?:paramfield|responsefield|api-param|api-field)$/.test(block.name.toLowerCase());
+          if (apiField) {
+            for (const key of ['path', 'query', 'header', 'body', 'name', 'param-type', 'field-type']) {
+              const value = block.props[key];
+              if (typeof value !== 'string') continue;
+              if (key !== 'name' && !key.endsWith('-type')) push(key, true);
+              push(value, true);
+            }
+          }
+          // an embed the target cannot frame shows its URL as link text; one it frames shows none
+          if (block.name.toLowerCase() === 'embed') for (const key of ['src', 'url']) { const value = block.props[key]; if (typeof value === 'string') push(value, true); }
+          if (block.name.toLowerCase() !== 'tabs') {
+            visit(block.children);
+            if (apiField && typeof block.props.enum === 'string') { push('allowed values:', true); for (const value of block.props.enum.split(',')) push(value, true); }
+            break;
+          }
+          for (const tab of block.children) if ((tab.type === 'component' || tab.type === 'dai') && typeof tab.props.title === 'string') push(tab.props.title, optional);
+          for (const tab of block.children) visit(tab.type === 'component' || tab.type === 'dai' ? tab.children : [tab]);
+          break;
+        }
+      }
+    }
+  };
+  push(doc.frontmatter.title, false);
+  push(doc.frontmatter.description, false);
+  visit(doc.children);
   return segments;
 }
 
-/** Heading outline of a document, ignoring the H1 the target renders from the title. */
+/** Heading outline of a document, ignoring the H1 the target renders from the title. A step's leading heading renders as its Step title, at h2 or h3. */
 function sourceOutline(doc: DocIR): string[] {
   const out: string[] = [];
-  walkBlocks(doc.children, (block) => { if (block.type === 'heading' && block.depth > 1) out.push(`${block.depth}:${normaliseVisible(inlineText(block.children))}`); });
+  const unrendered = unrenderedBlockIds(doc);
+  const stepTitles = new Set<string>();
+  walkBlocks(doc.children, (block) => {
+    if (block.type === 'component' && block.name.toLowerCase() === 'step' && !block.props.title && block.children[0]?.type === 'heading') stepTitles.add(block.children[0].id);
+  });
+  walkBlocks(doc.children, (block) => {
+    if (block.type !== 'heading' || block.depth <= 1 || unrendered.has(block.id)) return;
+    const depth = stepTitles.has(block.id) ? Math.min(Math.max(block.depth, 2), 3) : block.depth;
+    out.push(`${depth}:${normaliseVisible(inlineText(block.children))}`);
+  });
   return out;
 }
 
@@ -216,17 +281,22 @@ function sourceLinkTargets(doc: DocIR): Set<string> {
   const urls = new Set<string>();
   walkBlocks(doc.children, (block) => {
     if (block.type === 'paragraph' || block.type === 'heading') { for (const inline of block.children) if (inline.type === 'link') urls.add(inline.url); }
-    else if (block.type === 'component' || block.type === 'dai') { const href = block.props.href; if (typeof href === 'string') urls.add(href); }
+    // a component links through href, and an embed the target cannot frame renders its src as a link
+    else if (block.type === 'component' || block.type === 'dai') for (const key of ['href', 'src', 'url']) { const value = block.props[key]; if (typeof value === 'string') urls.add(value); }
   });
   return urls;
 }
 
 function sourceImages(doc: DocIR): Array<{ src: string; alt?: string }> {
   const images: Array<{ src: string; alt?: string }> = [];
+  const unrendered = unrenderedBlockIds(doc);
   walkBlocks(doc.children, (block) => {
+    if (unrendered.has(block.id)) return;
     if (block.type === 'image') images.push({ src: block.url, alt: block.alt });
     else if (block.type === 'figure') images.push({ src: block.image.url, alt: block.image.alt });
-    else if (block.type === 'paragraph') for (const inline of block.children) if (inline.type === 'image') images.push({ src: inline.url, alt: inline.alt });
+    else if (block.type === 'paragraph') { for (const inline of block.children) if (inline.type === 'image') images.push({ src: inline.url, alt: inline.alt }); }
+    // a card's cover image renders with the card title as its alt text
+    else if ((block.type === 'component' || block.type === 'dai') && typeof block.props.image === 'string') images.push({ src: block.props.image, alt: typeof block.props.title === 'string' ? block.props.title : '' });
   });
   return images;
 }
@@ -265,18 +335,30 @@ export async function runBrowserContentGate(
 
     const root = parseHtml(html);
     const article = find(root, 'article') ?? find(root, 'main') ?? find(root, '[role=main]') ?? find(root, 'body') ?? root;
-    const rendered = normaliseVisible(visibleText(article));
+    // With content selectors only the page itself is read, not the platform chrome around it (breadcrumbs, feedback, prev/next, footer).
+    // A match that contains another match is a wrapper (the theme nests its body container inside an outer one around the whole page), so only the innermost are read.
+    const matches = (opts.contentSelectors ?? []).flatMap((selector) => findAll(root, selector));
+    const contains = (outer: Dom, inner: Dom): boolean => { for (let node = inner.parent; node; node = node.parent) if (node === outer) return true; return false; };
+    const selected = matches.filter((candidate) => !matches.some((other) => other !== candidate && contains(candidate, other)));
+    const content = selected.length ? selected : [article];
+    const rendered = normaliseVisible(content.map(visibleText).join('\n'));
 
     // Segments in order; the text between consecutive matches is residual and must be insignificant.
+    // Optional text (inside a collapsed block) counts only where it sits before the next required segment.
     const segments = documentSegments(page.doc);
     let cursor = 0;
     const residual: string[] = [];
-    for (const segment of segments) {
-      const index = rendered.indexOf(segment, cursor);
-      if (index < 0) { problems.push(`missing or out of order: “${segment.slice(0, 80)}”`); continue; }
+    segments.forEach((segment, position) => {
+      const index = rendered.indexOf(segment.text, cursor);
+      if (index >= 0 && segment.optional) {
+        const next = segments.slice(position + 1).find((later) => !later.optional);
+        const nextIndex = next ? rendered.indexOf(next.text, cursor) : -1;
+        if (nextIndex >= 0 && index + segment.text.length > nextIndex) return;
+      }
+      if (index < 0) { if (!segment.optional) problems.push(`missing or out of order: “${segment.text.slice(0, 80)}”`); return; }
       residual.push(rendered.slice(cursor, index));
-      cursor = index + segment.length;
-    }
+      cursor = index + segment.text.length;
+    });
     residual.push(rendered.slice(cursor));
     const unexplained = residual
       .map((piece) => allowed.reduce((text, chrome) => text.split(chrome).join(' '), piece))
@@ -285,13 +367,13 @@ export async function runBrowserContentGate(
     if (unexplained.length) problems.push(`rendered text with no source: ${unexplained.slice(0, 3).map((piece) => `“${piece.slice(0, 60)}”`).join(', ')}`);
 
     // The outline the reader navigates by.
-    const renderedOutline = findAll(article, 'h2, h3, h4, h5, h6').map((heading) => `${Number(heading.name.slice(1))}:${normaliseVisible(visibleText(heading))}`);
+    const renderedOutline = content.flatMap((node) => findAll(node, 'h2, h3, h4, h5, h6')).map((heading) => `${Number(heading.name.slice(1))}:${normaliseVisible(visibleText(heading))}`);
     const expectedOutline = sourceOutline(page.doc);
     if (renderedOutline.join('|') !== expectedOutline.join('|')) problems.push(`heading outline differs: rendered ${JSON.stringify(renderedOutline)}, source ${JSON.stringify(expectedOutline)}`);
 
     // Links: internal ones must land on a migrated route, external ones must be the source's own.
     const sourceTargets = sourceLinkTargets(page.doc);
-    for (const anchor of findAll(article, 'a[href]')) {
+    for (const anchor of content.flatMap((node) => findAll(node, 'a[href]'))) {
       const href = anchor.attribs.href;
       if (!href || href.startsWith('#')) continue;
       if (href.startsWith('/')) {
@@ -304,7 +386,7 @@ export async function runBrowserContentGate(
 
     // Images: rehosted, and still carrying the alt text the source wrote.
     const expectedImages = sourceImages(page.doc);
-    const renderedImages = findAll(article, 'img');
+    const renderedImages = content.flatMap((node) => findAll(node, 'img'));
     if (renderedImages.length !== expectedImages.length) problems.push(`image count differs: rendered ${renderedImages.length}, source ${expectedImages.length}`);
     renderedImages.forEach((image, index) => {
       const expected = expectedImages[index];

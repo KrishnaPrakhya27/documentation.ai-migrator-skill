@@ -367,6 +367,9 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
   };
 
   const paragraphOf = (n: El, p: number[]): Block[] => {
+    // a paragraph element holding a platform component (a GitBook Assistant button) wraps blocks, not one run of inline text
+    // (a snippet reference is inline, and inlineOf renders it in place)
+    if (n.children.some((c) => c.type === 'tag' && (opts.recognisers ?? []).some((r) => r.name !== 'snippetRef' && matchesSelector(c, r.selector)))) return blocksOf(n.children, p);
     const inl = inlineOf(n.children, p);
     const onlyImg = inl.length === 1 && inl[0].type === 'image';
     if (onlyImg) return [inl[0] as ImageNode];

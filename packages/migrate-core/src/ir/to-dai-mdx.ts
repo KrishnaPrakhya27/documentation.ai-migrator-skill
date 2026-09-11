@@ -18,7 +18,9 @@ const MDX_TEXT_ESCAPES: Array<[RegExp, string]> = [
   [/\{/g, '\\{'],
   [/\}/g, '\\}'],
   [/<(?=[A-Za-z\/!])/g, '&lt;'],
-  [/^(\s*)([#>+\-*]|\d+\.)(?=\s)/gm, '$1\\$2'],
+  [/^(\s*)([#>+\-*])(?=\s)/gm, '$1\\$2'],
+  // a backslash escapes punctuation only, so an ordered-list marker is escaped at its period ("\1." renders the backslash)
+  [/^(\s*)(\d+)\.(?=\s)/gm, '$1$2\\.'],
   [/(\*|_)(?=\S)/g, '\\$1'],
 ];
 

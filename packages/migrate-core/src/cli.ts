@@ -309,6 +309,8 @@ function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | un
 
 /** The Documentation.AI renderer's sidebar container, used to check the deployed navigation. */
 const DAI_PREVIEW_NAV_SELECTOR = 'nav, aside, [role=navigation]';
+/** The rendered page's own content on a Documentation.AI preview: title, description and MDX body, without the breadcrumbs, feedback, prev/next and footer the theme puts around them. */
+const DAI_PREVIEW_CONTENT_SELECTORS = ['.page-title', '.page-description', '.mdx-container'];
 
 /**
  * The sidebar the source states, flattened in reading order. A page placed in two groups
@@ -469,6 +471,13 @@ async function main() {
             };
           });
           const pageIdByUrl = new Map(pages.map((page) => [page.source.replace(/\/$/, ''), page.id]));
+          // A URL that redirects to a discovered page names that page: the navigation may still link the old name.
+          for (const found of discovery.pages) {
+            if (!found.aliases?.length) continue;
+            const page = pages.find((entry) => entry.source === found.url)!;
+            page.aliases = found.aliases.map((alias) => new URL(alias).pathname);
+            for (const alias of found.aliases) pageIdByUrl.set(alias.replace(/\/$/, ''), page.id);
+          }
           // A navigation entry the page set cannot account for means discovery missed a page.
           // Dropping it silently is how a group vanished from the last migration, so exact mode stops here.
           const unmappedNavigationUrls: string[] = [];
@@ -991,6 +1000,7 @@ async function main() {
             assetUrls: new Map(Object.entries(manifest.byUrl).flatMap(([url, hash]) => { const final = manifest.entries[hash]?.finalUrl; return final ? [[url, final] as [string, string]] : []; })),
             navigation: expectedSidebar(tree),
             navSelector: DAI_PREVIEW_NAV_SELECTOR,
+            contentSelectors: DAI_PREVIEW_CONTENT_SELECTORS,
             siteName: typeof readPlatformMeta(workspace).name === 'string' ? readPlatformMeta(workspace).name : undefined,
           },
         );

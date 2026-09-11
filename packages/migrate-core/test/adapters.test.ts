@@ -19,6 +19,7 @@ import { DecisionLog } from '../src/log/decisions.js';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { buildNavigation, attachGroupOpenapi } from '../src/nav/tree.js';
 import { validateMdx } from '@dai/content-contract';
+import { headingOutline, isHtmlChromeNode, mdxHeadingOutline, normaliseMdxText, proseSegments } from '../src/verify/gates.js';
 import { readFileSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -118,6 +119,184 @@ describe('GitBook repo adapter', () => {
     expect(r.missing).toEqual(['guide/nope.md']);
     expect(r.unlisted).toEqual(['guide/orphan.md']);
     expect(r.redirects).toEqual([{ source: '/old/page', destination: '/guide/first', statusCode: 308 }]);
+  });
+  it('keeps GitBook Liquid blocks as block boundaries next to fences, text, list indentation, blockquotes and percent attributes', () => {
+    const source = [
+      '{% tabs %}', '{% tab title="JavaScript" %}', '```javascript', 'export default { trigger: 1 };', '```', '{% endtab %}', '{% tab title="Plain" %}', '**Base URL** `https://x.example/v1`', '{% endtab %}', '{% endtabs %}', '',
+      '{% stepper %}', '{% step %}', '* first', '* second', '  {% endstep %}', '{% endstepper %}', '',
+      '> Intro.\\', '> {% hint style="info" %}\\', '> Planned for v2.\\', '> {% endhint %}<br>', '',
+      '{% columns %}', '{% column width="50%" %}', 'Left.', '{% endcolumn %}', '{% endcolumns %}', '',
+      '{% updates format="full" %}', '{% update date="2025-12-03" tags="feature,fix" %}', '## Product update', '{% endupdate %}', '{% endupdates %}',
+    ].join('\n');
+    const doc = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' });
+    const shape = (blocks: Block[]): unknown[] => blocks.map((b) => (b.type === 'component' ? { [b.name]: b.props, children: shape(b.children) } : b.type === 'blockquote' ? { blockquote: shape(b.children) } : b.type));
+    expect(shape(doc.children)).toEqual([
+      { tabs: {}, children: [{ tab: { title: 'JavaScript' }, children: ['code'] }, { tab: { title: 'Plain' }, children: ['paragraph'] }] },
+      { stepper: {}, children: [{ step: {}, children: ['list'] }] },
+      { blockquote: ['paragraph', { hint: { style: 'info' }, children: ['paragraph'] }] },
+      { columns: {}, children: [{ column: { width: '50%' }, children: ['paragraph'] }] },
+      { updates: { format: 'full' }, children: [{ update: { date: '2025-12-03', tags: 'feature,fix' }, children: ['heading'] }] },
+    ]);
+    // code stays code, and no hard break survives as a literal backslash
+    const texts: string[] = [];
+    walkBlocks(doc.children, (b) => { if (b.type === 'code') texts.push(b.value); if (b.type === 'paragraph') texts.push(inlineText(b.children)); });
+    expect(texts).toEqual(['export default { trigger: 1 };', 'Base URL https://x.example/v1', 'first', 'second', 'Intro.', 'Planned for v2.', 'Left.']);
+  });
+  it('rewrites the CommonMark GitBook publishes that MDX rejects: code blocks, unclosed void elements and angle autolinks', () => {
+    const source = [
+      '{% code title="app.js" overflow="wrap" %}', '```js', 'const a = { b: 1 };', '```', '{% endcode %}', '',
+      '<div align="left"><figure><img src="https://x.example/p.png" alt=""><figcaption></figcaption></figure></div>', '',
+      'Subscribe to the \\[changelog]\\(<https://x.example/changelog>) or read [the guide](<https://x.example/guide>).', '',
+      'Status at <https://x.example/status>.', '',
+      'Line one<br>line two',
+    ].join('\n');
+    const doc = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' });
+    // {% code %} around one fence is that fence with its title; overflow only styles it
+    const [code] = doc.children;
+    expect(code).toMatchObject({ type: 'code', lang: 'js', title: 'app.js', value: 'const a = { b: 1 };' });
+    expect(JSON.stringify(doc)).toContain('https://x.example/p.png');
+    const paragraphs = doc.children.filter((b): b is Extract<Block, { type: 'paragraph' }> => b.type === 'paragraph');
+    const autolinked = paragraphs.find((p) => inlineText(p.children).startsWith('Subscribe'))!;
+    // GitBook's escaped link around an autolink is the link it stands for; an angle-bracket link destination is left as written
+    expect(inlineText(autolinked.children)).toBe('Subscribe to the changelog or read the guide.');
+    // a bare autolink becomes a link showing the same URL
+    const status = paragraphs.find((p) => inlineText(p.children).startsWith('Status'))!;
+    expect(status.children.filter((i) => i.type === 'link').map((i) => (i as { url: string }).url)).toEqual(['https://x.example/status']);
+    expect(inlineText(status.children)).toBe('Status at https://x.example/status.');
+    expect(autolinked.children.filter((i) => i.type === 'link').map((i) => (i as { url: string }).url)).toEqual(['https://x.example/changelog', 'https://x.example/guide']);
+    expect(paragraphs.at(-1)!.children.some((i) => i.type === 'break')).toBe(true);
+  });
+  const gitbookHtml = [
+    '<table data-view="cards"><thead><tr><th></th><th></th><th></th><th data-hidden data-card-target data-type="content-ref"></th><th data-hidden data-card-cover data-type="files"></th></tr></thead><tbody><tr><td><h4><i class="fa-leaf" style="color:$primary;">:leaf:</i></h4></td><td><strong>No code</strong></td><td>Start in 5 minutes &amp; more.</td><td><a href="/docs/start.md">Documentation</a></td><td><a href="https://x.example/cover.jpg">cover.jpg</a></td></tr></tbody></table>',
+    '',
+    '<p align="center"><button type="button" class="button primary" data-action="ask" data-icon="gitbook-assistant">How can we help?</button><a href="https://status.example" class="button secondary">Status</a></p>',
+    '',
+    'Read <a href="/docs/guide.md" class="button primary" data-icon="rocket-launch">the guide</a> or <strong>ask</strong> <i class="fa-heart">:heart:</i>.',
+    '',
+    '<h2 align="center">What can we help you find?</h2>',
+    '',
+    '{% code title="app.js" overflow="wrap" %}', '```js', 'const a = 1;', '```', '{% endcode %}',
+    '',
+    '<details>', '', '<summary><strong>API key</strong></summary>', '', '* one', '', '</details>',
+    '',
+    '{% embed url="<https://github.com/example/repo>" %}',
+  ];
+  it('reads GitBook HTML blocks: card tables, button links, assistant prompts, align wrappers, titled code and details summaries', () => {
+    const doc = markdownToIr(gitbookHtml.join('\n'), { platform: 'gitbook', file: 'p.md', pageId: 'p' });
+    const shape = (blocks: Block[]): unknown[] => blocks.map((b) => (b.type === 'component' ? { [b.name]: b.props, children: shape(b.children) }
+      : b.type === 'paragraph' ? `p:${inlineText(b.children)}` : b.type === 'heading' ? `h${b.depth}:${inlineText(b.children)}` : b.type === 'code' ? `code:${b.title}:${b.value}` : b.type));
+    expect(shape(doc.children)).toEqual([
+      { cards: { 'data-view': 'cards' }, children: [{ card: { icon: 'leaf', title: 'No code', href: '/docs/start', image: 'https://x.example/cover.jpg' }, children: ['p:Start in 5 minutes & more.'] }] },
+      { button: { 'data-action': 'ask' }, children: ['p:How can we help?'] },
+      'p:Status',
+      'p:Read the guide or ask .',
+      'h2:What can we help you find?',
+      'code:app.js:const a = 1;',
+      { details: { summary: 'API key' }, children: ['list'] },
+      { embed: { src: 'https://github.com/example/repo' }, children: [] },
+    ]);
+    const links: string[] = [];
+    walkBlocks(doc.children, (b) => { if (b.type === 'paragraph') for (const i of b.children) if (i.type === 'link') links.push(i.url); });
+    expect(links).toEqual(['https://status.example', '/docs/guide']);
+  });
+  it('resolves GitBook blocks through the mapping table to valid MDX, dropping assistant prompts as platform chrome', () => {
+    const w = mkdtempSync(join(tmpdir(), 'dai-gb-')); ensureWorkspace(w);
+    const source = [...gitbookHtml, '',
+      '{% stepper %}', '{% step %}', '### Create an account', '', 'Sign up.', '{% endstep %}', '{% endstepper %}', '',
+      '{% columns %}', '{% column width="50%" %}', 'Left.', '{% endcolumn %}', '{% column %}', 'Right.', '{% endcolumn %}', '{% endcolumns %}', '',
+      '{% updates format="full" %}', '{% update date="2025-12-03" tags="feature,fix" %}', '## Product update', '', 'Improved.', '{% endupdate %}', '{% endupdates %}',
+      '',
+      // code nested in a component is indented; the validator must still read it as code
+      '{% tabs %}', '{% tab title="TypeScript" %}', '```ts', "import type { A } from 'a';", 'export default { a: 1 } satisfies A;', '```', '{% endtab %}', '{% endtabs %}',
+    ].join('\n');
+    const doc = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' });
+    const engine = new RulesEngine({ platform: 'gitbook', mappings: loadMappings([join(repoRoot, 'skills/migrate-gitbook/mappings/gitbook.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const mdx = docToMdx(engine.resolveDoc(doc));
+    expect(validateMdx(mdx)).toEqual([]);
+    // a Step title stands for the heading it replaced, and an assistant prompt's text is chrome: nothing authored is missing
+    expect(mdxHeadingOutline(mdx)).toEqual(headingOutline(doc));
+    expect(proseSegments(doc).filter((segment) => !normaliseMdxText(mdx).includes(segment))).toEqual([]);
+    for (const expected of ['<Columns cols={2}>', '<Card title="No code" href="/docs/start" icon="leaf" image="https://x.example/cover.jpg">', '<Steps>', '<Step title="Create an account" titleType="h3">', '<Update label="2025-12-03">', '<Expandable title="API key">', '```js title="app.js"', '[https://github.com/example/repo](https://github.com/example/repo)', 'Left.', 'Right.']) expect(mdx).toContain(expected);
+    expect(mdx).not.toContain('How can we help');
+    expect(mdx).not.toMatch(/<(?:button|columns|column|updates|update|step|stepper|cards|card|details|summary)\b/);
+    const button = doc.children.find((b) => b.type === 'component' && b.name === 'button')!;
+    expect(isHtmlChromeNode(button)).toBe(true);
+    expect(isHtmlChromeNode({ ...(button as ComponentNode), props: {} })).toBe(false);
+  });
+  it('links GitBook pages by their page path rather than the published .md, and keeps a broken link as its text', () => {
+    const source = [
+      'See [Setup](/space/guides/setup.md#install), the [section](/space/help/readme.md), [Quickstart](broken://pages/abc) and [site](https://x.example/a.md).',
+      '',
+      '<table data-view="cards"><thead><tr><th></th><th data-hidden data-card-target data-type="content-ref"></th></tr></thead><tbody><tr><td><strong>Guides</strong></td><td><a href="broken://pages/def">Broken link</a></td></tr></tbody></table>',
+    ].join('\n');
+    const [paragraph, cards] = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' }).children;
+    const inlines = paragraph.type === 'paragraph' ? paragraph.children : [];
+    expect(inlines.filter((i) => i.type === 'link').map((i) => (i as { url: string }).url)).toEqual(['/space/guides/setup#install', '/space/help', 'https://x.example/a.md']);
+    expect(inlineText(inlines)).toBe('See Setup, the section, Quickstart and site.');
+    const card = (cards as ComponentNode).children[0] as ComponentNode;
+    expect(card).toMatchObject({ name: 'card', props: { title: 'Guides' } });
+    expect(card.props.href).toBeUndefined();
+  });
+  it('escapes an ordered-list marker at its period, so a numbered heading keeps no visible backslash', () => {
+    const mdx = docToMdx(markdownToIr('## 1. Plan the project\n\n2\\. Not a list\n', { platform: 'gitbook', file: 'p.md', pageId: 'p' }));
+    expect(mdx).toContain('## 1\\. Plan the project');
+    expect(mdx).toContain('2\\. Not a list');
+    expect(mdx).not.toContain('\\1.');
+    const reparsed = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' });
+    expect(reparsed.children.map((b) => (b.type === 'heading' || b.type === 'paragraph' ? inlineText(b.children) : b.type))).toEqual(['1. Plan the project', '2. Not a list']);
+  });
+  it('reads GitBook OpenAPI fences as API reference: an operation\'s parameters, request body and responses, and a models-page schema', () => {
+    const operation = {
+      openapi: '3.0.3', info: { title: 'Petstore', version: '1' }, security: [{ bearerAuth: [] }],
+      components: {
+        securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', description: 'Pass your API key as a Bearer token.' } },
+        schemas: {
+          NewPet: { type: 'object', required: ['name'], properties: { name: { type: 'string', description: "The animal's `name`." }, status: { $ref: '#/components/schemas/PetStatus' }, tags: { type: 'array', items: { type: 'string' } } } },
+          PetStatus: { type: 'string', enum: ['available', 'sold'] },
+          Pet: { allOf: [{ $ref: '#/components/schemas/NewPet' }, { type: 'object', required: ['id'], properties: { id: { type: 'integer', description: 'Unique id.' } } }] },
+        },
+        responses: { Unauthorized: { description: 'Missing or invalid API key.' } },
+      },
+      paths: { '/pets/{petId}': { patch: {
+        parameters: [{ name: 'petId', in: 'path', required: true, description: 'The pet.', schema: { type: 'integer' } }, { name: 'dryRun', in: 'query', schema: { type: 'boolean' } }],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/NewPet' } } } },
+        responses: { '200': { description: 'Updated.', content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } } }, '401': { $ref: '#/components/responses/Unauthorized' } },
+      } } },
+    };
+    const models = { openapi: '3.0.3', info: { title: 'Petstore', version: '1' }, components: { schemas: { PetStatus: { type: 'string', enum: ['available', 'sold'] } } } };
+    const source = ['## Update a pet', '', '```json', JSON.stringify(operation), '```', '', '## The PetStatus object', '', '```json', JSON.stringify(models), '```', '', '```json', '{"error": {"code": "not_found"}}', '```'].join('\n');
+    const doc = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' });
+    const w = mkdtempSync(join(tmpdir(), 'dai-gb-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'gitbook', mappings: loadMappings([join(repoRoot, 'skills/migrate-gitbook/mappings/gitbook.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const mdx = docToMdx(engine.resolveDoc(doc));
+    expect(validateMdx(mdx)).toEqual([]);
+    for (const expected of [
+      '**PATCH** `/pets/{petId}`',
+      '<ParamField header="Authorization" param-type="string" required={true}>',
+      'Pass your API key as a Bearer token.',
+      '<ParamField path="petId" param-type="integer" required={true}>',
+      '<ParamField query="dryRun" param-type="boolean" />',
+      '<ParamField body="name" param-type="string" required={true}>',
+      "The animal's `name`.",
+      '<ParamField body="status" param-type="string" enum="available,sold" />',
+      '<ParamField body="tags" param-type="string[]" />',
+      '`200` Updated.',
+      '<ResponseField name="id" field-type="integer" required={true}>',
+      '<ResponseField name="name" field-type="string" required={true}>',
+      '`401` Missing or invalid API key.',
+      '`string`, one of: `available`, `sold`',
+      '```json\n{"error": {"code": "not_found"}}\n```',
+    ]) expect(mdx).toContain(expected);
+    expect(mdx).not.toContain('"openapi"');
+  });
+  it('reads the Markdown GitBook escapes in a quoted API description as the code and bold it encodes', () => {
+    const source = ['> \\*\\*This endpoint is deprecated\\*\\*. Use \\`GET /pets\\` with a \\`status\\` filter.', '', 'Outside a quote, \\`literal\\` stays literal.'].join('\n');
+    const [quote, paragraph] = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' }).children;
+    const inlines = quote.type === 'blockquote' && quote.children[0]?.type === 'paragraph' ? quote.children[0].children : [];
+    expect(inlines.map((i) => i.type)).toEqual(['strong', 'text', 'inlineCode', 'text', 'inlineCode', 'text']);
+    expect(inlineText(inlines)).toBe('This endpoint is deprecated. Use GET /pets with a status filter.');
+    // an escaped backtick the author wrote outside a quoted description is kept as written
+    expect(paragraph.type === 'paragraph' && inlineText(paragraph.children)).toBe('Outside a quote, `literal` stays literal.');
   });
   it('converts a hint to a Callout through the gitbook mapping', () => {
     const w = mkdtempSync(join(tmpdir(), 'dai-gb-')); ensureWorkspace(w);
