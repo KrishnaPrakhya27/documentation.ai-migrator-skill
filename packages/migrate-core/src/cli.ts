@@ -36,6 +36,7 @@ import { readGitbookRepo } from './adapters/gitbook.js';
 import { readReadmeRepo, ReadmeApi, readmeApiTree } from './adapters/readme.js';
 import { scanComponentDefinitions, attachDefinitions } from './adapters/definitions.js';
 import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacement, placedPageIds, type GroupOpenapiRef, type SourceNavigationNode, type Tree, type TreePage } from './nav/tree.js';
+import { documentationSiteSettings, withoutSourceBranding } from './nav/site-settings.js';
 import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
 import { RulesEngine, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
@@ -47,7 +48,7 @@ import type { DocIR } from './ir/types.js';
 import { walkBlocks, inlineText } from './ir/types.js';
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
 import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
-import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver, siteAssetReferences, type SiteMediaMeta } from './assets/manifest.js';
+import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';
 import type { AssetProviderOptions } from './assets/providers.js';
 import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
 import { runGates, canonicalHash, previewPushBlockers, waivedExactnessGates, type GateResult, type SourceEvidence } from './verify/gates.js';
@@ -696,9 +697,6 @@ async function main() {
         const exp = readD360Export(existsSync(root) ? root : s.source.location);
         localResolver = d360MediaResolver(exp.mediaDir);
       }
-      // the site's logo and favicon recorded by discover are hosted like any page image
-      const metaPath = join(workspace, 'inventory', 'platform-meta.json');
-      const siteAssets = existsSync(metaPath) ? siteAssetReferences(readJson<SiteMediaMeta>(metaPath)) : [];
       const providerOptions: AssetProviderOptions = {
         workspace,
         provider: provider as AssetProviderOptions['provider'],
@@ -717,7 +715,7 @@ async function main() {
       if (provider === 'dai-api' && Object.values(providerOptions.dai!).some((x) => !x)) fail('dai-api provider requires DAI_API_BASE and DAI_API_KEY (the key is bound to one documentation)');
       let result: AssetsStageResult;
       try {
-        result = await runAssetsStage({ workspace, docs, fidelityMode, provider: providerOptions, fetcher, localResolver, siteAssets });
+        result = await runAssetsStage({ workspace, docs, fidelityMode, provider: providerOptions, fetcher, localResolver });
       } catch (error) {
         if (!(error instanceof UnhostedAssetsError)) throw error;
         markStage(workspace, 'assets', 'failed', `${error.entries.length} assets without a hosted URL`);
@@ -827,17 +825,13 @@ async function main() {
       }
       const unlisted = pagesWithoutPlacement(tree).filter((page) => page.navMembership === 'unlisted');
       const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta);
-      // Site presentation travels with the content; media URLs are the manifest's hosted ones, set by the assets stage.
-      const site = {
-        ...(meta.name ? { name: meta.name } : {}),
-        ...(meta.colors ? { colors: meta.colors } : {}),
-        ...(meta.favicon ? { favicon: meta.favicon } : {}),
-        ...(meta.logo ? { logo: meta.logo } : {}),
-        ...(meta.theme ? { theme: meta.theme } : {}),
-      };
+      // The documentation's name travels with it; the source's logo, favicon, colours and theme do not,
+      // so the migrated site shows Documentation.AI's own branding.
+      const site = documentationSiteSettings(meta);
       // initialRoute is a page path without a leading slash; normalise values written by earlier runs
       const initialRoute = typeof existing.initialRoute === 'string' ? existing.initialRoute.replace(/^\/+/, '') : undefined;
-      writeJson(docJsonPath, { ...existing, ...(initialRoute ? { initialRoute } : {}), ...site, ...navigation });
+      // An earlier run may have carried source branding into this file; it must not survive a re-run.
+      writeJson(docJsonPath, { ...withoutSourceBranding(existing), ...(initialRoute ? { initialRoute } : {}), ...site, ...navigation });
       const plan = readUrlPlan(workspace)!;
       const r = redirectMaps(plan);
       const platformExact = (meta.redirects?.exact ?? []).filter((x) => !r.exact.some((e) => e.source === x.source));

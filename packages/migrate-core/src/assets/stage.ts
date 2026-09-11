@@ -1,13 +1,12 @@
 /**
- * The assets stage: collect every media reference of the snapshot and the
- * site chrome, ingest through the configured provider and, in exact mode,
+ * The assets stage: collect every media reference of the snapshot, ingest through the configured provider and, in exact mode,
  * stop unless every asset has a hosted URL. Exact output never points at a
  * source host and never omits media, so an asset that cannot be hosted ends
  * the stage with the complete list instead of shipping a page without it.
  */
 import type { DocIR } from '../ir/types.js';
 import type { Fetcher } from '../scrape/fetcher.js';
-import { collectAssets, describeAssetEntry, unhostedAssets, type AssetEntry, type AssetManifest, type AssetReference } from './manifest.js';
+import { collectAssets, describeAssetEntry, unhostedAssets, type AssetEntry, type AssetManifest } from './manifest.js';
 import { ingestAssets, type AssetProviderOptions } from './providers.js';
 
 export type FidelityMode = 'exact' | 'permissive';
@@ -19,8 +18,6 @@ export interface AssetsStageOptions {
   provider: AssetProviderOptions;
   fetcher?: Fetcher;
   localResolver?: (url: string) => string | undefined;
-  /** Logo and favicon references, hosted alongside page media. */
-  siteAssets?: AssetReference[];
 }
 
 export interface AssetsStageResult {
@@ -52,7 +49,7 @@ export function assertAssetsHosted(manifest: AssetManifest, stage: string): void
 }
 
 export async function runAssetsStage(options: AssetsStageOptions): Promise<AssetsStageResult> {
-  const collected = await collectAssets(options.docs, options.workspace, { fetcher: options.fetcher, localResolver: options.localResolver, siteAssets: options.siteAssets, provider: options.provider.provider });
+  const collected = await collectAssets(options.docs, options.workspace, { fetcher: options.fetcher, localResolver: options.localResolver, provider: options.provider.provider });
   const manifest = await ingestAssets(collected, options.provider);
   if (options.fidelityMode === 'exact') assertAssetsHosted(manifest, 'assets');
   return { manifest, unhosted: unhostedAssets(manifest) };

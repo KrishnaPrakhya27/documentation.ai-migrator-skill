@@ -32,6 +32,7 @@ import { captureMigratorProvenance } from '../../src/session/provenance.js';
 import { sha256 } from '../../src/session/ids.js';
 import { stringify as toYaml } from 'yaml';
 import { writeManifest } from '../../src/assets/manifest.js';
+import { documentationSiteSettings } from '../../src/nav/site-settings.js';
 import type { DocIR } from '../../src/ir/types.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
@@ -123,7 +124,8 @@ export async function runOfflinePipeline(input: OfflineRunInput): Promise<Offlin
   const written = new Set(pages.map((page) => page.newPath!));
   const meta = input.platformMeta ?? {};
   const navigation = buildDocumentationNavigation(tree, written, meta);
-  writeFileSync(join(outputDir, 'documentation.json'), JSON.stringify({ ...meta, ...navigation }, null, 2));
+  // The same site settings the nav command writes, so the harness cannot carry what the CLI would not.
+  writeFileSync(join(outputDir, 'documentation.json'), JSON.stringify({ ...documentationSiteSettings(meta), ...navigation }, null, 2));
 
   const gateInput = (): GateInput => {
     const evidence = sourceEvidence(workspace, outputDir, tree, input.seedUrl, meta);

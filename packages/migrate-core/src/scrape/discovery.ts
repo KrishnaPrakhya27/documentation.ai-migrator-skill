@@ -38,7 +38,7 @@ export type DiscoveredNavigationNode =
   | { type: 'page'; url: string; title?: string }
   | { type: 'group'; label: string; children: DiscoveredNavigationNode[] };
 
-/** Site presentation as the source platform declares it. Media URLs are rehosted like any other asset. */
+/** Site presentation as the source platform declares it. Recorded as evidence; only the name is carried into the migrated site. */
 export interface SiteConfig {
   name?: string;
   theme?: string;

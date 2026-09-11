@@ -14,13 +14,13 @@ import { walkBlocks } from '../ir/types.js';
 import { sha256 } from '../session/ids.js';
 import type { Fetcher } from '../scrape/fetcher.js';
 
-export type AssetReferenceKind = 'image' | 'video' | 'audio' | 'poster' | 'logo' | 'favicon';
+export type AssetReferenceKind = 'image' | 'video' | 'audio' | 'poster';
 
-/** One use of an asset URL: page media (image, video, audio, poster) or site chrome (logo, favicon). */
+/** One use of an asset URL by a page: an image, video, audio file or poster. Source branding is never an asset of a migration. */
 export interface AssetReference {
   kind: AssetReferenceKind;
   url: string;
-  /** Referencing page; absent for site chrome. */
+  /** Referencing page. */
   page?: { id: string; source: string };
   /** Alt text of an image node; an empty string counts towards `altMissing`. */
   alt?: string;
@@ -84,15 +84,6 @@ function documentAssetReferences(doc: DocIR): AssetReference[] {
   return out;
 }
 
-/** Logo and favicon of inventory/platform-meta.json; site chrome is hosted through the same manifest as page media. */
-export interface SiteMediaMeta { logo?: { light?: string; dark?: string }; favicon?: string }
-
-export function siteAssetReferences(meta: SiteMediaMeta): AssetReference[] {
-  const out: AssetReference[] = [];
-  for (const url of [meta.logo?.light, meta.logo?.dark]) if (url) out.push({ kind: 'logo', url });
-  if (meta.favicon) out.push({ kind: 'favicon', url: meta.favicon });
-  return out;
-}
 
 function missingAlt(references: AssetReference[]): number {
   return references.filter((reference) => reference.alt === '').length;
@@ -150,8 +141,6 @@ export interface CollectAssetsOptions {
   fetcher?: Fetcher;
   localResolver?: (url: string) => string | undefined;
   provider?: string;
-  /** Site chrome (logo, favicon) hosted alongside page media. */
-  siteAssets?: AssetReference[];
 }
 
 /**
@@ -167,7 +156,7 @@ export async function collectAssets(docs: DocIR[], workspace: string, opts: Coll
   mkdirSync(originalDir, { recursive: true, mode: 0o700 });
   mkdirSync(readyDir, { recursive: true, mode: 0o700 });
   const referencesByUrl = new Map<string, AssetReference[]>();
-  for (const reference of [...docs.flatMap(documentAssetReferences), ...(opts.siteAssets ?? [])]) {
+  for (const reference of docs.flatMap(documentAssetReferences)) {
     referencesByUrl.set(reference.url, [...(referencesByUrl.get(reference.url) ?? []), reference]);
   }
   // an asset the snapshot no longer references is not part of this migration
@@ -228,9 +217,9 @@ export function describeAssetEntry(entry: AssetEntry): string {
   return `${entry.sourceUrls[0]} (${uses}): ${state}`;
 }
 
-const REFERENCE_KIND_ORDER: AssetReferenceKind[] = ['image', 'video', 'audio', 'poster', 'logo', 'favicon'];
+const REFERENCE_KIND_ORDER: AssetReferenceKind[] = ['image', 'video', 'audio', 'poster'];
 
-/** "1 image, 1 video, 2 logos, 1 favicon" for stage summaries; kinds with no references are omitted. */
+/** "1 image, 1 video" for stage summaries; kinds with no references are omitted. */
 export function referenceTally(m: AssetManifest): string {
   const counts = new Map<AssetReferenceKind, number>();
   for (const entry of Object.values(m.entries)) for (const reference of entry.references) counts.set(reference.kind, (counts.get(reference.kind) ?? 0) + 1);

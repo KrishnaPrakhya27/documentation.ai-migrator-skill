@@ -22,7 +22,7 @@ A hosted Mintlify site states its own content, and exact mode uses only those st
 - Records group-level `openapi` references; `nav` copies the spec into the output and sets `openapi` on the matching group.
 - Resolves `import X from "/snippets/x.mdx"` and inlines `<X />` (no props) from the repo's `snippets/`; `.jsx` snippets and snippets used with props stay as source components for review.
 - Lifts `## Title {#custom-id}` into the anchor map; shims are emitted where inbound links need them.
-- Copies `name`, `colors` and `favicon` into `documentation.json`.
+- Copies `name` into `documentation.json`. The source's `logo`, `favicon`, `colors` and `theme` are recorded in `inventory/platform-meta.json` but never carried: the migrated site shows Documentation.AI's own branding.
 - Scans `snippets/`, `components/`, `src/components/` and `custom-blocks/` for component definitions and attaches their hashes to signatures, so custom components cluster per definition.
 
 ## Procedure

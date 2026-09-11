@@ -20,7 +20,7 @@ The rendered navigation lives in the Next.js Flight payload as `scopedNav`. On s
 
 `extractDomSidebarNavigation` reads the rendered `#sidebar-content` (group headings via `.sidebar-group-header`) as a second, independent witness. It is the navigation source on sites that embed none, and elsewhere the `navigation-exact` gate cross-checks the written navigation against a fresh extraction from the frozen source.
 
-`docsConfig` in the same payload carries the site name, colours, logo and favicon; these are written to `inventory/platform-meta.json` and into `documentation.json`.
+`docsConfig` in the same payload carries the site name, colours, logo, favicon and theme. All are recorded in `inventory/platform-meta.json`; only the name is written to `documentation.json`. The rest is the source's branding, so the migrated site shows Documentation.AI's own.
 
 ## Canonical hosts
 A Mintlify site is served under both `<slug>.mintlify.site` and `<slug>.mintlify.app`. The profile declares the pair, so a URL on either host is the same page: the fetch allowlist admits both and every discovered URL is rewritten onto the seed origin. Without this the sitemap Mintlify publishes on the paired host is silently dropped and no page gets sitemap provenance.
