@@ -15,10 +15,17 @@ export interface SerializeOptions {
 
 const MDX_TEXT_ESCAPES: Array<[RegExp, string]> = [
   [/\\/g, '\\\\'],
-  [/\{/g, '\\{'],
-  [/\}/g, '\\}'],
-  [/<(?=[A-Za-z\/!])/g, '&lt;'],
+  // braces as character references, as attribute values already are: the strict validator reads any {…} on a line,
+  // escaped or not, as an expression
+  [/\{/g, '&#123;'],
+  [/\}/g, '&#125;'],
+  // every `<`, not only one before a letter: in `<<remove` the first `<` would otherwise open a tag MDX cannot parse
+  [/</g, '&lt;'],
   [/^(\s*)([#>+\-*])(?=\s)/gm, '$1\\$2'],
+  // a backtick in text is literal: left bare, it pairs with the next code span's backtick (even a later table row's)
+  [/`/g, '\\`'],
+  // text that starts a line with a fence marker would open a code block
+  [/^(\s*)(~{3,})/gm, '$1\\$2'],
   // a backslash escapes punctuation only, so an ordered-list marker is escaped at its period ("\1." renders the backslash)
   [/^(\s*)(\d+)\.(?=\s)/gm, '$1$2\\.'],
   [/(\*|_)(?=\S)/g, '\\$1'],
@@ -169,7 +176,12 @@ export function frontmatterToYaml(fm: Frontmatter): string {
     data[k] = v;
   }
   if (fm.jsonLd) data.jsonLd = fm.jsonLd;
-  return `---\n${toYaml(data, { lineWidth: 0 }).trimEnd()}\n---\n`;
+  // The platform compiles each file whole as MDX, frontmatter included, so a `{`, `}` or `<` in a value opens an
+  // expression or a tag. YAML's \u escapes carry the same characters without writing them.
+  const lines = Object.entries(data).map(([key, value]) => (typeof value === 'string' && /[{}<]/.test(value)
+    ? `${key}: ${JSON.stringify(value).replace(/[{}<]/g, (c) => `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`)}`
+    : toYaml({ [key]: value }, { lineWidth: 0 }).trimEnd()));
+  return `---\n${lines.join('\n')}\n---\n`;
 }
 
 export function docToMdx(doc: DocIR, opts: SerializeOptions = {}): string {

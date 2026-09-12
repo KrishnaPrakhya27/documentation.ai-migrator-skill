@@ -25,6 +25,20 @@ export interface ScrapeProfile {
   navLinkSelector?: string;
   /** Group heading inside the rendered sidebar. Required to recover navigation from the DOM as an independent witness. */
   navGroupSelector?: string;
+  /** List holding a sidebar page's subpages, rendered as the next sibling of the page's link. The link then names a nested group. */
+  navChildListSelector?: string;
+  /**
+   * Site-level section switcher rendered outside the page sidebar (GitBook renders one
+   * sidebar per section). Each match is a section link; the section becomes a `tab`
+   * container holding the sidebar its own pages render, which is the structure the
+   * source presents. Without it a multi-section site collapses into one flat sidebar.
+   */
+  navSectionSelector?: string;
+  /**
+   * Badge or tag rendered inside a sidebar entry (GitBook's "Beta" tag). Its text is not
+   * part of the label the source states, so it is excluded rather than concatenated onto it.
+   */
+  navBadgeSelector?: string;
   recognisers: ComponentRecogniser[];
   /** Elements the theme renders as paragraphs without a <p> tag. */
   paragraphSelectors?: string[];
@@ -130,7 +144,10 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     removeSelectors: ['.rm-Header', '.rm-ToC', '.rm-Pagination', '.rm-TryIt', '.rm-PlaygroundRequest', '.rm-PlaygroundResponse', 'nav', 'header', 'footer'],
     navSelector: '.rm-Sidebar',
     navLinkSelector: '.rm-Sidebar-link',
-    navGroupSelector: '.rm-Sidebar-heading',
+    // Current ReadMe renders each category as a collapsible `button.rm-Sidebar-category`; older hubs used `.rm-Sidebar-heading`.
+    navGroupSelector: '.rm-Sidebar-heading, .rm-Sidebar-category',
+    navChildListSelector: '.rm-Sidebar-list',
+    navSectionSelector: '.rm-Header-bottom-link',
     chromeStrings: [...COMMON_CHROME_STRINGS, 'Powered by ReadMe', 'Suggest Edits', 'Ask AI', 'Did this page help you?', 'Updated'],
     recognisers: [
       ...EMOJI_CALLOUT,
@@ -208,8 +225,11 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     articleSelector: 'main',
     removeSelectors: ['aside', 'nav', 'header', 'footer', '[data-testid="page-footer"]', '.toc'],
     navSelector: 'aside',
-    navLinkSelector: 'aside a.toclink, aside a[href]',
-    navGroupSelector: 'aside [data-testid="table-of-contents-group"], aside li > .group-header',
+    navLinkSelector: 'aside a.toclink',
+    navBadgeSelector: 'aside [data-tag]',
+    navGroupSelector: 'aside .toc-group, aside [data-testid="table-of-contents-group"]',
+    navChildListSelector: 'aside li div',
+    navSectionSelector: '[data-gb-sections] a[href]',
     chromeStrings: [...COMMON_CHROME_STRINGS, 'Powered by GitBook', 'Was this helpful?', 'Last updated', 'Ask or search…', 'Ctrl K'],
     recognisers: [
       { selector: 'button[data-action=ask]', name: 'button', props: { 'data-action': '@attr:data-action' } },

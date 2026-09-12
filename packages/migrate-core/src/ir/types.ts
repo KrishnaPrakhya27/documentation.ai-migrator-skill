@@ -120,6 +120,31 @@ export function walkBlocks(nodes: Block[], visit: (n: Block, depth: number, pare
   }
 }
 
+/**
+ * The blocks rebuilt bottom-up: `inline` is applied to every inline node after its children, and `block` to every
+ * block after its children. It reaches paragraphs, headings, list items, quotes, table cells, figure captions and
+ * component children.
+ */
+export function mapBlocks(blocks: Block[], fns: { inline?: (node: Inline) => Inline; block?: (node: Block) => Block }): Block[] {
+  const inlines = (nodes: Inline[]): Inline[] => nodes.map((node) => {
+    const rebuilt = 'children' in node ? ({ ...node, children: inlines(node.children) } as Inline) : node;
+    return fns.inline ? fns.inline(rebuilt) : rebuilt;
+  });
+  return blocks.map((block) => {
+    let rebuilt: Block;
+    switch (block.type) {
+      case 'paragraph': case 'heading': rebuilt = { ...block, children: inlines(block.children) }; break;
+      case 'list': rebuilt = { ...block, children: block.children.map((item) => ({ ...item, children: mapBlocks(item.children, fns) })) }; break;
+      case 'blockquote': rebuilt = { ...block, children: mapBlocks(block.children, fns) }; break;
+      case 'table': rebuilt = { ...block, children: block.children.map((row) => ({ ...row, children: row.children.map((cell) => ({ ...cell, children: inlines(cell.children) })) })) }; break;
+      case 'figure': rebuilt = block.caption ? { ...block, caption: inlines(block.caption) } : block; break;
+      case 'dai': case 'component': rebuilt = { ...block, children: mapBlocks(block.children, fns) }; break;
+      default: rebuilt = block;
+    }
+    return fns.block ? fns.block(rebuilt) : rebuilt;
+  });
+}
+
 /** Plain text of inline content, for prose matching and signatures. */
 export function inlineText(nodes: Inline[] | undefined): string {
   if (!nodes) return '';

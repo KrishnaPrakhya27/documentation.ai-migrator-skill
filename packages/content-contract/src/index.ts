@@ -83,7 +83,8 @@ const RESIDUAL_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /\{\{\s*snippet\./m, label: 'Document360 snippet token' },
   { re: /@embed\[/m, label: 'ReadMe embed' },
   { re: /<<\s*glossary:/m, label: 'ReadMe glossary variable' },
-  { re: /^>\s*(📘|👍|🚧|❗)/m, label: 'ReadMe emoji callout' },
+  // a ReadMe callout is a quote that opens with the emoji; the same emoji on a later line of a quote is its text
+  { re: /(?<!(?:^|\n)[ \t]*>[^\n]*\n)^[ \t]*>\s*(📘|👍|🚧|❗)/m, label: 'ReadMe emoji callout' },
   { re: /<(Note|Tip|Warning|Info|Check|Accordion|AccordionGroup|Frame|Tooltip|Badge|Icon|Panel|Tiles|Tree|Banner|RequestExample|ResponseExample)\b/m, label: 'Mintlify component' },
 ];
 

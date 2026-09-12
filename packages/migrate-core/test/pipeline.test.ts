@@ -7,13 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { fingerprint } from '../src/scrape/fingerprint.js';
 import { legalisePath, headingSlug, slugify } from '../src/urls/slugger.js';
 import { defaultUrlPlan, redirectMaps, anchorMap, applyUrlPlan } from '../src/urls/plan.js';
+import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor } from '../src/urls/site-links.js';
 import { buildDocumentationNavigation, buildNavigation, pagesWithoutPlacement, placedPageIds, type Tree, type TreePage } from '../src/nav/tree.js';
-import { loadContract, validateNavigation } from '@dai/content-contract';
+import { loadContract, validateMdx, validateNavigation } from '@dai/content-contract';
 import { RulesEngine, loadMappings, type MappingTable } from '../src/components/rules-engine.js';
 import { DecisionLog } from '../src/log/decisions.js';
 import { Fetcher, isPublicAddress, type FetchImpl } from '../src/scrape/fetcher.js';
 import { remoteOrg, assertRemoteAllowed } from '../src/write/migration-branch.js';
-import { EXACT_FAMILY_GATE_IDS, mdxTableSignatures, previewPushBlockers, REQUIRED_RELEASE_GATE_IDS, runGates, tableSignatures, waivedExactnessGates, type GateInput } from '../src/verify/gates.js';
+import { EXACT_FAMILY_GATE_IDS, headingOutline, mdxHeadingOutline, mdxTableSignatures, normaliseMdxText, previewPushBlockers, proseSegments, REQUIRED_RELEASE_GATE_IDS, runGates, tableSignatures, waivedExactnessGates, type GateInput } from '../src/verify/gates.js';
 import { unreadableImageDimensions } from '../src/ir/dimensions.js';
 import { chromeDump, pinnedResolverRules, runBrowserContentGate, runBrowserFragmentGate } from '../src/verify/browser.js';
 import { authoredContentSnapshot, fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from '../src/verify/fidelity.js';
@@ -23,7 +24,7 @@ import { PROFILES, htmlAdapterOptions } from '../src/scrape/profiles.js';
 import { docToMdx } from '../src/ir/to-dai-mdx.js';
 import { ensureWorkspace, assertOutsidePlugin, writeSession, type Session } from '../src/session/workspace.js';
 import { Ledger } from '../src/ledger/dispositions.js';
-import { walkBlocks, type Block, type CodeNode, type DaiComponentNode, type DocIR, type ImageNode } from '../src/ir/types.js';
+import { inlineText, walkBlocks, type Block, type CodeNode, type DaiComponentNode, type DocIR, type ImageNode } from '../src/ir/types.js';
 import { collectAssets, readManifest, writeManifest } from '../src/assets/manifest.js';
 import { applyBlockExclusions, unmatchedBlockExclusions } from '../src/ir/exclusions.js';
 import { firecrawlStatusUrl } from '../src/scrape/firecrawl.js';
@@ -86,6 +87,113 @@ describe('urls', () => {
       { id: 'home', title: 'Home', source: 'index.mdx', group: [], order: 0, oldPath: '/', migrate: true },
     ] };
     expect(defaultUrlPlan(tree).pages[0]).toMatchObject({ old: '/', new: 'index' });
+  });
+  it('lets a page already at a legal path keep it when an adjusted path collides, so no redirect chains', () => {
+    const tree: Tree = { scope: 'full', platform: 'readme', pages: [
+      { id: 'underscored', title: 'Coupons', source: 'x', group: [], order: 0, oldPath: '/docs/issue-goodwill-points_coupons', migrate: true },
+      { id: 'hyphenated', title: 'Coupons', source: 'y', group: [], order: 1, oldPath: '/docs/issue-goodwill-points-coupons', migrate: true },
+    ] };
+    const plan = defaultUrlPlan(tree);
+    expect(plan.pages.map((page) => [page.id, page.new])).toEqual([['underscored', 'docs/issue-goodwill-points-coupons-2'], ['hyphenated', 'docs/issue-goodwill-points-coupons']]);
+    expect(redirectMaps(plan).issues).toEqual([]);
+  });
+  it('serializes braces and less-thans the validator and parser accept, and reads quoted tables and empty headings back as the source has them', () => {
+    const md = 'Use {host URL}/ui and click <<remove, since 1 < 2.\n\nRules: >, <, >=, <=, =\n\n**Example**:` notebook-eucrm`, where it runs.\n\n> | Flag | What it allows |\n> | --- | --- |\n> | `A` | yes |\n\n##\n\nText after the empty heading.\n\n- ### A heading in a list\n';
+    const doc = markdownToIr(md, { platform: 'readme', file: 'p.md', pageId: 'p' });
+    const mdx = docToMdx(doc);
+    // the strict validator reads any {…} on a line as an expression, so the body carries no brace characters
+    expect(mdx.split('\n---\n').slice(1).join('\n')).not.toMatch(/[{}]/);
+    const reparsed = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' });
+    expect(inlineText((reparsed.children[0] as Extract<Block, { type: 'paragraph' }>).children)).toBe('Use {host URL}/ui and click <<remove, since 1 < 2.');
+    expect(mdxTableSignatures(mdx)).toEqual(tableSignatures(doc));
+    expect(mdxTableSignatures(mdx)).toHaveLength(1);
+    expect(mdxHeadingOutline(mdx)).toEqual(headingOutline(doc));
+    expect(headingOutline(doc)).toContain('3:a heading in a list');
+    // every prose segment, braces, less-thans and padded code spans included, is found in the serialized page
+    expect(proseSegments(doc).filter((segment) => !normaliseMdxText(mdx).includes(segment))).toEqual([]);
+  });
+  it('writes frontmatter values holding braces or less-thans so the whole file still parses as MDX, and reads them back unchanged', () => {
+    const description = 'Open it via URL: \\{host\\}/ui with payload { "eventName": "tierUpgraded" } in the format <audience>…';
+    const mdx = docToMdx({ ...markdownToIr('Body.', { platform: 'readme', file: 'p.md', pageId: 'p' }), frontmatter: { title: 'Payload <v2>', description } });
+    const [, yamlBlock] = mdx.match(/^---\n([\s\S]*?)\n---\n/)!;
+    expect(yamlBlock).not.toMatch(/[{}<]/);
+    expect(() => markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' })).not.toThrow();
+    const reparsed = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' });
+    expect(reparsed.frontmatter).toMatchObject({ title: 'Payload <v2>', description });
+  });
+  it('writes text that starts a line with a fence marker as text, so it never opens a code block', () => {
+    const doc = markdownToIr('Body.', { platform: 'readme', file: 'p.md', pageId: 'p' });
+    const text = (value: string) => ({ id: `t-${value}`, type: 'paragraph' as const, children: [{ id: `i-${value}`, type: 'text' as const, value }] });
+    const mdx = docToMdx({ ...doc, children: [text('Here is the updated HTML: ```html'), text(' ```'), text('~~~ tilde'), text('After.')] });
+    // the platform rejects any line that trims to an unclosed fence
+    expect(mdx.split('\n').filter((line) => /^(`{3,}|~{3,})/.test(line.trim()))).toEqual([]);
+    const reparsed = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' });
+    expect(reparsed.children.map((b) => b.type)).toEqual(['paragraph', 'paragraph', 'paragraph', 'paragraph']);
+    expect(inlineText((reparsed.children[3] as Extract<Block, { type: 'paragraph' }>).children)).toBe('After.');
+  });
+  it('escapes a stray backtick in a table cell so the next row’s code span stays code', () => {
+    const source = ['<Table>', '  <thead>', '    <tr>', '      <th>', '        Field', '      </th>', '', '      <th>', '        Description', '      </th>', '    </tr>', '  </thead>', '', '  <tbody>', '    <tr>', '      <td>', '        Delimiter', '      </td>', '', '      <td>', '        For example, `,` for comma-separated or `', '      </td>', '    </tr>', '', '    <tr>', '      <td>', '        Bottom', '      </td>', '', '      <td>', '        For example, `</records>`.', '      </td>', '    </tr>', '  </tbody>', '</Table>'].join('\n');
+    const doc = markdownToIr(source, { platform: 'readme', file: 'p.md', pageId: 'p' });
+    const mdx = docToMdx(doc);
+    expect(() => markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' })).not.toThrow();
+    const table = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' }).children[0] as Extract<Block, { type: 'table' }>;
+    expect(table.children[2].children[1].children).toMatchObject([{ type: 'text' }, { type: 'inlineCode', value: '</records>' }, { type: 'text' }]);
+    expect(mdxTableSignatures(mdx)).toEqual(tableSignatures(doc));
+  });
+  it('flags a ReadMe emoji callout only where it opens a quote, not the same emoji on a later line of one', () => {
+    const residual = (mdx: string) => validateMdx(`---\ntitle: T\n---\n\n${mdx}\n`).filter((issue) => issue.code === 'residual-source-syntax');
+    expect(residual('> 📘 Note\n>\n> Body.')).toHaveLength(1);
+    expect(residual('Intro.\n\n> 🚧 Careful')).toHaveLength(1);
+    expect(residual('> ⚠️ **Note:**\n> Auto-approval needs a strategy.\n> 📘 For groups, requests are auto-approved.')).toEqual([]);
+  });
+  it('points a site link at its page’s new route, and keeps or sends to the source a link to a page the migration does not write', () => {
+    const tree: Tree = { scope: 'full', platform: 'readme', pages: [
+      { id: 'home', title: 'Home', source: 'https://docs.example/', group: [], order: 0, oldPath: '/', migrate: true },
+      { id: 'a', title: 'Entity', source: 'https://docs.example/docs/customer_entity', group: [], order: 1, oldPath: '/docs/customer_entity', aliases: ['/docs/entity'], migrate: true },
+      { id: 'b', title: 'Setup', source: 'https://docs.example/docs/setup', group: [], order: 2, oldPath: '/docs/setup', migrate: true },
+      { id: 'c', title: 'Gone', source: 'https://docs.example/docs/gone', group: [], order: 3, oldPath: '/docs/gone', migrate: false },
+    ] };
+    const applied = applyUrlPlan(tree, defaultUrlPlan(tree));
+    const keep = siteLinkTarget(siteLinksFor(applied, { sourcePages: ['https://docs.example/reference/listed'] }));
+    expect(keep('/docs/customer_entity#setup')).toBe('/docs/customer-entity#setup');
+    expect(keep('/docs/entity#setup')).toBe('/docs/customer-entity#setup');
+    expect(keep('/docs/setup/')).toBe('/docs/setup');
+    expect(keep('/docs/setup?tab=1')).toBe('/docs/setup?tab=1');
+    expect(keep('/docs/customer-entity')).toBe('/docs/customer-entity');
+    expect(keep('/')).toBe('/');
+    // a full URL on the source's own host is a site link too, so a migrated page's link leaves the old site
+    expect(keep('https://docs.example/docs/customer_entity#/')).toBe('/docs/customer-entity#/');
+    // page-relative links use the current source page as their base before following the target's route
+    expect(keep('./customer_entity?tab=1#name', 'https://docs.example/docs/setup')).toBe('/docs/customer-entity?tab=1#name');
+    expect(keep('../docs/entity', '/docs/setup')).toBe('/docs/customer-entity');
+    // by default a link to a page the migration does not write stays as authored, never assuming the old site stays up
+    expect(keep('/docs/gone')).toBe('/docs/gone');
+    expect(keep('https://docs.example/docs/gone')).toBe('https://docs.example/docs/gone');
+    for (const unchanged of ['https://elsewhere.example/x', '#local', 'mailto:help@example.com', '//cdn.example/x.png']) expect(keep(unchanged)).toBe(unchanged);
+    // `source` sends only pages the source is known to publish there; a path no source page has stays, for internal-links to fail
+    const source = siteLinksFor(applied, { unmigrated: 'source', sourcePages: ['https://docs.example/reference/listed'] });
+    const toSource = siteLinkTarget(source);
+    expect(toSource('/docs/gone')).toBe('https://docs.example/docs/gone');
+    expect(toSource('/reference/listed')).toBe('https://docs.example/reference/listed');
+    expect(toSource('/reference/add-customer')).toBe('/reference/add-customer');
+    expect(siteLinkResolver(source)('/reference/add-customer')).toEqual({ target: '/reference/add-customer', kind: 'kept', knownSourcePage: false });
+    expect(siteLinkResolver(source)('/docs/gone')).toEqual({ target: 'https://docs.example/docs/gone', kind: 'source', knownSourcePage: true });
+    // a repository or export source has no host, so only its routes change
+    const repoTree: Tree = { ...tree, pages: tree.pages.map((page) => ({ ...page, source: page.oldPath === '/' ? 'index.md' : `${page.oldPath!.replace(/^\//, '')}.md` })) };
+    const repo = siteLinkTarget(siteLinksFor(applyUrlPlan(repoTree, defaultUrlPlan(repoTree)), { unmigrated: 'source' }));
+    expect(repo('/docs/gone')).toBe('/docs/gone');
+    expect(repo('/docs/customer_entity')).toBe('/docs/customer-entity');
+    expect(repo('./customer_entity.md#name', 'docs/setup.md')).toBe('/docs/customer-entity#name');
+    // every link in a document follows, including those in table cells
+    const doc = markdownToIr('See [gone](/docs/gone).\n\n| Page |\n| --- |\n| [entity](https://docs.example/docs/customer_entity) |\n', { platform: 'generic', file: 'p.md', pageId: 'p' });
+    const links = JSON.stringify(retargetDocLinks(doc, toSource));
+    expect(links).toContain('"url":"https://docs.example/docs/gone"');
+    expect(links).toContain('"url":"/docs/customer-entity"');
+    const relativeDoc = markdownToIr('[entity](./customer_entity)\n\n<Card title="Entity" href="./entity">open</Card>', { platform: 'readme', file: 'https://docs.example/docs/setup', pageId: 'relative' });
+    const retargeted = JSON.stringify(retargetDocLinks(relativeDoc, keep));
+    expect(retargeted).toContain('"url":"/docs/customer-entity"');
+    expect(retargeted).toContain('"href":"/docs/customer-entity"');
+    expect(() => siteLinksFor({ ...applied, pages: [...applied.pages, { ...applied.pages[0], id: 'collision', oldPath: '/elsewhere', aliases: ['/docs/entity'], newPath: 'elsewhere' }] })).toThrow(/maps to both/);
   });
   it('shims only headings whose old id differs and has inbound links', () => {
     const inbound = new Map([['#mkd-123', 2]]);
@@ -486,6 +594,17 @@ describe('gate semantics', () => {
   const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
   const gateInput = (workspace: string, overrides: Partial<GateInput> = {}): GateInput => ({ workspace, outputDir: join(workspace, 'output'), sourceDocs: [], treePages: [], quarantinedPages: new Set(), excludedPages: new Set(), unreviewed: 0, pinnedContractVersion: '0.1.0', fidelityMode: 'exact', ...overrides });
   const gate = (gates: ReturnType<typeof runGates>, id: string) => gates.find((g) => g.id === id)!;
+
+  it('validates page-relative and component links from parsed output rather than only Markdown-link text', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'dai-link-gates-')); ensureWorkspace(ws);
+    const out = join(ws, 'output'); mkdirSync(join(out, 'guides'), { recursive: true }); mkdirSync(join(out, 'reference'), { recursive: true });
+    writeFileSync(join(out, 'guides', 'a.mdx'), '---\ntitle: A\n---\n\n[Reference](../reference/b)\n\n<Card title="Missing" href="../missing">Open</Card>\n\n<Card title="Legacy" href="https://docs.example/legacy">Old</Card>\n');
+    writeFileSync(join(out, 'reference', 'b.mdx'), '---\ntitle: B\n---\n\nBody.\n');
+    const links = { routes: {}, sourceBases: {}, sourcePages: ['/legacy'], hosts: ['docs.example'], origin: 'https://docs.example', unmigrated: 'keep' as const };
+    const gates = runGates(gateInput(ws, { fidelityMode: 'permissive', sourceEvidence: { pages: [], platform: 'readme', links } }));
+    expect(gate(gates, 'internal-links')).toMatchObject({ status: 'fail', count: 1, samples: ['guides/a.mdx → ../missing'] });
+    expect(gate(gates, 'unmigrated-links')).toMatchObject({ status: 'fail', count: 1, samples: ['guides/a.mdx → https://docs.example/legacy'] });
+  });
 
   it('passes conversion-fidelity and pages-accounted together when a page is held for a blocked snippet token', () => {
     const ws = mkdtempSync(join(tmpdir(), 'dai-held-')); ensureWorkspace(ws);

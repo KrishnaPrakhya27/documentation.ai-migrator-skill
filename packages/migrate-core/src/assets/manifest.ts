@@ -10,7 +10,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import sanitizeHtml from 'sanitize-html';
 import type { DocIR, Block, Inline } from '../ir/types.js';
-import { walkBlocks } from '../ir/types.js';
+import { mapBlocks, walkBlocks } from '../ir/types.js';
 import { sha256 } from '../session/ids.js';
 import type { Fetcher } from '../scrape/fetcher.js';
 
@@ -37,6 +37,8 @@ export interface AssetEntry {
   contentType?: string;
   /** Absolute URL to use in output; set by the provider. */
   finalUrl?: string;
+  /** Object key in Documentation.AI media storage (`org-<org>/doc-<doc>/<file>`); set by the s3 provider. */
+  storagePath?: string;
   status: 'pending' | 'downloaded' | 'ingested' | 'kept-external' | 'failed';
   error?: string;
   altMissing: number;
@@ -93,7 +95,7 @@ export interface AssetSource { kind: 'url' | 'file'; resolve: (url: string) => s
 
 const MEDIA_TYPES_BY_EXTENSION: Record<string, string> = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif',
-  '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.bmp': 'image/bmp', '.tif': 'image/tiff', '.tiff': 'image/tiff',
+  '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.bmp': 'image/bmp', '.tif': 'image/tiff', '.tiff': 'image/tiff', '.jfif': 'image/jpeg', '.jpe': 'image/jpeg',
   '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.m4v': 'video/x-m4v', '.ogv': 'video/ogg',
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.flac': 'audio/flac',
 };
@@ -234,22 +236,20 @@ export function finalUrlFor(m: AssetManifest, url: string): string {
 }
 
 export function rewriteAssetRefs(doc: DocIR, m: AssetManifest): DocIR {
-  const inl = (nodes: Inline[]): Inline[] => nodes.map((n) => (n.type === 'image' ? { ...n, url: finalUrlFor(m, n.url) } : 'children' in n ? { ...n, children: inl(n.children) } : n));
-  const walk = (blocks: Block[]): Block[] => blocks.map((b) => {
-    switch (b.type) {
-      case 'image': return { ...b, url: finalUrlFor(m, b.url) };
-      case 'figure': return { ...b, image: { ...b.image, url: finalUrlFor(m, b.image.url) } };
-      case 'paragraph': case 'heading': return { ...b, children: inl(b.children) } as Block;
-      case 'list': return { ...b, children: b.children.map((li) => ({ ...li, children: walk(li.children) })) };
-      case 'blockquote': return { ...b, children: walk(b.children) } as Block;
-      case 'dai': case 'component': {
-        const props = Object.fromEntries(Object.entries(b.props).map(([key, value]) => [key, componentAssetKind(b.name, key) && typeof value === 'string' ? finalUrlFor(m, value) : value]));
-        return { ...b, props, children: walk(b.children) } as Block;
-      }
-      default: return b;
-    }
-  });
-  return { ...doc, children: walk(doc.children) };
+  return {
+    ...doc,
+    children: mapBlocks(doc.children, {
+      inline: (n) => (n.type === 'image' ? { ...n, url: finalUrlFor(m, n.url) } : n),
+      block: (b): Block => {
+        switch (b.type) {
+          case 'image': return { ...b, url: finalUrlFor(m, b.url) };
+          case 'figure': return { ...b, image: { ...b.image, url: finalUrlFor(m, b.image.url) } };
+          case 'dai': case 'component': return { ...b, props: Object.fromEntries(Object.entries(b.props).map(([key, value]) => [key, componentAssetKind(b.name, key) && typeof value === 'string' ? finalUrlFor(m, value) : value])) };
+          default: return b;
+        }
+      },
+    }),
+  };
 }
 
 /** Document360 Media/ resolver: cdn.document360.io/.../Documentation/X.png → Media/X.png (unescaped, %20 decoded). */

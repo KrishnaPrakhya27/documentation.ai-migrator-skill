@@ -180,7 +180,7 @@ export async function preflight(opts: PreflightOptions): Promise<PreflightResult
     target.mediaApiAvailable = media.available;
     target.assetProvider = media.available ? 'dai-api' : opts.s3Configured ? 's3' : 'none';
     checks.push({ id: 'media-api', status: media.available ? 'ok' : 'not-checked', detail: media.available ? 'API-key media upload available' : `GET /api/v1/media → ${media.status}; API-key media upload is not available on this environment (platform dependency G7)` });
-    checks.push({ id: 'asset-provider', status: 'ok', detail: `assets will use --provider ${target.assetProvider}${target.assetProvider === 'none' ? ' (images keep source URLs; configure MIGRATION_S3_* or wait for the media API to release)' : ''}` });
+    checks.push({ id: 'asset-provider', status: 'ok', detail: `assets will use --provider ${target.assetProvider}${target.assetProvider === 'none' ? ' (images keep source URLs; set the Cloudflare R2 credentials and R2_IMAGES_BUCKET_NAME or wait for the media API to release)' : ''}` });
   } catch (e) {
     checks.push({ id: 'dai-api', status: 'fail', detail: `cannot reach DAI API: ${(e as Error).message}` });
   }

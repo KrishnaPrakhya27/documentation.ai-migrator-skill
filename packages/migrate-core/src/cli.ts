@@ -32,7 +32,7 @@ import { fingerprint } from './scrape/fingerprint.js';
 import { CanonicalHosts, Fetcher, type FetchOptions } from './scrape/fetcher.js';
 import { Firecrawl, readFirecrawlPage, type FirecrawlOptions } from './scrape/firecrawl.js';
 import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, type DiscoveredNavigationNode } from './scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, extractSectionTabs, sectionOfUrl, siteSectionNavigation, type DiscoveredNavigationNode } from './scrape/discovery.js';
 import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
 import { acquirePages, acquireFirecrawlPages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
 import { htmlToIr } from './ir/from-html.js';
@@ -45,6 +45,7 @@ import { scanComponentDefinitions, attachDefinitions } from './adapters/definiti
 import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacement, placedPageIds, type GroupOpenapiRef, type SourceNavigationNode, type Tree, type TreePage } from './nav/tree.js';
 import { documentationSiteSettings, withoutSourceBranding } from './nav/site-settings.js';
 import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
+import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor, type SiteLinks } from './urls/site-links.js';
 import { RulesEngine, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
 import { Ledger } from './ledger/dispositions.js';
@@ -56,7 +57,7 @@ import { walkBlocks, inlineText } from './ir/types.js';
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
 import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
 import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';
-import type { AssetProviderOptions } from './assets/providers.js';
+import { s3StorageFromEnv, s3StorageProblems, type AssetProviderOptions } from './assets/providers.js';
 import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
 import { runGates, canonicalHash, previewPushBlockers, waivedExactnessGates, type GateResult, type SourceEvidence } from './verify/gates.js';
 import { loadRawSourcePages, rawSourceIr, type RawSourcePage } from './verify/source-truth.js';
@@ -262,6 +263,16 @@ function sourceCanonicalHosts(workspace: string, seedUrl: string, profile: Scrap
   return new CanonicalHosts(new URL(seedUrl).origin, [...profileHostAliases(profile, new URL(seedUrl).hostname), ...recorded]);
 }
 
+/** How links resolve in this workspace's migrated site: the tree's routes, every path the frozen source is known to publish, the source's host aliases and the URL plan's choice for unmigrated links. */
+function siteLinksForWorkspace(workspace: string, tree: Tree): SiteLinks {
+  const manifest = existsSync(sourceManifestPath(workspace)) ? readJson<SourceManifest>(sourceManifestPath(workspace)) : undefined;
+  const llmsPath = join(workspace, 'inventory', 'llms.json');
+  const llms = existsSync(llmsPath) ? readJson<{ entries?: Array<{ path: string }> } | null>(llmsPath) : null;
+  const hosts = existsSync(canonicalHostsPath(workspace)) ? readJson<{ aliases?: string[] }>(canonicalHostsPath(workspace)).aliases ?? [] : [];
+  const sourcePages = [...(manifest?.pages ?? []).map((page) => page.location), ...(llms?.entries ?? []).map((entry) => entry.path)];
+  return siteLinksFor(tree, { unmigrated: readUrlPlan(workspace)?.unmigratedLinks ?? 'keep', sourcePages, hosts });
+}
+
 function readComponentPlan(workspace: string): Record<string, ComponentPlanEntry> {
   const p = join(workspace, 'plan', 'component-plan.yaml');
   if (!existsSync(p)) return {};
@@ -365,7 +376,7 @@ function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | un
   if (seed && home.html) {
     const origin = new URL(seed).origin;
     const extracted = tree.platform === 'mintlify' ? extractMintlifyNavigation(home.html, origin)?.navigation : undefined;
-    const fromDom = extracted ? undefined : extractDomSidebarNavigation(home.html, seed, origin, profile);
+    const fromDom = extracted ? undefined : reExtractDomNavigation(pages, tree, home, seed, origin, profile);
     const nodes = extracted ?? fromDom;
     if (nodes) {
       navigationSource = extracted ? 'platform-metadata' : 'dom-sidebar';
@@ -378,7 +389,32 @@ function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | un
       navigation = buildDocumentationNavigation({ ...tree, navigation: toSource(nodes) }, writtenPagePaths(workspace, tree), readPlatformMeta(workspace)).navigation;
     }
   }
-  return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route) };
+  return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route), links: siteLinksForWorkspace(workspace, tree) };
+}
+
+/**
+ * The rendered navigation, re-read from the frozen pages. A site divided into sections
+ * renders one sidebar per section, so each section's sidebar comes from a page inside it;
+ * discovery assembled the tabs the same way, from the same HTML.
+ */
+function reExtractDomNavigation(pages: RawSourcePage[], tree: Tree, home: RawSourcePage, seed: string, origin: string, profile: ScrapeProfile): DiscoveredNavigationNode[] | undefined {
+  const sections = home.html ? extractSectionTabs(home.html, seed, origin, profile) : undefined;
+  if (sections) {
+    const sourceById = new Map(tree.pages.map((page) => [page.id, page.source]));
+    const sidebars = new Map<string, DiscoveredNavigationNode[]>();
+    for (const page of pages) {
+      const url = sourceById.get(page.pageId);
+      if (!url || !page.html || !/^https?:\/\//.test(url)) continue;
+      const section = sectionOfUrl(url, sections);
+      if (!section || sidebars.has(section.url)) continue;
+      const dom = extractDomSidebarNavigation(page.html, url, origin, profile);
+      if (dom) sidebars.set(section.url, dom);
+      if (sidebars.size === sections.length) break;
+    }
+    const navigation = siteSectionNavigation(sections, sidebars);
+    if (navigation) return navigation;
+  }
+  return home.html ? extractDomSidebarNavigation(home.html, seed, origin, profile) : undefined;
 }
 
 /** The Documentation.AI renderer's sidebar container, used to check the deployed navigation. */
@@ -421,7 +457,7 @@ async function main() {
       ensureWorkspace(workspace);
       const contract = loadContract();
       const allowedOrgs = v['allowed-orgs']!.split(',').map((s) => s.trim()).filter(Boolean);
-      const s3Configured = !!((process.env.MIGRATION_S3_BUCKET ?? process.env.MIGRATION_R2_BUCKET) && process.env.MIGRATION_ASSET_PUBLIC_BASE);
+      const s3Configured = s3StorageProblems(s3StorageFromEnv(process.env)).length === 0;
       const pre = await preflight({ target: { landing: v.target as 'customer-org' | 'demo-org', repoRemote: v.remote }, allowedRemoteOrgs: allowedOrgs, daiApiBase: process.env.DAI_API_BASE, daiApiKey: process.env.DAI_API_KEY, s3Configured });
       for (const c of pre.checks) console.log(`  ${c.status === 'ok' ? '✔' : c.status === 'fail' ? '✖' : '·'} ${c.id}: ${c.detail}`);
       if (pre.checks.some((c) => c.status === 'fail')) fail('preflight failed; fix the connection issues above before migrating (nothing was written)');
@@ -825,18 +861,15 @@ async function main() {
       const providerOptions: AssetProviderOptions = {
         workspace,
         provider: provider as AssetProviderOptions['provider'],
-        s3: provider === 's3' ? {
-          bucket: process.env.MIGRATION_S3_BUCKET ?? process.env.MIGRATION_R2_BUCKET ?? '',
-          region: process.env.MIGRATION_S3_REGION ?? 'auto',
-          prefix: process.env.MIGRATION_S3_PREFIX,
-          publicBase: process.env.MIGRATION_ASSET_PUBLIC_BASE ?? '',
-          endpoint: process.env.MIGRATION_S3_ENDPOINT ?? process.env.MIGRATION_R2_ENDPOINT,
-          accessKeyId: process.env.MIGRATION_S3_ACCESS_KEY_ID ?? process.env.MIGRATION_R2_ACCESS_KEY_ID,
-          secretAccessKey: process.env.MIGRATION_S3_SECRET_ACCESS_KEY ?? process.env.MIGRATION_R2_SECRET_ACCESS_KEY,
-        } : undefined,
+        s3: provider === 's3' ? s3StorageFromEnv(process.env, s.target) : undefined,
         dai: provider === 'dai-api' ? { baseUrl: process.env.DAI_API_BASE ?? '', token: process.env.DAI_API_KEY ?? '' } : undefined,
       };
-      if (provider === 's3' && (!providerOptions.s3!.bucket || !providerOptions.s3!.publicBase)) fail('s3 provider requires MIGRATION_S3_BUCKET and MIGRATION_ASSET_PUBLIC_BASE');
+      if (provider === 's3') {
+        const problems = s3StorageProblems(providerOptions.s3!);
+        if (problems.length) fail(`s3 provider cannot write Documentation.AI media storage: ${problems.join('; ')}`);
+        const unset = (['video', 'files'] as const).filter((kind) => !providerOptions.s3!.buckets[kind]?.bucket);
+        if (unset.length) console.log(`· no ${unset.join(' or ')} bucket configured: those assets fail instead of landing in the image bucket`);
+      }
       if (provider === 'dai-api' && Object.values(providerOptions.dai!).some((x) => !x)) fail('dai-api provider requires DAI_API_BASE and DAI_API_KEY (the key is bound to one documentation)');
       let result: AssetsStageResult;
       try {
@@ -870,6 +903,12 @@ async function main() {
       for (const f of ['ledger/dispositions.jsonl', 'logging/decisions.jsonl']) { const p = join(workspace, f); if (existsSync(p)) writeFileSync(p, ''); }
       const ledger = new Ledger(workspace); const log = new DecisionLog(workspace, !!v['log-originals']);
       const engine = new RulesEngine({ platform: tree.platform, mappings: loadMappings(mappingPaths(tree.platform)), plan, ledger, log, iframeHosts: assetsPlan.iframeHosts });
+      // a link to another page follows it to its new route; one to a page this migration does not write is kept, or sent to
+      // the source site when the URL plan says so, and listed in report/unmigrated-links.json
+      const siteLinks = siteLinksForWorkspace(workspace, tree);
+      const siteLink = siteLinkTarget(siteLinks);
+      const resolveSiteLink = siteLinkResolver(siteLinks);
+      const unmigratedLinks: Array<{ pageId: string; route: string; url: string; target: string; action: 'kept' | 'source'; knownSourcePage: boolean }> = [];
       const byId = new Map(tree.pages.map((p) => [p.id, p]));
       const snippets = existsSync(join(workspace, 'inventory', 'snippets.json')) ? readJson<Array<{ token: string; body: string | null; resolution: string }>>(join(workspace, 'inventory', 'snippets.json')) : [];
       const blockedTokens = new Set(snippets.filter((x) => x.resolution === 'blocked' && !x.body).map((x) => x.token));
@@ -894,9 +933,14 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest);
+        const sourcePrepared = retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
-        const resolved = engine.resolveDoc(rewriteAssetRefs(withSnippets, manifest));
+        const recordSiteLink = (url: string, source?: string): string => {
+          const outcome = resolveSiteLink(url, source);
+          if (outcome && outcome.kind !== 'route') unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
+          return outcome?.target ?? url;
+        };
+        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(withSnippets, manifest), recordSiteLink));
         const sourceSnapshot = authoredContentSnapshot(sourcePrepared);
         const resolvedSnapshot = authoredContentSnapshot(resolved);
         const pass = fidelityEqual(sourceSnapshot, resolvedSnapshot);
@@ -914,6 +958,7 @@ async function main() {
         converted++;
       }
       writeFidelityRecords(workspace, fidelityRecords);
+      writeJson(join(workspace, 'report', 'unmigrated-links.json'), unmigratedLinks);
       if (s.hashes.openapi) {
         const specs = join(workspace, 'inventory', 'openapi.json');
         if (fileHash(specs) !== s.hashes.openapi) fail('OpenAPI manifest changed after acquisition');
@@ -1113,13 +1158,15 @@ async function main() {
         // The preview is compared against the raw source, not against the snapshot: the same
         // standard the local gates apply, on the deployed page.
         const rawByPageId = new Map((sourceEvidence?.pages ?? []).map((page) => [page.pageId, page]));
+        const previewSiteLink = siteLinkTarget(siteLinksForWorkspace(workspace, tree));
         const manifest = readManifest(workspace);
         const browserContent = await runBrowserContentGate(
           previewUrl,
           tree.pages.map((page) => {
             const raw = rawByPageId.get(page.id);
-            const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile) : undefined;
-            return { ...page, doc: fromSource ?? docs.find((doc) => doc.pageId === page.id) };
+            const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
+            const snapshot = docs.find((doc) => doc.pageId === page.id);
+            return { ...page, doc: fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink)) };
           }),
           {
             routes: writtenPagePaths(workspace, tree),

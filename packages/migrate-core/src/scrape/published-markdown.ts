@@ -7,11 +7,13 @@
  * declared description. Ordinary authored headings and blockquotes are never
  * guessed away.
  */
+import { splitFrontmatter } from '../ir/from-markdown.js';
+
 export interface PublishedMarkdownPage {
   body: string;
   title?: string;
   description?: string;
-  wrapper: 'mintlify-documentation-index' | 'gitbook-documentation-index' | 'none';
+  wrapper: 'mintlify-documentation-index' | 'gitbook-documentation-index' | 'readme-documentation-index' | 'none';
   /** A platform-generated trailer removed from the end of the body. */
   footer?: 'gitbook-agent-instructions';
 }
@@ -126,6 +128,7 @@ function leadingBlockquote(lines: string[], cursor: number): string[] {
  */
 export function unwrapPublishedMarkdown(source: string, platform: string, options: UnwrapOptions = {}): PublishedMarkdownPage {
   if (platform === 'gitbook') return unwrapGitbookMarkdown(source, options);
+  if (platform === 'readme') return unwrapReadmeMarkdown(source, options);
   if (platform !== 'mintlify') return { body: source, wrapper: 'none' };
   const lines = source.replace(/^\uFEFF/, '').split(/\r?\n/);
   let cursor = skipBlankLines(lines, 0);
@@ -149,6 +152,49 @@ export function unwrapPublishedMarkdown(source: string, platform: string, option
     cursor = skipBlankLines(lines, cursor + quote.length);
   }
   return { body: lines.slice(cursor).join('\n').replace(/\s+$/, '') + '\n', title, description, wrapper };
+}
+
+const README_INDEX_NOTICE = /^Fetch the complete documentation index at: \S+\/llms\.txt\. Use this file to discover all available pages before exploring further\./;
+/**
+ * ReadMe's published .md is `updatedAt` frontmatter, a plain paragraph pointing agents at
+ * `/llms.txt`, then `# <title>`, then the authored body. The paragraph is removed only when it
+ * is ReadMe's own notice; the frontmatter stays. The H1 is lifted as the title, and the paragraph
+ * after it as the description only when it equals `expectedDescription` after whitespace normalisation.
+ */
+function unwrapReadmeMarkdown(source: string, options: UnwrapOptions): PublishedMarkdownPage {
+  const unmarked = source.replace(/^\uFEFF/, '');
+  // frontmatter of any YAML shape stays at the top; one the parser rejects stays in the body, where inventory reports it
+  let frontmatter = '';
+  let rest = unmarked;
+  try {
+    rest = splitFrontmatter(unmarked, 'published Markdown').body;
+    frontmatter = unmarked.slice(0, unmarked.length - rest.length);
+  } catch {
+    rest = unmarked;
+  }
+  const lines = rest.split(/\r?\n/);
+  let cursor = skipBlankLines(lines, 0);
+  let wrapper: PublishedMarkdownPage['wrapper'] = 'none';
+  const notice = leadingParagraph(lines, cursor);
+  if (notice.length && README_INDEX_NOTICE.test(normaliseWhitespace(notice.join(' ')))) {
+    wrapper = 'readme-documentation-index';
+    cursor = skipBlankLines(lines, cursor + notice.length);
+  }
+
+  let title: string | undefined;
+  const heading = lines[cursor]?.match(/^#\s+(.+?)\s*$/);
+  if (heading) {
+    title = heading[1];
+    cursor = skipBlankLines(lines, cursor + 1);
+  }
+
+  let description: string | undefined;
+  const paragraph = leadingParagraph(lines, cursor);
+  if (paragraph.length && options.expectedDescription !== undefined && normaliseWhitespace(paragraph.join('\n')) === normaliseWhitespace(options.expectedDescription)) {
+    description = paragraph.join('\n').trim();
+    cursor = skipBlankLines(lines, cursor + paragraph.length);
+  }
+  return { body: `${frontmatter ? `${frontmatter.replace(/\n*$/, '\n')}\n` : ''}${lines.slice(cursor).join('\n').replace(/\s+$/, '')}\n`, title, description, wrapper };
 }
 
 const GITBOOK_INDEX_WRAPPER = /^>\s*For the complete documentation index, see \[llms\.txt\]\([^)]*\)/i;
@@ -187,7 +233,7 @@ function leadingParagraph(lines: string[], cursor: number): string[] {
  * equals `expectedDescription` after whitespace normalisation.
  */
 function unwrapGitbookMarkdown(source: string, options: UnwrapOptions): PublishedMarkdownPage {
-  let lines = source.replace(/^﻿/, '').split(/\r?\n/);
+  let lines = source.replace(/^\uFEFF/, '').split(/\r?\n/);
   const footerStart = gitbookAgentFooterStart(lines);
   if (footerStart !== undefined) lines = lines.slice(0, footerStart);
   let cursor = skipBlankLines(lines, 0);

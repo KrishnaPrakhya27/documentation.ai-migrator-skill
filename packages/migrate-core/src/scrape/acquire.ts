@@ -62,7 +62,8 @@ export interface AcquireResult {
 
 export class AcquisitionError extends Error {
   constructor(readonly pages: Array<{ url: string; reason: string }>) {
-    super(`published Markdown is required in exact mode but could not be acquired for ${pages.length} page(s):\n${pages.map((page) => `  ${page.url}: ${page.reason}`).join('\n')}`);
+    // Every mode needs a page's HTML; only exact mode also needs its published Markdown. The reason says which failed.
+    super(`source could not be acquired for ${pages.length} page(s):\n${pages.map((page) => `  ${page.url}: ${page.reason}`).join('\n')}`);
     this.name = 'AcquisitionError';
   }
 }

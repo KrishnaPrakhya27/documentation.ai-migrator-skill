@@ -148,6 +148,7 @@ describe('GitBook repo adapter', () => {
       '<div align="left"><figure><img src="https://x.example/p.png" alt=""><figcaption></figcaption></figure></div>', '',
       'Subscribe to the \\[changelog]\\(<https://x.example/changelog>) or read [the guide](<https://x.example/guide>).', '',
       'Status at <https://x.example/status>.', '',
+      'Mail <team@x.example> for access.', '',
       'Line one<br>line two',
     ].join('\n');
     const doc = markdownToIr(source, { platform: 'gitbook', file: 'p.md', pageId: 'p' });
@@ -163,8 +164,98 @@ describe('GitBook repo adapter', () => {
     const status = paragraphs.find((p) => inlineText(p.children).startsWith('Status'))!;
     expect(status.children.filter((i) => i.type === 'link').map((i) => (i as { url: string }).url)).toEqual(['https://x.example/status']);
     expect(inlineText(status.children)).toBe('Status at https://x.example/status.');
+    // an email autolink is the mailto link it renders as
+    const mail = paragraphs.find((p) => inlineText(p.children).startsWith('Mail'))!;
+    expect(mail.children.find((i) => i.type === 'link')).toMatchObject({ url: 'mailto:team@x.example' });
     expect(autolinked.children.filter((i) => i.type === 'link').map((i) => (i as { url: string }).url)).toEqual(['https://x.example/changelog', 'https://x.example/guide']);
     expect(paragraphs.at(-1)!.children.some((i) => i.type === 'break')).toBe(true);
+  });
+  it('rewrites the CommonMark ReadMe publishes that MDX rejects: autolinks, a less-than that starts no tag and braces in prose', () => {
+    const source = [
+      'Open <https://eu.example.com/ui> or write to <help@example.com>.', '',
+      'Examples of logical rules: >, <, >=, <=, =', '',
+      'Click <\\<remove to drop a stage.', '',
+      'Share *{host URL}/member-care/ui/{userId}* and keep `{code}` as written.', '',
+      '<Image src="https://files.example/p.png" align="center" border={true} />', '',
+      '```json', '{ "a": 1 }', '```', '',
+      '<HTMLBlock>{`', '<!DOCTYPE html>', '<html lang="en"><head><title>Menu</title><style>.nav-list { color: red; }</style><script src="https://widget.example/w.js"></script></head>',
+      '<body><ul class="nav-list"><li><a href="https://docs.example/alpha">Alpha</a></li><li><a href="https://docs.example/beta#/">Beta</a></li></ul></body></html>', '`}</HTMLBlock>',
+    ].join('\n');
+    const doc = markdownToIr(source, { platform: 'readme', file: 'p.md', pageId: 'p' });
+    // an HTMLBlock's static HTML is page content: its body converts and its title does not; its style and script stay
+    // components, even in <head>, so the rules engine records dropping them
+    const menu = doc.children.find((b): b is Extract<Block, { type: 'list' }> => b.type === 'list')!;
+    expect(menu.children.map((item) => inlineText(item.children.flatMap((c) => (c.type === 'paragraph' ? c.children : []))))).toEqual(['Alpha', 'Beta']);
+    // its links read as ReadMe links, so the router's empty `#/` route is not an anchor
+    expect(JSON.stringify(menu)).toContain('"url":"https://docs.example/beta"');
+    expect(JSON.stringify(doc)).not.toMatch(/color: red|DOCTYPE|"value":"Menu"/);
+    expect(doc.children.filter((b) => b.type === 'component').map((b) => (b as { name: string }).name)).toEqual(expect.arrayContaining(['style', 'script']));
+    // a template that interpolates is code, not content, and stays an expression
+    const interpolated = markdownToIr('<HTMLBlock>{`<p>${name}</p>`}</HTMLBlock>', { platform: 'readme', file: 'q.md', pageId: 'q' });
+    expect(JSON.stringify(interpolated)).toContain('"name":"expression"');
+    const paragraphs = doc.children.filter((b): b is Extract<Block, { type: 'paragraph' }> => b.type === 'paragraph');
+    // each renders as the text ReadMe shows
+    expect(paragraphs.slice(0, 4).map((p) => inlineText(p.children))).toEqual([
+      'Open https://eu.example.com/ui or write to help@example.com.',
+      'Examples of logical rules: >, <, >=, <=, =',
+      'Click <<remove to drop a stage.',
+      'Share {host URL}/member-care/ui/{userId} and keep {code} as written.',
+    ]);
+    expect(paragraphs[0].children.filter((i) => i.type === 'link').map((i) => (i as { url: string }).url)).toEqual(['https://eu.example.com/ui', 'mailto:help@example.com']);
+    // a component's attribute expression and a code block keep their braces
+    expect(JSON.stringify(doc)).toContain('https://files.example/p.png');
+    expect(doc.children.find((b) => b.type === 'code')).toMatchObject({ type: 'code', value: '{ "a": 1 }' });
+  });
+  it('reads ReadMe JSX tables as tables, <Anchor> as links and ReadMe link forms as site paths', () => {
+    const source = [
+      '<Table align={["left","center"]}>', '  <thead>', '    <tr>', '      <th style={{ textAlign: "left" }}>', '        Parameter', '      </th>', '',
+      '      <th style={{ textAlign: "center" }}>', '        Description', '      </th>', '    </tr>', '  </thead>', '',
+      '  <tbody>', '    <tr>', '      <td style={{ textAlign: "left" }}>', '        `firstName`', '      </td>', '',
+      '      <td style={{ textAlign: "center" }}>', '        Name of the **user**. See <Anchor label="roles" target="_blank" href="doc:roles">roles</Anchor>.', '', '        * one', '        * two', '      </td>', '    </tr>', '',
+      '    <tr>', '      <td style={{ textAlign: "left" }}>', '      </td>', '', '      <td style={{ textAlign: "center" }}>', '        [API](https://docs.example/reference/x#/)', '      </td>', '    </tr>', '  </tbody>', '</Table>', '',
+      'Intro text.', '', '<br />', '', '<Anchor target="_blank" href="ref:add-customer#/">Add a customer</Anchor>',
+    ].join('\n');
+    const doc = markdownToIr(source, { platform: 'readme', file: 'p.md', pageId: 'p' });
+    const table = doc.children[0] as Extract<Block, { type: 'table' }>;
+    expect(table).toMatchObject({ type: 'table', align: ['left', 'center'] });
+    expect(table.children.map((row) => row.isHeader)).toEqual([true, false, false]);
+    expect(inlineText(table.children[0].children[1].children)).toBe('Description');
+    expect(table.children[1].children[0].children).toMatchObject([{ type: 'inlineCode', value: 'firstName' }]);
+    // a cell's further blocks follow line breaks; its Markdown and links stay inline
+    const described = table.children[1].children[1].children;
+    expect(described.filter((i) => i.type === 'break')).toHaveLength(2);
+    // a list in a cell keeps its bullets as text, since a Markdown table cell cannot hold a list
+    expect(described.filter((i) => i.type === 'text' && i.value === '• ')).toHaveLength(2);
+    expect(described.some((i) => i.type === 'strong')).toBe(true);
+    expect(described.find((i) => i.type === 'link')).toMatchObject({ url: '/docs/roles' });
+    expect(table.children[2].children[0].children).toEqual([]);
+    expect(table.children[2].children[1].children.find((i) => i.type === 'link')).toMatchObject({ url: 'https://docs.example/reference/x' });
+    // a <br /> alone between blocks is spacing; an <Anchor> on its own line is a paragraph holding its link
+    expect(doc.children.slice(1).map((b) => b.type)).toEqual(['paragraph', 'paragraph']);
+    expect((doc.children[2] as Extract<Block, { type: 'paragraph' }>).children).toMatchObject([{ type: 'link', url: '/reference/add-customer' }]);
+    expect(docToMdx(doc)).toContain('| `firstName` |');
+    // a table holding an element with no table meaning stays a source component
+    const unusual = markdownToIr('<Table>\n  <caption>Odd</caption>\n</Table>', { platform: 'readme', file: 'u.md', pageId: 'u' });
+    expect(unusual.children[0]).toMatchObject({ type: 'component', name: 'Table' });
+    // a thead of td cells has no header row and rows of different lengths are padded; both still serialise as a valid table
+    const uneven = markdownToIr(['<Table>', '  <thead>', '    <tr>', '      <td>', '        A', '      </td>', '    </tr>', '  </thead>', '', '  <tbody>', '    <tr>', '      <td>', '        1. first', '        2. second', '      </td>', '', '      <td>', '        extra', '      </td>', '    </tr>', '  </tbody>', '</Table>'].join('\n'), { platform: 'readme', file: 'e.md', pageId: 'e' });
+    const reparsed = markdownToIr(docToMdx(uneven), { platform: 'dai', file: 'e.mdx', pageId: 'e' }).children[0] as Extract<Block, { type: 'table' }>;
+    expect(reparsed.type).toBe('table');
+    expect(reparsed.children.map((row) => row.children.length)).toEqual([2, 2, 2]);
+    expect(reparsed.children.map((row) => row.children.map((cell) => inlineText(cell.children)))).toEqual([['', ''], ['A', ''], [expect.stringContaining('1. first'), 'extra']]);
+    // ReadMe link forms in a link reference definition resolve like inline ones
+    expect(markdownToIr('See [roles][r].\n\n[r]: doc:roles#/\n', { platform: 'readme', file: 'r.md', pageId: 'r' }).children[0]).toMatchObject({ children: [{ type: 'text' }, { type: 'link', url: '/docs/roles' }, { type: 'text' }] });
+    // braces in prose are text, but a component expression that is not JavaScript is an error, never prose
+    expect(inlineText((markdownToIr('Use {a} and {b c} here.', { platform: 'readme', file: 'b.md', pageId: 'b' }).children[0] as Extract<Block, { type: 'paragraph' }>).children)).toBe('Use {a} and {b c} here.');
+    expect(() => markdownToIr('<Image src="https://x.example/p.png" border={not valid} />', { platform: 'readme', file: 'x.md', pageId: 'x' })).toThrow();
+    // a glossary term is its visible term, and HTML-written emphasis is emphasis, never a blocking placeholder
+    const inlineHtml = markdownToIr('A <Glossary>points</Glossary> balance is <strong>shown</strong> and <em>kept</em>.', { platform: 'readme', file: 'g.md', pageId: 'g' }).children[0] as Extract<Block, { type: 'paragraph' }>;
+    expect(inlineText(inlineHtml.children)).toBe('A points balance is shown and kept.');
+    expect(inlineHtml.children.map((i) => i.type)).toEqual(['text', 'text', 'text', 'strong', 'text', 'emphasis', 'text']);
+    // an escaped `\<` before a URL is text, so a link whose text is that URL stays one link
+    const escaped = markdownToIr('[\\<https://a.example/x>](https://b.example/y)', { platform: 'readme', file: 'l.md', pageId: 'l' }).children[0] as Extract<Block, { type: 'paragraph' }>;
+    expect(escaped.children).toMatchObject([{ type: 'link', url: 'https://b.example/y' }]);
+    expect(inlineText(escaped.children)).toBe('<https://a.example/x>');
   });
   const gitbookHtml = [
     '<table data-view="cards"><thead><tr><th></th><th></th><th></th><th data-hidden data-card-target data-type="content-ref"></th><th data-hidden data-card-cover data-type="files"></th></tr></thead><tbody><tr><td><h4><i class="fa-leaf" style="color:$primary;">:leaf:</i></h4></td><td><strong>No code</strong></td><td>Start in 5 minutes &amp; more.</td><td><a href="/docs/start.md">Documentation</a></td><td><a href="https://x.example/cover.jpg">cover.jpg</a></td></tr></tbody></table>',

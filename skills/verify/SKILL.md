@@ -6,7 +6,7 @@ description: "Test a migration with hard release gates for plans, page and ledge
 
 Run `convert` twice over identical inputs, then run `dai-migrate verify` once locally. When all non-preview checks pass, stop at **human gate 3/4** for output review and permission to push the named migration branch. After `write --push` has recorded the preview, run `verify --preview` (or `verify --preview-url <url>` for a preview found by hand; `--preview-contract-version` overrides the version read from the platform or assumed); when every release check passes, stop at **human gate 4/4** for cutover approval. Read `report/gates.json`: any failed required check blocks the corresponding human gate.
 
-The 33 required release gates, by id (this list is generated from `REQUIRED_RELEASE_GATE_IDS` in `packages/migrate-core/src/verify/gates.ts` and a test fails when the two drift):
+The 34 required release gates, by id (this list is generated from `REQUIRED_RELEASE_GATE_IDS` in `packages/migrate-core/src/verify/gates.ts` and a test fails when the two drift):
 
 - `openapi-preserved`
 - `source-manifest-pinned`
@@ -32,6 +32,7 @@ The 33 required release gates, by id (this list is generated from `REQUIRED_RELE
 - `navigation-exact`
 - `source-navigation-proven`
 - `internal-links`
+- `unmigrated-links`
 - `no-unresolved-blocks`
 - `headings-sequence`
 - `redirects-clean`

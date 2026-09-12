@@ -19,6 +19,7 @@ import { htmlAdapterOptions, type ScrapeProfile } from '../scrape/profiles.js';
 import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { authoredContentSnapshot, firstFidelityDifference } from './fidelity.js';
 import { inlineText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
+import { retargetDocLinks, siteLinkTarget, type SiteLinks } from '../urls/site-links.js';
 
 /** One page as the source served it, paired with the file the migration wrote for it. */
 export interface RawSourcePage {
@@ -93,14 +94,16 @@ function pathOf(source: string): string {
 }
 
 /** The IR of the raw published Markdown, with the platform's generated wrapper and description removed exactly as inventory removes them. */
-export function rawSourceIr(page: RawSourcePage, platform: string, profile?: ScrapeProfile): DocIR | undefined {
+export function rawSourceIr(page: RawSourcePage, platform: string, profile?: ScrapeProfile, links?: SiteLinks): DocIR | undefined {
   if (page.markdown === undefined) return undefined;
   const published = unwrapPublishedMarkdown(page.markdown, platform, { expectedDescription: page.description });
   const title = page.title ?? published.title ?? page.route;
   const description = page.description ?? published.description;
   // The frontmatter the output must carry, built from the source's own statements, so the
   // comparison covers metadata as well as body.
-  return markdownToIr(published.body, { platform, file: page.path, pageId: page.pageId, title, frontmatter: { title, ...(description ? { description } : {}) }, codeMetaStrip: profile?.codeMetaStrip });
+  const doc = markdownToIr(published.body, { platform, file: page.path, pageId: page.pageId, title, frontmatter: { title, ...(description ? { description } : {}) }, codeMetaStrip: profile?.codeMetaStrip });
+  // convert points site-relative links at their migrated routes or the source site; the source is read the same way
+  return links ? retargetDocLinks(doc, siteLinkTarget(links)) : doc;
 }
 
 /** The IR of the written output file, re-parsed as target MDX. */
@@ -115,8 +118,8 @@ export function outputIr(page: RawSourcePage): DocIR | undefined {
  * component naming differences between platforms do not matter but text,
  * headings, links, images, code and component content props all do.
  */
-export function sourceContentExact(page: RawSourcePage, platform: string, profile?: ScrapeProfile): SourceComparison {
-  const source = rawSourceIr(page, platform, profile);
+export function sourceContentExact(page: RawSourcePage, platform: string, profile?: ScrapeProfile, links?: SiteLinks): SourceComparison {
+  const source = rawSourceIr(page, platform, profile, links);
   if (!source) return { pageId: page.pageId, path: page.path, pass: false, detail: 'no published Markdown was frozen for this page' };
   const output = outputIr(page);
   if (!output) return { pageId: page.pageId, path: page.path, pass: false, detail: `no output file at ${page.outputFile}` };

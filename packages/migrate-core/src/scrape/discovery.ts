@@ -3,7 +3,7 @@
  * recursive same-origin links and an optional vendor map. Every URL retains
  * provenance so an operator can understand why it entered scope.
  */
-import { findAll, parseHtml, textOf } from '../ir/from-html.js';
+import { findAll, parseHtml, textOf, type El } from '../ir/from-html.js';
 import type { ScrapeProfile } from './profiles.js';
 import type { Fetcher, FetchedPage } from './fetcher.js';
 import { CanonicalHosts, discoverSitemaps, sitemapCandidatesFromRobots, type SitemapEntry } from './fetcher.js';
@@ -94,6 +94,12 @@ export function normaliseDiscoveryUrl(candidate: string, base: string, origin: s
   }
 }
 
+/** Theme/account routes that are same-origin links but never documentation pages. */
+function isDocumentCandidate(url: string, platform: string): boolean {
+  const path = new URL(url).pathname;
+  return platform !== 'readme' || !/^\/(?:cdn-cgi|edit|login|logout)(?:\/|$)/i.test(path);
+}
+
 function metaContent(html: string, selector: string): string | undefined {
   const root = parseHtml(html);
   const value = findAll(root, selector)[0]?.attribs.content?.replace(/\s+/g, ' ').trim();
@@ -104,6 +110,13 @@ function pageTitle(html: string): string | undefined {
   const root = parseHtml(html);
   const title = findAll(root, 'title')[0];
   return title ? textOf(title).replace(/\s+/g, ' ').trim() || undefined : undefined;
+}
+
+/** A page's explicit canonical URL, restricted to the already-approved site origins. */
+function canonicalPageUrl(html: string, base: string, origin: string, canonicalHosts: CanonicalHosts): string | undefined {
+  const root = parseHtml(html);
+  const canonical = findAll(root, 'link[href]').find((link) => link.attribs.rel?.toLowerCase().split(/\s+/).includes('canonical'));
+  return canonical?.attribs.href ? normaliseDiscoveryUrl(canonical.attribs.href, base, origin, canonicalHosts) : undefined;
 }
 
 /** Return the balanced JSON array beginning at `start`, respecting quoted strings. */
@@ -265,26 +278,45 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
  * gates cross-check platform metadata against, and the only navigation source
  * on platforms that embed none. Group labels come from the profile's group
  * heading selector; every anchor beneath a heading belongs to that group, and
- * anchors before the first heading stay top-level.
+ * anchors before the first heading stay top-level. With a child-list selector,
+ * a page link followed by its subpage list names a nested group led by that page.
  */
 export function extractDomSidebarNavigation(html: string, baseUrl: string, origin: string, profile: ScrapeProfile, canonicalHosts?: CanonicalHosts): DiscoveredNavigationNode[] | undefined {
   const navSelector = profile.navSelector;
   const groupSelector = profile.navGroupSelector;
   if (!navSelector || !groupSelector) return undefined;
   const root = parseHtml(html);
-  const container = findAll(root, navSelector)[0];
-  if (!container) return undefined;
+  // A theme may render several containers the selector matches (an assistant panel, a
+  // mobile drawer, the sidebar itself). The first one holding navigation is the sidebar;
+  // an empty match is chrome, not an empty sidebar.
+  for (const container of findAll(root, navSelector)) {
+    const nodes = navigationInContainer(container, baseUrl, origin, profile, canonicalHosts);
+    if (nodes) return nodes;
+  }
+  return undefined;
+}
 
-  const label = (element: Parameters<typeof textOf>[0]): string => textOf(element).replace(/\s+/g, ' ').trim();
+function navigationInContainer(container: El, baseUrl: string, origin: string, profile: ScrapeProfile, canonicalHosts?: CanonicalHosts): DiscoveredNavigationNode[] | undefined {
+  const groupSelector = profile.navGroupSelector!;
   const linkSelector = profile.navLinkSelector ?? 'a[href]';
+  // A badge rendered inside an entry ("Beta") is decoration around the label, never part of it.
+  const badges = new Set(profile.navBadgeSelector ? findAll(container, profile.navBadgeSelector) : []);
+  const textExcluding = (element: El): string => element.children.map((child) => {
+    if (child.type === 'text') return child.data;
+    return child.type === 'tag' && !badges.has(child) ? textExcluding(child) : '';
+  }).join('');
+  const label = (element: El): string => textExcluding(element).replace(/\s+/g, ' ').trim();
   const groups = new Set(findAll(container, groupSelector));
   const links = new Set(findAll(container, linkSelector));
+  const childLists = new Set(profile.navChildListSelector ? findAll(container, profile.navChildListSelector) : []);
   const out: DiscoveredNavigationNode[] = [];
   let current: { type: 'group'; label: string; children: DiscoveredNavigationNode[] } | undefined;
 
   // One document-order walk keeps each anchor with the heading that precedes it, which is how the sidebar reads.
   const walk = (node: ReturnType<typeof parseHtml>): void => {
-    for (const child of node.children ?? []) {
+    const siblings = node.children ?? [];
+    for (let index = 0; index < siblings.length; index++) {
+      const child = siblings[index];
       if (child.type !== 'tag') continue;
       if (groups.has(child)) {
         const text = label(child);
@@ -294,11 +326,23 @@ export function extractDomSidebarNavigation(html: string, baseUrl: string, origi
       }
       if (links.has(child) && child.attribs.href) {
         const url = normaliseDiscoveryUrl(child.attribs.href, baseUrl, origin, canonicalHosts);
-        if (url) {
-          const text = label(child);
-          const page: DiscoveredNavigationNode = { type: 'page', url, ...(text ? { title: text } : {}) };
-          (current ? current.children : out).push(page);
+        const text = label(child);
+        const page: DiscoveredNavigationNode | undefined = url && isDocumentCandidate(url, profile.platform) ? { type: 'page', url, ...(text ? { title: text } : {}) } : undefined;
+        const next = childLists.size ? siblings.slice(index + 1).find((sibling) => sibling.type === 'tag') : undefined;
+        if (next && childLists.has(next as typeof child) && text) {
+          // A parent page leads the group its label names. When one of its subpages is the same page, wherever it sits, that placement stands alone.
+          const group: { type: 'group'; label: string; children: DiscoveredNavigationNode[] } = { type: 'group', label: text, children: page ? [page] : [] };
+          const parent = current;
+          current = group;
+          walk(next as typeof child);
+          current = parent;
+          const [own, ...subpages] = group.children;
+          if (own?.type === 'page' && subpages.some((child) => child.type === 'page' && child.url === own.url)) group.children.shift();
+          if (group.children.length) (current ? current.children : out).push(group);
+          index = siblings.indexOf(next);
+          continue;
         }
+        if (page) (current ? current.children : out).push(page);
         continue;
       }
       walk(child);
@@ -308,6 +352,63 @@ export function extractDomSidebarNavigation(html: string, baseUrl: string, origi
 
   const pruned = out.filter((node) => node.type === 'page' || node.children.length);
   return pruned.length ? pruned : undefined;
+}
+
+/** A site-level section: its own sidebar, reached from the section switcher every page renders. */
+export interface SiteSection { label: string; url: string }
+
+/**
+ * The sections a site divides itself into (GitBook site sections). Read from the
+ * rendered section switcher, so the labels and order are the source's own. One
+ * section is not a section structure, so fewer than two reports none.
+ */
+export function extractSectionTabs(html: string, baseUrl: string, origin: string, profile: ScrapeProfile, canonicalHosts?: CanonicalHosts): SiteSection[] | undefined {
+  if (!profile.navSectionSelector) return undefined;
+  const out: SiteSection[] = [];
+  const seen = new Set<string>();
+  for (const anchor of findAll(parseHtml(html), profile.navSectionSelector)) {
+    const href = anchor.attribs.href;
+    if (!href) continue;
+    const url = normaliseDiscoveryUrl(href, baseUrl, origin, canonicalHosts);
+    if (!url || seen.has(url)) continue;
+    const label = (anchor.attribs['aria-label'] ?? textOf(anchor)).replace(/\s+/g, ' ').trim();
+    if (!label) continue;
+    seen.add(url);
+    out.push({ label, url });
+  }
+  return out.length >= 2 ? out : undefined;
+}
+
+/** The section a page belongs to: the section whose path is its longest matching prefix. */
+export function sectionOfUrl(url: string, sections: readonly SiteSection[]): SiteSection | undefined {
+  const path = new URL(url).pathname.replace(/\/$/, '');
+  const prefixOf = (section: SiteSection): string => new URL(section.url).pathname.replace(/\/$/, '');
+  let best: SiteSection | undefined;
+  for (const section of sections) {
+    const prefix = prefixOf(section);
+    if (path !== prefix && !path.startsWith(`${prefix}/`)) continue;
+    if (!best || prefix.length > prefixOf(best).length) best = section;
+  }
+  return best;
+}
+
+/**
+ * Sections as `tab` containers, each holding the sidebar its own pages render.
+ * Discovery and verification both build the navigation with this, from the same
+ * rendered HTML, so the written navigation is judged against the source structure
+ * rather than against a flattened copy of it. A section whose sidebar was never
+ * acquired keeps only its own landing page, and a page the tree does not hold is
+ * dropped later, so an unmigrated section reports as unplaced instead of inventing
+ * a tab.
+ */
+export function siteSectionNavigation(sections: readonly SiteSection[], sidebars: ReadonlyMap<string, DiscoveredNavigationNode[]>): DiscoveredNavigationNode[] | undefined {
+  const tabs = sections.map((section) => ({
+    type: 'group' as const,
+    kind: 'tab' as const,
+    label: section.label,
+    children: sidebars.get(section.url) ?? [{ type: 'page' as const, url: section.url }],
+  }));
+  return tabs.length >= 2 ? tabs : undefined;
 }
 
 /** The balanced JSON object beginning at `start`, respecting quoted strings. */
@@ -423,12 +524,28 @@ export async function discoverLiveSite(input: {
   let platformOrder = 0;
   let navigation: DiscoveredNavigationNode[] | undefined;
   const navigationCandidates: NonNullable<DiscoveryResult['navigationCandidates']> = {};
+  let sections: SiteSection[] | undefined;
+  const sectionSidebars = new Map<string, DiscoveredNavigationNode[]>();
   let siteName: string | undefined;
   let siteConfig: SiteConfig | undefined;
 
+  /** URLs that redirect or canonically point to a discovered page, by the page they stand for. */
+  const aliasesOf = new Map<string, string[]>();
+  const targetOfAlias = new Map<string, string>();
+  const canonicalTarget = (url: string): string => {
+    const seen = new Set<string>();
+    while (targetOfAlias.has(url) && !seen.has(url)) { seen.add(url); url = targetOfAlias.get(url)!; }
+    return url;
+  };
+
   const add = (candidate: string, reason: string, base = input.seedUrl, meta: { sitemap?: SitemapEntry; locale?: string; title?: string; description?: string; sidebarTitle?: string; domSidebarTitle?: string; llms?: LlmsEntry; groupHint?: string[] } = {}) => {
-    const url = normaliseDiscoveryUrl(candidate, base, origin, canonicalHosts);
-    if (!url) return;
+    const normalised = normaliseDiscoveryUrl(candidate, base, origin, canonicalHosts);
+    if (!normalised || !isDocumentCandidate(normalised, input.profile.platform)) return;
+    // GitBook and other themes link to a page's published-Markdown representation.
+    // It is acquisition evidence for the extensionless page, never another page entity,
+    // and admitting it here wastes the crawl budget before it can be discarded.
+    if (PUBLISHED_MARKDOWN.test(new URL(normalised).pathname)) return;
+    const url = canonicalTarget(normalised);
     let record = records.get(url);
     if (!record) {
       if (records.size >= limit) { refusedByLimit++; return; }
@@ -482,10 +599,9 @@ export async function discoverLiveSite(input: {
     }
   }
 
-  /** URLs that redirect to a discovered page, by the page they stand for. */
-  const aliasesOf = new Map<string, string[]>();
   /** A URL that redirects to another page of the site is that page under another name: its evidence moves onto the target, which is crawled in its place. */
-  const foldAlias = (alias: string, target: string) => {
+  const foldAlias = (alias: string, requestedTarget: string) => {
+    const target = canonicalTarget(requestedTarget);
     const from = records.get(alias)!;
     records.delete(alias);
     let to = records.get(target);
@@ -507,7 +623,9 @@ export async function discoverLiveSite(input: {
     if (from.sitemap && (!to.sitemap || from.sitemap.order < to.sitemap.order)) to.sitemap = from.sitemap;
     to.locale ??= from.locale;
     to.version ??= from.version;
-    aliasesOf.set(target, [...(aliasesOf.get(target) ?? []), ...(aliasesOf.get(alias) ?? []), alias]);
+    const aliases = [...(aliasesOf.get(alias) ?? []), alias];
+    for (const knownAlias of aliases) targetOfAlias.set(knownAlias, target);
+    aliasesOf.set(target, [...new Set([...(aliasesOf.get(target) ?? []), ...aliases])]);
     aliasesOf.delete(alias);
   };
 
@@ -527,6 +645,10 @@ export async function discoverLiveSite(input: {
       const finalUrl = response.finalUrl ? normaliseDiscoveryUrl(response.finalUrl, url, origin, canonicalHosts) : undefined;
       if (finalUrl && finalUrl !== url) { foldAlias(url, finalUrl); continue; }
       if (response.status < 200 || response.status >= 300 || !/html|xhtml/i.test(response.contentType || 'text/html')) continue;
+      // Successful HTTP responses can still be aliases (notably Mintlify's `/index`).
+      // Trust the document's explicit same-site canonical URL before treating the alias as another page.
+      const canonicalUrl = canonicalPageUrl(response.body, response.finalUrl || url, origin, canonicalHosts);
+      if (canonicalUrl && canonicalUrl !== url) { foldAlias(url, canonicalUrl); continue; }
       const root = parseHtml(response.body);
       // The theme decorates <title> ("Page - Site"), so it is recorded as evidence and never becomes the page title.
       records.get(url)!.htmlTitleTag ??= pageTitle(response.body);
@@ -543,9 +665,16 @@ export async function discoverLiveSite(input: {
           }
         }
       }
-      if (!navigationCandidates['dom-sidebar']) {
+      // A site that divides itself into sections renders one sidebar per section, so each
+      // section's own sidebar is read from the first crawled page inside it.
+      sections ??= extractSectionTabs(response.body, response.finalUrl || url, origin, input.profile, canonicalHosts);
+      const section = sections ? sectionOfUrl(response.finalUrl || url, sections) : undefined;
+      if (!navigationCandidates['dom-sidebar'] || (section && !sectionSidebars.has(section.url))) {
         const dom = extractDomSidebarNavigation(response.body, response.finalUrl || url, origin, input.profile, canonicalHosts);
-        if (dom) navigationCandidates['dom-sidebar'] = dom;
+        if (dom) {
+          navigationCandidates['dom-sidebar'] ??= dom;
+          if (section && !sectionSidebars.has(section.url)) sectionSidebars.set(section.url, dom);
+        }
       }
       for (const anchor of findAll(root, 'a[href]')) if (anchor.attribs.href) add(anchor.attribs.href, 'link-graph', response.finalUrl || url);
       const navSelector = input.profile.navSelector ?? 'nav, aside, .sidebar, [role=navigation]';
@@ -561,6 +690,9 @@ export async function discoverLiveSite(input: {
     }
     }
   }
+
+  const sectionNavigation = sections ? siteSectionNavigation(sections, sectionSidebars) : undefined;
+  if (sectionNavigation) navigationCandidates['dom-sidebar'] = sectionNavigation;
 
   return {
     pages: [...records.entries()].map(([url, value]) => ({
