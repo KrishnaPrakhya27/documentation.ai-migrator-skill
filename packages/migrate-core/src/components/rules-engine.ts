@@ -275,7 +275,9 @@ export class RulesEngine {
     const plan = this.opts.plan?.[sig.hash];
 
     if (plan?.status === 'excluded') {
-      this.opts.ledger.excluded(pageId, node.id, plan.reason ?? 'excluded by plan', plan.reviewer);
+      // The whole subtree goes, so the whole subtree is recorded: a child left with its own earlier
+      // disposition would claim in the ledger that it survived unchanged, when nothing of it was emitted.
+      this.markSubtree(node, pageId, 'excluded', plan.reason ?? 'excluded by plan', plan.reviewer);
       return [];
     }
     if (plan?.status === 'quarantined') {

@@ -141,7 +141,12 @@ export function siteLinkResolver(links: SiteLinks): SiteLinkResolver {
     if (route !== undefined) return { target: `${route === 'index' ? '/' : `/${route}`}${suffix}`, kind: 'route', knownSourcePage: true };
     if (!absolute && written.has(normalised.replace(/^\//, ''))) return { target: `${normalised}${suffix}`, kind: 'route', knownSourcePage: true };
     const knownSourcePage = knownPath(normalised);
-    if (!absolute && knownSourcePage && links.unmigrated === 'source' && links.origin) return { target: `${links.origin}${normalised}${suffix}`, kind: 'source', knownSourcePage };
+    // `source` is the operator's statement that the source site stays up and serves whatever this
+    // migration does not write — a linked PDF as much as a page. Left relative, such a link resolves
+    // to nothing inside the migrated site; sent to the source it lands exactly where it did before.
+    // `knownSourcePage` still travels with the outcome, so a path the source never declared is
+    // reported rather than silently blessed.
+    if (!absolute && links.unmigrated === 'source' && links.origin) return { target: `${links.origin}${normalised}${suffix}`, kind: 'source', knownSourcePage };
     return { target: url, kind: 'kept', knownSourcePage };
   };
 }

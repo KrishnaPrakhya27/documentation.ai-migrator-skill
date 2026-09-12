@@ -139,7 +139,7 @@
             "custom"
           ],
           "default": "info",
-          "description": "Renderer set is canonical. Editor 'note' → info, 'warning' → alert (see valueMaps).",
+          "description": "Renderer set is canonical. Editor 'note' \u2192 info, 'warning' \u2192 alert (see valueMaps).",
           "required": false
         },
         "collapsed": {
@@ -1332,7 +1332,9 @@
         "error": "danger",
         "caution": "alert",
         "important": "info",
-        "check": "success"
+        "check": "success",
+        "call-out": "info",
+        "callout": "info"
       }
     }
   },

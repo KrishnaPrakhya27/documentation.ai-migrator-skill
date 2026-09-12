@@ -35,6 +35,17 @@ import { writeQuarantine } from '../src/session/quarantine.js';
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
 describe('fingerprint', () => {
+  it('routes a static file path by its page identity, not its file extension', () => {
+    const tree = { scope: 'full', platform: 'generic', pages: [
+      { id: 'a', title: 'Home', source: 'https://x/home.htm', group: [], order: 0, oldPath: '/home.htm', migrate: true },
+      { id: 'b', title: 'Create', source: 'https://x/Procedures/Create.htm', group: [], order: 1, oldPath: '/Procedures/Create.htm', migrate: true },
+      { id: 'c', title: 'POS', source: 'https://x/pos/index.html', group: [], order: 2, oldPath: '/pos/index.html', migrate: true },
+    ] } as unknown as Parameters<typeof defaultUrlPlan>[0];
+    const plan = defaultUrlPlan(tree);
+    // ".htm" is how the server names the file; it is not a word in the page's route.
+    expect(plan.pages.map((page) => page.new)).toEqual(['home', 'procedures/create', 'pos']);
+    expect(plan.pages[0].reason).toContain('dropped the source file extension');
+  });
   it('scores Mintlify, GitBook and ReadMe from their markers', () => {
     const mint = fingerprint({ html: `<html><head><meta name="generator" content="Mintlify"><meta name="application-name" content="Mintlify"></head><body><div id="sidebar-content"></div><div id="content-area"></div><script src="https://mintcdn.com/x.js"></script></body></html>` });
     expect(mint.best?.platform).toBe('mintlify');
@@ -112,6 +123,48 @@ describe('urls', () => {
     // every prose segment, braces, less-thans and padded code spans included, is found in the serialized page
     expect(proseSegments(doc).filter((segment) => !normaliseMdxText(mdx).includes(segment))).toEqual([]);
   });
+  it('reads prose the way the output renders it: cards stay apart, authored angle brackets stay text, and a reviewed exclusion is not lost prose', () => {
+    // Two landing cards, each an <a> wrapping an image, its text and a chevron: side by side on the
+    // page, and adjacent in the markup with nothing between them.
+    const cards = '<a href="/a.htm"><img src="/1.png"/><p>Surprise members with "buy one, get one free" offer</p><img src="/c.png"/></a>'
+      + '<a href="/b.htm"><img src="/2.png"/><p>Send 50% discount before a birthday</p><img src="/c.png"/></a>';
+    // An authored template example: the angle brackets are text the reader must see, not markup.
+    const example = '<p>For example: &lt;h3&gt;&lt;%= user.first_name %&gt;&lt;/h3&gt; is replaced per member.</p>';
+    const doc = htmlToIr(`<article>${cards}${example}</article>`, { platform: 'generic', file: 'landing.html', articleSelector: 'article' });
+    const page: DocIR = { pageId: 'p', platform: 'generic', source: 'landing.html', frontmatter: { title: 'Landing' }, children: doc.children };
+    const hay = normaliseMdxText(docToMdx(page));
+    expect(proseSegments(page).filter((segment) => !hay.includes(segment))).toEqual([]);
+    // the two cards must not be read as one run: "offer" and "Send" are separate words on the page
+    expect(proseSegments(page).some((segment) => /offersend/i.test(segment))).toBe(false);
+
+    // `<b>Create </b>` is bold text that happens to end in a space. Emitted as `**Create **` the run
+    // never closes and the reader sees the asterisks, so the space moves outside the delimiters.
+    const bolded = htmlToIr('<article><p>Click <b>Create </b>or <b>Save</b>. Then <i> review</i> it.</p></article>', { platform: 'generic', file: 'b.html', articleSelector: 'article' });
+    const boldedMdx = docToMdx({ pageId: 'b', platform: 'generic', source: 'b.html', frontmatter: { title: 'B' }, children: bolded.children });
+    // the space the source put inside the emphasis stays in the text, where markdown collapses it on render
+    expect(boldedMdx).toContain('Click **Create** or **Save**. Then  *review* it.');
+    expect(boldedMdx).not.toContain('**Create **');
+    // the emphasised words survive the round trip as emphasis, not as literal asterisks
+    const reread = markdownToIr(boldedMdx, { platform: 'dai', file: 'b.mdx', pageId: 'b' });
+    expect(inlineText((reread.children[0] as Extract<Block, { type: 'paragraph' }>).children)).toBe('Click Create or Save. Then  review it.');
+
+    // A grid of link cards: 13 anchors, no whitespace at all between them, exactly as Flare emits it.
+    // Merged into one paragraph the labels abut and the reader sees "Account ManagementAdmin and Rights".
+    const tiles = '<div class="procedure-tiles"><a href="/a.htm">Account Management</a><a href="/b.htm">Admin and Rights</a><a href="/c.htm">Audiences</a></div>';
+    const tiled = htmlToIr(`<article>${tiles}</article>`, { platform: 'generic', file: 'home.html', articleSelector: 'article' });
+    expect(tiled.children.map((b) => (b.type === 'paragraph' ? inlineText(b.children) : b.type))).toEqual(['Account Management', 'Admin and Rights', 'Audiences']);
+    const tiledMdx = docToMdx({ pageId: 'h', platform: 'generic', source: 'home.html', frontmatter: { title: 'Home' }, children: tiled.children });
+    expect(tiledMdx).not.toMatch(/ManagementAdmin/);
+    // a run that already reads as a sentence keeps its single paragraph: spacing there is the source's own
+    const sentence = htmlToIr('<article><p>See <a href="/a.htm">Audiences</a> and <a href="/b.htm">Campaigns</a>.</p></article>', { platform: 'generic', file: 'p.html', articleSelector: 'article' });
+    expect(sentence.children).toHaveLength(1);
+    expect(inlineText((sentence.children[0] as Extract<Block, { type: 'paragraph' }>).children)).toBe('See Audiences and Campaigns.');
+
+    // A block the ledger records as excluded was removed by a reviewed decision, not lost in conversion.
+    const withChrome: DocIR = { ...page, children: [...page.children, { id: 'cookie-btn', type: 'paragraph', children: [{ id: 'cookie-text', type: 'text', value: 'Manage Cookies and tracking preferences' }] }] };
+    expect(proseSegments(withChrome).some((segment) => segment.includes('manage cookies'))).toBe(true);
+    expect(proseSegments(withChrome, new Set(['cookie-btn'])).some((segment) => segment.includes('manage cookies'))).toBe(false);
+  });
   it('writes frontmatter values holding braces or less-thans so the whole file still parses as MDX, and reads them back unchanged', () => {
     const description = 'Open it via URL: \\{host\\}/ui with payload { "eventName": "tierUpgraded" } in the format <audience>…';
     const mdx = docToMdx({ ...markdownToIr('Body.', { platform: 'readme', file: 'p.md', pageId: 'p' }), frontmatter: { title: 'Payload <v2>', description } });
@@ -130,6 +183,17 @@ describe('urls', () => {
     const reparsed = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' });
     expect(reparsed.children.map((b) => b.type)).toEqual(['paragraph', 'paragraph', 'paragraph', 'paragraph']);
     expect(inlineText((reparsed.children[3] as Extract<Block, { type: 'paragraph' }>).children)).toBe('After.');
+  });
+  it('reads a heading holding tag-shaped text the way the output spells it', () => {
+    // SessionM published a heading whose text is literally "<move>What are…": the source wrote it
+    // escaped, so those are the author's characters, not markup, and the page converts exactly.
+    const html = htmlToIr('<main><h2>&lt;move&gt;What are the attributes of an offer?</h2></main>',
+      htmlAdapterOptions(PROFILES.generic, { platform: 'generic', file: 'https://docs.example.com/a.htm' }));
+    const doc = makeDoc('p', 'generic', 'https://docs.example.com/a.htm', { title: 'Attributes' }, html.children);
+    const mdx = docToMdx(doc);
+    expect(mdx).toContain('&lt;move>What are the attributes of an offer?');
+    // the outline the source states and the outline the output carries must be the same outline
+    expect(headingOutline(doc)).toEqual(mdxHeadingOutline(mdx));
   });
   it('escapes a stray backtick in a table cell so the next row’s code span stays code', () => {
     const source = ['<Table>', '  <thead>', '    <tr>', '      <th>', '        Field', '      </th>', '', '      <th>', '        Description', '      </th>', '    </tr>', '  </thead>', '', '  <tbody>', '    <tr>', '      <td>', '        Delimiter', '      </td>', '', '      <td>', '        For example, `,` for comma-separated or `', '      </td>', '    </tr>', '', '    <tr>', '      <td>', '        Bottom', '      </td>', '', '      <td>', '        For example, `</records>`.', '      </td>', '    </tr>', '  </tbody>', '</Table>'].join('\n');
@@ -170,14 +234,21 @@ describe('urls', () => {
     expect(keep('/docs/gone')).toBe('/docs/gone');
     expect(keep('https://docs.example/docs/gone')).toBe('https://docs.example/docs/gone');
     for (const unchanged of ['https://elsewhere.example/x', '#local', 'mailto:help@example.com', '//cdn.example/x.png']) expect(keep(unchanged)).toBe(unchanged);
-    // `source` sends only pages the source is known to publish there; a path no source page has stays, for internal-links to fail
+    // `source` is the operator's statement that the source site stays up and serves what this migration
+    // does not write — a linked PDF as much as a page. Sending those links there leaves them working
+    // exactly as before; leaving them relative would resolve them to nothing inside the migrated site.
+    // Whether the source ever declared the path still travels with the outcome, and convert records it
+    // per link in report/unmigrated-links.json, so an undeclared path is reported and never blessed.
     const source = siteLinksFor(applied, { unmigrated: 'source', sourcePages: ['https://docs.example/reference/listed'] });
     const toSource = siteLinkTarget(source);
     expect(toSource('/docs/gone')).toBe('https://docs.example/docs/gone');
     expect(toSource('/reference/listed')).toBe('https://docs.example/reference/listed');
-    expect(toSource('/reference/add-customer')).toBe('/reference/add-customer');
-    expect(siteLinkResolver(source)('/reference/add-customer')).toEqual({ target: '/reference/add-customer', kind: 'kept', knownSourcePage: false });
+    expect(toSource('/guides/handbook.pdf')).toBe('https://docs.example/guides/handbook.pdf');
     expect(siteLinkResolver(source)('/docs/gone')).toEqual({ target: 'https://docs.example/docs/gone', kind: 'source', knownSourcePage: true });
+    // a document the source never declared still goes to the source, marked as undeclared for the report
+    expect(siteLinkResolver(source)('/guides/handbook.pdf')).toEqual({ target: 'https://docs.example/guides/handbook.pdf', kind: 'source', knownSourcePage: false });
+    // `keep` is still the default and still assumes nothing about the old site staying up
+    expect(siteLinkResolver(siteLinksFor(applied))('/guides/handbook.pdf')).toEqual({ target: '/guides/handbook.pdf', kind: 'kept', knownSourcePage: false });
     // a repository or export source has no host, so only its routes change
     const repoTree: Tree = { ...tree, pages: tree.pages.map((page) => ({ ...page, source: page.oldPath === '/' ? 'index.md' : `${page.oldPath!.replace(/^\//, '')}.md` })) };
     const repo = siteLinkTarget(siteLinksFor(applyUrlPlan(repoTree, defaultUrlPlan(repoTree)), { unmigrated: 'source' }));

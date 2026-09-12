@@ -46,6 +46,24 @@ export interface SessionTarget {
   previewDeploymentId?: string;
 }
 
+/**
+ * A migrator build change accepted onto a workspace whose source bytes are already frozen.
+ *
+ * A fix to the migrator invalidates everything derived from the source, never the source
+ * itself: the frozen bytes were served by the customer's site, not produced by our code.
+ * Recording the change here keeps that explicit, so a certificate shows every build that
+ * touched the migration instead of only the last one.
+ */
+export interface RebaseRecord {
+  at: string;
+  reason: string;
+  from: MigratorProvenance;
+  to: MigratorProvenance;
+  /** The frozen evidence the rebase was checked against; unchanged by it. */
+  sourceManifest?: string;
+  acquisition?: string;
+}
+
 export interface Session {
   migrationId: string;
   createdAt: string;
@@ -58,6 +76,8 @@ export interface Session {
   fidelityMode?: 'exact' | 'permissive';
   /** The migrator build that created this session; verify certifies output from no other build. */
   migrator: MigratorProvenance;
+  /** Builds this workspace has been rebased onto, oldest first. Empty for a session that never was. */
+  rebases?: RebaseRecord[];
   versions: {
     core: string;
     contentContract: string;

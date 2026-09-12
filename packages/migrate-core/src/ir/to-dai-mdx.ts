@@ -64,6 +64,17 @@ export function openTag(name: string, props: Record<string, string | number | bo
   return `<${parts.join(' ')}${selfClose ? ' /' : ''}>`;
 }
 
+/**
+ * Emphasis around text that starts or ends with a space. CommonMark closes a run only on a
+ * non-space, so `**Create **` is not bold at all — it renders as literal asterisks, which is what
+ * the reader then sees. The space belongs outside the delimiters, where it reads the same and parses.
+ * Emphasis over nothing but whitespace has no run to close, so it keeps only the whitespace.
+ */
+function wrapEmphasis(inner: string, marker: string): string {
+  const [, lead = '', core = '', trail = ''] = /^(\s*)([\s\S]*?)(\s*)$/.exec(inner) ?? [];
+  return core ? `${lead}${marker}${core}${marker}${trail}` : inner;
+}
+
 export function inlineToMdx(nodes: Inline[]): string {
   return nodes.map((n) => {
     switch (n.type) {
@@ -74,9 +85,9 @@ export function inlineToMdx(nodes: Inline[]): string {
         const pad = /^[ `]|[ `]$/.test(n.value) ? ' ' : '';
         return `${fence}${pad}${n.value}${pad}${fence}`;
       }
-      case 'strong': return `**${inlineToMdx(n.children)}**`;
-      case 'emphasis': return `*${inlineToMdx(n.children)}*`;
-      case 'delete': return `~~${inlineToMdx(n.children)}~~`;
+      case 'strong': return wrapEmphasis(inlineToMdx(n.children), '**');
+      case 'emphasis': return wrapEmphasis(inlineToMdx(n.children), '*');
+      case 'delete': return wrapEmphasis(inlineToMdx(n.children), '~~');
       case 'link': {
         const url = markdownUrl(n.url, 'link');
         const label = inlineToMdx(n.children);

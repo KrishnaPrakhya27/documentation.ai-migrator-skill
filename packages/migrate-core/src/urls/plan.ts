@@ -38,8 +38,17 @@ export function defaultUrlPlan(tree: Tree, opts: { mode?: UrlPlan['mode']; strip
     if (mode !== 'restructure' && old) {
       let stripped = old;
       if (opts.stripPrefix && stripped.startsWith(opts.stripPrefix)) stripped = stripped.slice(opts.stripPrefix.length);
+      // The file extension a static site serves under is not part of the page's identity:
+      // /guide.htm is the page "guide". Legalising it in place would route the page at
+      // "guide-htm", because the dot is not a legal slug character and becomes a dash. An
+      // index file names the directory holding it, the way a web server serves that directory.
+      const withoutSuffix = stripped.replace(/\/index\.(?:html?|xhtml|php|aspx?|jsp)$/i, '/').replace(/\.(?:html?|xhtml|php|aspx?|jsp)$/i, '');
+      const droppedSuffix = withoutSuffix !== stripped;
+      stripped = withoutSuffix;
       const leg = legalisePath(stripped, { case: opts.case ?? 'preserve' });
-      candidate = leg.path; reason = leg.changed ? `preserve (adjusted: ${leg.reason})` : 'preserve';
+      candidate = leg.path;
+      const adjustments = [droppedSuffix ? 'dropped the source file extension' : undefined, leg.reason].filter(Boolean).join('; ');
+      reason = adjustments ? `preserve (adjusted: ${adjustments})` : 'preserve';
     } else {
       candidate = pathFromTree(p); reason = 'restructure:nav';
     }

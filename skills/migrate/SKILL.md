@@ -52,6 +52,27 @@ dai-migrate report     --workspace <path>
 
 A stage that fails stops the run and names what to fix. Never skip a stage to get past a failure, and never hand-edit `output/`: change the plan the stage reads and run it again.
 
+## After fixing the migrator mid-run
+A fix to this plugin invalidates what the migrator derived, never what the source served: the
+frozen bytes came from the customer's site. Do **not** start a new workspace and crawl the site
+again — on a 428-page site that costs about eight minutes of requests per attempt, every time.
+
+```
+dai-migrate rebase   --workspace <path> --reason "<what the fix changed>"
+dai-migrate discover --workspace <path> --offline   # rebuilds plan/tree.yaml from the frozen bytes
+dai-migrate inventory --workspace <path>            # then continue the sequence as normal
+```
+
+`rebase` re-pins the migrator build, records the change in `session.json` so the report shows every
+build that touched the migration, and marks every derived stage stale. It keeps the frozen source,
+its acquisition pin and any captured OpenAPI graph, and refuses if those bytes have drifted.
+`discover --offline` then rebuilds the tree and navigation from the acquired pages, fetching
+nothing, and carries the scope decisions already reviewed at gate 1 onto the rebuilt tree.
+
+Re-confirm gate 1 after an offline rebuild: the structure may have changed, which is why the fix
+was made. Start a new workspace only when the re-derivation reports that the source universe itself
+would change (different pages), because that is a new capture rather than a new reading of one.
+
 ## Exploratory test run
 Use this only when the user explicitly asks for a test or exploratory migration, or asks to skip asset hosting or push checks. Never for a customer release.
 

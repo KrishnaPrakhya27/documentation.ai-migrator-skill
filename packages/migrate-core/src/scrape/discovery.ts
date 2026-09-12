@@ -35,6 +35,8 @@ export interface DiscoveredUrl {
   sitemap?: { source: string; order: number; lastmod?: string; changefreq?: string; priority?: number };
   /** Discovered URLs that redirect to this page; their evidence was folded into it. */
   aliases?: string[];
+  /** Distinct pages listed by the sidebar this page rendered; 0 or 1 means the source showed the reader no navigation. */
+  sidebarPages?: number;
 }
 
 export type DiscoveredNavigationNode =
@@ -69,7 +71,9 @@ export interface DiscoveryResult {
   canonicalHosts: string[];
 }
 
-const NON_PAGE = /\.(?:avif|bmp|css|csv|docx?|eot|gif|ico|jpe?g|js|json|map|mp3|mp4|mov|pdf|png|pptx?|rss|svg|tar|tgz|ttf|txt|wav|webm|webp|woff2?|xlsx?|xml|zip)$/i;
+// Every media extension the asset manifest recognises belongs here too: a sitemap that inventories
+// a site's images, fonts and downloads (MadCap Flare publishes one) must not turn them into pages.
+const NON_PAGE = /\.(?:aac|avif|bmp|css|csv|docx?|eot|flac|gif|ico|jfif|jpe|jpe?g|js|json|m4a|m4v|map|mcwebhelp|mp3|mp4|mov|ogg|ogv|otf|pdf|png|pptx?|rss|svg|tar|tgz|tiff?|ttf|txt|wav|webm|webp|woff2?|xlsx?|xml|zip)$/i;
 const TRACKING = /^(?:utm_(?:source|medium|campaign|term|content)|fbclid|gclid|mc_cid|mc_eid)$/i;
 const GENERIC_SITEMAP_WORDS = new Set(['all', 'content', 'default', 'docs', 'index', 'main', 'page', 'pages', 'post', 'posts', 'root', 'site', 'sitemap', 'url', 'urls', 'web', 'www']);
 // A deliberately conservative subset of ISO 639-1 used by documentation
@@ -282,19 +286,38 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
  * a page link followed by its subpage list names a nested group led by that page.
  */
 export function extractDomSidebarNavigation(html: string, baseUrl: string, origin: string, profile: ScrapeProfile, canonicalHosts?: CanonicalHosts): DiscoveredNavigationNode[] | undefined {
+  return sidebarNavigationFromRoot(parseHtml(html), baseUrl, origin, profile, canonicalHosts);
+}
+
+/** The same extraction over an already-parsed page, so a crawl need not parse each page twice. */
+export function sidebarNavigationFromRoot(root: El, baseUrl: string, origin: string, profile: ScrapeProfile, canonicalHosts?: CanonicalHosts): DiscoveredNavigationNode[] | undefined {
   const navSelector = profile.navSelector;
   const groupSelector = profile.navGroupSelector;
   if (!navSelector || !groupSelector) return undefined;
-  const root = parseHtml(html);
   // A theme may render several containers the selector matches (an assistant panel, a
   // mobile drawer, the sidebar itself). The first one holding navigation is the sidebar;
   // an empty match is chrome, not an empty sidebar.
-  for (const container of findAll(root, navSelector)) {
-    const nodes = navigationInContainer(container, baseUrl, origin, profile, canonicalHosts);
-    if (nodes) return nodes;
+  // The profile lists its containers in preference order, so a site header cannot stand in
+  // for the sidebar just by appearing first in the document.
+  for (const branch of selectorBranches(navSelector)) {
+    for (const container of findAll(root, branch)) {
+      const nodes = navigationInContainer(container, baseUrl, origin, profile, canonicalHosts);
+      if (nodes) return nodes;
+    }
   }
   return undefined;
 }
+
+/** Distinct page URLs a navigation tree places, at any depth. */
+function placedPages(nodes: DiscoveredNavigationNode[], seen = new Set<string>()): Set<string> {
+  for (const node of nodes) {
+    if (node.type === 'page') seen.add(node.url);
+    else placedPages(node.children, seen);
+  }
+  return seen;
+}
+
+
 
 function navigationInContainer(container: El, baseUrl: string, origin: string, profile: ScrapeProfile, canonicalHosts?: CanonicalHosts): DiscoveredNavigationNode[] | undefined {
   const groupSelector = profile.navGroupSelector!;
@@ -306,7 +329,16 @@ function navigationInContainer(container: El, baseUrl: string, origin: string, p
     return child.type === 'tag' && !badges.has(child) ? textExcluding(child) : '';
   }).join('');
   const label = (element: El): string => textExcluding(element).replace(/\s+/g, ' ').trim();
-  const groups = new Set(findAll(container, groupSelector));
+  // A group label names entries; it is never one of them. A candidate that is a link, holds
+  // links, or sits inside one is the entry or the wrapper around a group, not its heading:
+  // taking its text would name the group after the entries inside it. Themes built on utility
+  // classes ("group/button") match such selectors constantly, so this is what keeps a broad
+  // profile selector usable.
+  const insideLink = (element: El): boolean => {
+    for (let parent = element.parent; parent && parent !== container; parent = parent.parent) if (parent.name === 'a') return true;
+    return false;
+  };
+  const groups = new Set(findAll(container, groupSelector).filter((element) => element.name !== 'a' && !findAll(element, 'a[href]').length && !insideLink(element)));
   const links = new Set(findAll(container, linkSelector));
   const childLists = new Set(profile.navChildListSelector ? findAll(container, profile.navChildListSelector) : []);
   const out: DiscoveredNavigationNode[] = [];
@@ -320,14 +352,20 @@ function navigationInContainer(container: El, baseUrl: string, origin: string, p
       if (child.type !== 'tag') continue;
       if (groups.has(child)) {
         const text = label(child);
-        current = text ? { type: 'group', label: text, children: [] } : undefined;
-        if (current) out.push(current);
+        // An unlabelled decoration (an icon, a chevron) is not a group boundary; it leaves the
+        // entries that follow where they are instead of ending the group they belong to.
+        if (text) { current = { type: 'group', label: text, children: [] }; out.push(current); }
         continue;
       }
       if (links.has(child) && child.attribs.href) {
+        // A fragment-only href moves within the page the reader is already on: a skip link, a
+        // disclosure toggle, "back to top". It never names another page, so it is not an entry.
+        if (child.attribs.href.trim().startsWith('#')) continue;
         const url = normaliseDiscoveryUrl(child.attribs.href, baseUrl, origin, canonicalHosts);
         const text = label(child);
-        const page: DiscoveredNavigationNode | undefined = url && isDocumentCandidate(url, profile.platform) ? { type: 'page', url, ...(text ? { title: text } : {}) } : undefined;
+        // An unlabelled link is a logo or an icon, the same decoration an unlabelled group is:
+        // navigation the reader can use always states where each entry goes.
+        const page: DiscoveredNavigationNode | undefined = url && text && isDocumentCandidate(url, profile.platform) ? { type: 'page', url, title: text } : undefined;
         const next = childLists.size ? siblings.slice(index + 1).find((sibling) => sibling.type === 'tag') : undefined;
         if (next && childLists.has(next as typeof child) && text) {
           // A parent page leads the group its label names. When one of its subpages is the same page, wherever it sits, that placement stands alone.
@@ -352,6 +390,85 @@ function navigationInContainer(container: El, baseUrl: string, origin: string, p
 
   const pruned = out.filter((node) => node.type === 'page' || node.children.length);
   return pruned.length ? pruned : undefined;
+}
+
+/**
+ * How many distinct pages the sidebar this page rendered lists.
+ *
+ * A page that renders no sidebar, and a page whose sidebar lists only itself, both leave the
+ * reader nothing to navigate: that is what a landing page looks like (GitBook renders its home
+ * section exactly this way). Counting distinct page links is what separates the two cases from
+ * a real sidebar, and it is read from the page the source served, never inferred from the URL.
+ */
+export function sidebarPageCount(nodes: DiscoveredNavigationNode[] | undefined): number {
+  const urls = new Set<string>();
+  const walk = (items: readonly DiscoveredNavigationNode[]): void => {
+    for (const node of items) node.type === 'page' ? urls.add(node.url.replace(/\/$/, '')) : walk(node.children);
+  };
+  walk(nodes ?? []);
+  return urls.size;
+}
+
+/**
+ * Whether the capture ever saw a rendered sidebar, which decides if "this page has none" means
+ * anything. A site that builds its navigation in the browser (MadCap Flare serves an empty
+ * `data-mc-toc` skeleton) renders none in every page we hold; calling those pages sidebar-less
+ * would hide navigation the reader actually has. Silence is unobserved, not absent.
+ */
+export function sidebarObserved(pages: ReadonlyArray<{ sidebarPages?: number }>): boolean {
+  return pages.some((page) => (page.sidebarPages ?? 0) >= 2);
+}
+
+/** One frozen page: the URL it was served from and the HTML as served. */
+export interface FrozenPage { url: string; html?: string }
+
+/**
+ * The navigation the source renders, read back from frozen pages.
+ *
+ * Discovery re-derived offline and verification both call this, so a tree rebuilt after a
+ * migrator fix and the tree verify expects can differ only if the frozen bytes differ. A
+ * site divided into sections renders one sidebar per section, so each section's sidebar is
+ * taken from a page inside it.
+ */
+export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform: string, seed: string, origin: string, profile: ScrapeProfile): { nodes: DiscoveredNavigationNode[]; source: 'platform-metadata' | 'dom-sidebar' } | undefined {
+  const path = (value: string): string => { try { return new URL(value).pathname.replace(/\/$/, ''); } catch { return ''; } };
+  const home = pages.find((page) => page.html && path(page.url) === path(seed)) ?? pages.find((page) => page.html);
+  if (!home?.html) return undefined;
+  if (platform === 'mintlify') {
+    const extracted = extractMintlifyNavigation(home.html, origin)?.navigation;
+    if (extracted) return { nodes: extracted, source: 'platform-metadata' };
+  }
+  const sections = extractSectionTabs(home.html, seed, origin, profile);
+  if (sections) {
+    const sidebars = new Map<string, DiscoveredNavigationNode[]>();
+    for (const page of pages) {
+      if (!page.html) continue;
+      const section = sectionOfUrl(page.url, sections);
+      if (!section || sidebars.has(section.url)) continue;
+      const dom = extractDomSidebarNavigation(page.html, page.url, origin, profile);
+      if (dom) sidebars.set(section.url, dom);
+      if (sidebars.size === sections.length) break;
+    }
+    const navigation = siteSectionNavigation(sections, sidebars);
+    if (navigation) return { nodes: navigation, source: 'dom-sidebar' };
+  }
+  const dom = extractDomSidebarNavigation(home.html, seed, origin, profile);
+  return dom ? { nodes: dom, source: 'dom-sidebar' } : undefined;
+}
+
+/** Selector alternatives in the order the profile states them, splitting on commas outside brackets. */
+function selectorBranches(selector: string): string[] {
+  const out: string[] = [];
+  let current = '';
+  let depth = 0;
+  for (const character of selector) {
+    if (character === '[') depth++;
+    else if (character === ']') depth--;
+    if (character === ',' && depth === 0) { if (current.trim()) out.push(current.trim()); current = ''; continue; }
+    current += character;
+  }
+  if (current.trim()) out.push(current.trim());
+  return out;
 }
 
 /** A site-level section: its own sidebar, reached from the section switcher every page renders. */
@@ -514,7 +631,7 @@ export async function discoverLiveSite(input: {
   const canonicalHosts = input.fetcher.canonicalHosts ?? new CanonicalHosts(origin);
   if (canonicalHosts.seedOrigin !== origin) throw new Error(`fetcher canonical hosts are bound to ${canonicalHosts.seedOrigin}, not the seed origin ${origin}`);
   const limit = Math.max(1, Math.min(input.limit ?? 5000, 50_000));
-  const records = new Map<string, { reasons: Set<string>; title?: string; description?: string; sidebarTitle?: string; htmlTitleTag?: string; domSidebarTitle?: string; llms?: LlmsEntry; discoveredOrder: number; sidebarOrder?: number; platformOrder?: number; sitemap?: SitemapEntry; groupHint?: string[]; locale?: string; version?: string }>();
+  const records = new Map<string, { reasons: Set<string>; title?: string; description?: string; sidebarTitle?: string; htmlTitleTag?: string; domSidebarTitle?: string; llms?: LlmsEntry; discoveredOrder: number; sidebarOrder?: number; platformOrder?: number; sitemap?: SitemapEntry; groupHint?: string[]; locale?: string; version?: string; sidebarPages?: number }>();
   const queue: string[] = [];
   const crawled = new Set<string>();
   const failures: Array<{ url: string; error: string }> = [];
@@ -644,7 +761,20 @@ export async function discoverLiveSite(input: {
       if (response.status >= 200 && response.status < 300 && PUBLISHED_MARKDOWN.test(new URL(url).pathname) && /^text\/(?:markdown|plain)\b/i.test(response.contentType)) { records.delete(url); continue; }
       const finalUrl = response.finalUrl ? normaliseDiscoveryUrl(response.finalUrl, url, origin, canonicalHosts) : undefined;
       if (finalUrl && finalUrl !== url) { foldAlias(url, finalUrl); continue; }
-      if (response.status < 200 || response.status >= 300 || !/html|xhtml/i.test(response.contentType || 'text/html')) continue;
+      // An unreachable page the site itself declares — in a sitemap, in llms.txt, in its own
+      // navigation — stays in the tree: the declaration is the site's statement that the page
+      // exists, and acquisition is where an exact run refuses it. A URL reached only by following
+      // a link carries no such statement; a stale link is the ordinary way a site points at a page
+      // it no longer serves, so it leaves the scope here rather than becoming a 404 in the
+      // migration, with its reason recorded for the scope review.
+      const linkOnly = [...(records.get(url)?.reasons ?? [])].every((reason) => reason === 'link-graph');
+      const unusable = response.status < 200 || response.status >= 300 ? `HTTP ${response.status}`
+        : !/html|xhtml/i.test(response.contentType || 'text/html') ? `not an HTML document: ${response.contentType || 'no content type'}`
+        : undefined;
+      if (unusable) {
+        if (linkOnly) { records.delete(url); failures.push({ url, error: unusable }); }
+        continue;
+      }
       // Successful HTTP responses can still be aliases (notably Mintlify's `/index`).
       // Trust the document's explicit same-site canonical URL before treating the alias as another page.
       const canonicalUrl = canonicalPageUrl(response.body, response.finalUrl || url, origin, canonicalHosts);
@@ -653,6 +783,9 @@ export async function discoverLiveSite(input: {
       // The theme decorates <title> ("Page - Site"), so it is recorded as evidence and never becomes the page title.
       records.get(url)!.htmlTitleTag ??= pageTitle(response.body);
       records.get(url)!.description ??= metaContent(response.body, 'meta[name=description]') ?? metaContent(response.body, 'meta[property=og:description]');
+      // What this page showed the reader: a sidebar listing only this page is no navigation at all,
+      // which is how a landing page renders. Read per page, because a site varies it per page.
+      records.get(url)!.sidebarPages ??= sidebarPageCount(sidebarNavigationFromRoot(root, response.finalUrl || url, origin, input.profile, canonicalHosts));
       siteName ??= metaContent(response.body, 'meta[property=og:site_name]');
       if (input.profile.platform === 'mintlify') {
         siteConfig ??= extractMintlifyDocsConfig(response.body);
@@ -694,20 +827,32 @@ export async function discoverLiveSite(input: {
   const sectionNavigation = sections ? siteSectionNavigation(sections, sectionSidebars) : undefined;
   if (sectionNavigation) navigationCandidates['dom-sidebar'] = sectionNavigation;
 
+  // A theme renders link clusters that look like navigation in isolation: an account menu, a
+  // mobile drawer, the "related topics" strip beside a topic. A sidebar is how the whole site
+  // is read, so it places a real share of the site's pages; a cluster places a handful. A site
+  // that builds its sidebar in JavaScript (MadCap Flare, and any other help system rendered by
+  // a script) leaves only such clusters in the served HTML, and adopting one as the navigation
+  // would file every other page under a heading that names none of them. The rendered candidate
+  // is still recorded as an independent witness for verification; it just does not stand as the
+  // site's navigation. Judged here because this is where the site's page count is known.
+  const domSidebar = navigationCandidates['dom-sidebar'];
+  const domSidebarPlaces = domSidebar ? placedPages(domSidebar).size : 0;
+  const domSidebarIsNavigation = domSidebarPlaces >= 2 && domSidebarPlaces >= records.size * 0.02;
+
   return {
     pages: [...records.entries()].map(([url, value]) => ({
       url, title: value.title, description: value.description, sidebarTitle: value.sidebarTitle, htmlTitleTag: value.htmlTitleTag, domSidebarTitle: value.domSidebarTitle, llms: value.llms, reasons: [...value.reasons].sort(),
       orderHint: value.platformOrder ?? value.sidebarOrder ?? value.sitemap?.order ?? value.discoveredOrder,
       orderSource: value.platformOrder !== undefined || value.sidebarOrder !== undefined ? 'sidebar' : value.sitemap ? 'sitemap' : 'crawl',
       groupHint: value.groupHint?.length ? value.groupHint : undefined,
-      locale: value.locale, version: value.version,
+      locale: value.locale, version: value.version, sidebarPages: value.sidebarPages,
       sitemap: value.sitemap ? { source: value.sitemap.sitemap, order: value.sitemap.order, lastmod: value.sitemap.lastmod, changefreq: value.sitemap.changefreq, priority: value.sitemap.priority } : undefined,
       ...(aliasesOf.get(url)?.length ? { aliases: aliasesOf.get(url) } : {}),
     })),
     failures,
     sitemaps: { sources: sitemaps.sources, entries: sitemaps.entries, truncated: sitemaps.truncated },
-    navigation: navigation ?? navigationCandidates['dom-sidebar'],
-    navigationSource: navigation ? 'platform-metadata' : navigationCandidates['dom-sidebar'] ? 'dom-sidebar' : undefined,
+    navigation: navigation ?? (domSidebarIsNavigation ? domSidebar : undefined),
+    navigationSource: navigation ? 'platform-metadata' : domSidebarIsNavigation ? 'dom-sidebar' : undefined,
     navigationCandidates: Object.keys(navigationCandidates).length ? navigationCandidates : undefined,
     siteName,
     siteConfig,

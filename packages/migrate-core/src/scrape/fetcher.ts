@@ -410,13 +410,17 @@ export async function discoverSitemaps(fetcher: Fetcher, origin: string, opts: {
     const url = new URL(loc, sourceUrl);
     return (fetcher.canonicalHosts?.canonicalise(url) ?? url).toString();
   };
-  const seeds = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap-0.xml'].map((path) => new URL(path, origin).toString());
+  // MadCap Flare publishes `Sitemap.xml`; a case-sensitive host serves that name only, so the
+  // lowercase probe 404s and the site looks sitemap-less.
+  const seeds = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap-0.xml', '/Sitemap.xml'].map((path) => new URL(path, origin).toString());
   try { seeds.unshift(...sitemapCandidatesFromRobots(await fetcher.robotsDocument(origin), origin)); }
   catch { /* ordinary page acquisition will report an unverifiable robots policy */ }
 
   const queue = [...new Set(seeds)].map((url) => ({ url, trail: [] as string[], depth: 0 }));
   const seen = new Set<string>();
   const sources: string[] = [];
+  /** Sitemap files the seed origin served itself, so their contents are the site's own statement. */
+  const servedBySeedOrigin = new Set<string>();
   const entries: SitemapEntry[] = [];
   const failures: Array<{ url: string; error: string }> = [];
   let truncated = false;
@@ -434,6 +438,7 @@ export async function discoverSitemaps(fetcher: Fetcher, origin: string, opts: {
       if (!/<(?:\w+:)?(?:urlset|sitemapindex)\b/i.test(xml)) { failures.push({ url: current.url, error: 'response is not a sitemap XML document' }); continue; }
       const sourceUrl = page.finalUrl || current.url;
       sources.push(sourceUrl);
+      if (new URL(current.url).origin === origin) servedBySeedOrigin.add(sourceUrl);
       if (/<(?:\w+:)?sitemapindex\b/i.test(xml)) {
         if (current.depth >= maxDepth) { truncated = true; continue; }
         for (const block of xmlBlocks(xml, 'sitemap')) {
@@ -465,6 +470,20 @@ export async function discoverSitemaps(fetcher: Fetcher, origin: string, opts: {
       // Missing conventional paths are normal; report other acquisition/parsing failures.
       if (!/HTTP 404/.test((error as Error).message)) failures.push({ url: current.url, error: (error as Error).message });
     }
+  }
+
+  // A sitemap the seed origin serves itself is the site's own statement of where its pages live.
+  // When every URL it declares sits on one other host, that host is this same site under its
+  // canonical name, so honour it as a robots.txt Sitemap directive naming another host is honoured.
+  // Without this the entire published inventory is discarded as off-origin and the crawl silently
+  // falls back to whatever the link graph happens to reach — on a runtime-rendered menu, a fraction.
+  // One host only: a sitemap mixing hosts is not a canonical-name statement and is never guessed at.
+  const seedHost = new URL(origin).hostname.toLowerCase();
+  const selfDeclared = entries.filter((entry) => servedBySeedOrigin.has(entry.sitemap));
+  const declaredHosts = new Set(selfDeclared.map((entry) => new URL(entry.url).hostname.toLowerCase()));
+  if (selfDeclared.length > 0 && declaredHosts.size === 1 && !declaredHosts.has(seedHost)) {
+    fetcher.canonicalHosts?.add([...declaredHosts][0]);
+    for (const entry of entries) entry.url = canonicalEntryUrl(entry.url, entry.sitemap);
   }
 
   const byUrl = new Map<string, SitemapEntry>();

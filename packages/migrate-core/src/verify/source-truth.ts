@@ -242,11 +242,44 @@ function sameSequence(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
-/** No string the platform's own theme renders may appear anywhere in the migrated output. */
+/**
+ * Theme chrome that reached the output, found by the line it occupies.
+ *
+ * Chrome renders as a block of its own: a "Was this page helpful?" prompt, a
+ * "Previous Next" pager, a stray "Copy" button label. An author writing "click
+ * **Next**", a "### Copy and paste a dataflow" heading or a JSON key holding
+ * "Previous" is writing content, and a substring search cannot tell the two apart:
+ * on a real 235-page migration it flagged 61 correct pages. So a line is chrome
+ * only when chrome is all it holds, and code blocks, which may legitimately contain
+ * anything, are not prose at all.
+ */
+function chromeInOutput(markdown: string, chromeStrings: readonly string[]): string[] {
+  const chrome = chromeStrings.map((value) => normaliseProse(value)).filter(Boolean);
+  const found = new Set<string>();
+  let fenced = false;
+  for (const line of markdown.split('\n')) {
+    if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; continue; }
+    if (fenced) continue;
+    // what the line renders as: block markers, emphasis and link targets are not content
+    const text = normaliseProse(line
+      .replace(/^\s*[>#*+-]+\s*/, '')
+      .replace(/^\s*\d+[.)]\s*/, '')
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/[*_`~]+/g, '')
+      .replace(/^\s*\|/, '').replace(/\|\s*$/, ''));
+    if (!text) continue;
+    let remainder = text;
+    for (const value of chrome) remainder = remainder.split(value).join(' ');
+    // nothing but chrome and separators left: the line carries no authored content
+    if (/^[\s|:.,·—–-]*$/.test(remainder)) for (const value of chrome) if (text.includes(value)) found.add(value);
+  }
+  return [...found];
+}
+
+/** No block the platform's own theme renders may appear in the migrated output. */
 export function chromeAbsent(page: RawSourcePage, chromeStrings: readonly string[]): SourceComparison {
   if (!chromeStrings.some((value) => value.trim())) return { pageId: page.pageId, path: page.path, pass: false, detail: 'no platform chrome evidence was supplied' };
   if (!existsSync(page.outputFile)) return { pageId: page.pageId, path: page.path, pass: false, detail: `no output file at ${page.outputFile}` };
-  const text = normaliseProse(readFileSync(page.outputFile, 'utf8'));
-  const found = chromeStrings.filter((chrome) => chrome && text.includes(normaliseProse(chrome)));
+  const found = chromeInOutput(readFileSync(page.outputFile, 'utf8'), chromeStrings);
   return { pageId: page.pageId, path: page.path, pass: !found.length, detail: found.length ? `theme chrome in output: ${found.map((chrome) => JSON.stringify(chrome)).join(', ')}` : undefined };
 }

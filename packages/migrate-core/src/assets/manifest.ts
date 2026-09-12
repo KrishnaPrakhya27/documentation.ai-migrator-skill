@@ -66,10 +66,24 @@ function componentAssetKind(componentName: string, prop: string): AssetReference
   return prop === 'src' ? media : prop === 'poster' ? 'poster' : undefined;
 }
 
+/**
+ * Where an asset actually lives. A page fetched over HTTP addresses its images the way the browser
+ * reading that page does: relative to the page's own URL. Recording the reference as written would
+ * make the same file reached from two directory depths look like two assets, leave a provider with
+ * nothing it can fetch, and emit a path that resolves against the migrated site instead of the
+ * source. A repository or export source has no such base and is left exactly as authored.
+ */
+export function resolveAssetUrl(url: string, source: string | undefined): string {
+  if (!url || !source || !/^https?:\/\//i.test(source)) return url;
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) return url;
+  try { return new URL(url, source).toString(); } catch { return url; }
+}
+
 function documentAssetReferences(doc: DocIR): AssetReference[] {
   const page = { id: doc.pageId, source: doc.source };
   const out: AssetReference[] = [];
-  const image = (node: { url: string; alt: string }) => { if (node.url) out.push({ kind: 'image', url: node.url, page, alt: node.alt }); };
+  const locate = (url: string): string => resolveAssetUrl(url, doc.source);
+  const image = (node: { url: string; alt: string }) => { if (node.url) out.push({ kind: 'image', url: locate(node.url), page, alt: node.alt }); };
   const inl = (nodes: Inline[]) => { for (const n of nodes) { if (n.type === 'image') image(n); else if ('children' in n) inl(n.children); } };
   walkBlocks(doc.children, (b) => {
     if (b.type === 'image') image(b);
@@ -77,7 +91,7 @@ function documentAssetReferences(doc: DocIR): AssetReference[] {
     else if (b.type === 'component' || b.type === 'dai') {
       for (const [prop, value] of Object.entries(b.props)) {
         const kind = componentAssetKind(b.name, prop);
-        if (kind && typeof value === 'string' && value) out.push({ kind, url: value, page });
+        if (kind && typeof value === 'string' && value) out.push({ kind, url: locate(value), page });
       }
     }
     else if (b.type === 'paragraph' || b.type === 'heading') inl(b.children);
@@ -236,15 +250,18 @@ export function finalUrlFor(m: AssetManifest, url: string): string {
 }
 
 export function rewriteAssetRefs(doc: DocIR, m: AssetManifest): DocIR {
+  // The same resolution the manifest recorded, so a reference finds its entry and an asset that
+  // kept its source URL is emitted as that URL rather than as a path into the migrated site.
+  const final = (url: string): string => finalUrlFor(m, resolveAssetUrl(url, doc.source));
   return {
     ...doc,
     children: mapBlocks(doc.children, {
-      inline: (n) => (n.type === 'image' ? { ...n, url: finalUrlFor(m, n.url) } : n),
+      inline: (n) => (n.type === 'image' ? { ...n, url: final(n.url) } : n),
       block: (b): Block => {
         switch (b.type) {
-          case 'image': return { ...b, url: finalUrlFor(m, b.url) };
-          case 'figure': return { ...b, image: { ...b.image, url: finalUrlFor(m, b.image.url) } };
-          case 'dai': case 'component': return { ...b, props: Object.fromEntries(Object.entries(b.props).map(([key, value]) => [key, componentAssetKind(b.name, key) && typeof value === 'string' ? finalUrlFor(m, value) : value])) };
+          case 'image': return { ...b, url: final(b.url) };
+          case 'figure': return { ...b, image: { ...b.image, url: final(b.image.url) } };
+          case 'dai': case 'component': return { ...b, props: Object.fromEntries(Object.entries(b.props).map(([key, value]) => [key, componentAssetKind(b.name, key) && typeof value === 'string' ? final(value) : value])) };
           default: return b;
         }
       },

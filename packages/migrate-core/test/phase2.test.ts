@@ -8,12 +8,14 @@ import { ensureWorkspace } from '../src/session/workspace.js';
 import { CanonicalHosts, Fetcher, discoverSitemaps, type FetchImpl } from '../src/scrape/fetcher.js';
 import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, sitemapStructureHint } from '../src/scrape/discovery.js';
 import { getProfile, profileHostAliases } from '../src/scrape/profiles.js';
+import { htmlToIr } from '../src/ir/from-html.js';
+import { htmlAdapterOptions } from '../src/scrape/profiles.js';
 import { markdownAlternateUrl, parseLlmsTxt, publishedMarkdownProblem, unwrapPublishedMarkdown } from '../src/scrape/published-markdown.js';
 import { acquirePages, acquiredPath, type AcquiredPage } from '../src/scrape/acquire.js';
 import { sha256 } from '../src/session/ids.js';
 import { offlineFetcher, syntheticSiteFetcher } from './helpers/fixture-fetcher.js';
 import { ingestAssets, s3StorageFromEnv, s3StorageProblems, storageFilename, type S3StorageOptions } from '../src/assets/providers.js';
-import { sanitizeSvgBytes, writeManifest, readManifest, type AssetManifest } from '../src/assets/manifest.js';
+import { sanitizeSvgBytes, writeManifest, readManifest, rewriteAssetRefs, type AssetManifest } from '../src/assets/manifest.js';
 import { writeCutoverArtifacts, canonicalUrl, runSearchCanary, writeDefaultSeoPlan } from '../src/report/cutover.js';
 import { remoteOrg, assertRemoteAllowed } from '../src/write/migration-branch.js';
 import type { Tree, TreePage } from '../src/nav/tree.js';
@@ -239,6 +241,33 @@ describe('discovery', () => {
     expect(byUrl['http://8.8.8.8/install'].orderHint).toBe(1);
     expect(found.sitemaps.entries[0]).toMatchObject({ url: 'http://8.8.8.8/quickstart', lastmod: '2026-09-01' });
   });
+  it('adopts the canonical host a seed-served sitemap declares, and refuses to guess when it names several', async () => {
+    // MadCap Flare publishes absolute URLs on the site's canonical host. Reached through any other
+    // name the site answers to, every <loc> is off-origin, and dropping them loses the whole site.
+    const twoHosts = (sitemap: string): FetchImpl => ((async (input: any) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname === '/robots.txt') return new Response('', { status: 404 });
+      if (url.pathname === '/Sitemap.xml' && url.hostname === '8.8.8.8') return new Response(sitemap, { status: 200, headers: { 'content-type': 'application/xml' } });
+      if (/^\/(?:home|topics\/deep)\.htm$/.test(url.pathname)) return new Response(`<html><title>${url.pathname}</title></html>`, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+      return new Response('nope', { status: 404 });
+    }) as unknown as FetchImpl);
+    const urlset = (...locs: string[]) => `<?xml version="1.0" encoding="utf-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs.map((loc) => `<url><loc>${loc}</loc></url>`).join('')}</urlset>`;
+
+    const canonicalHosts = new CanonicalHosts('http://8.8.8.8');
+    const fetcher = new Fetcher({ workspace: ws(), rps: 1000, canonicalHosts, fetchImpl: twoHosts(urlset('http://8.8.4.4/home.htm', 'http://8.8.4.4/topics/deep.htm')) });
+    const maps = await discoverSitemaps(fetcher, 'http://8.8.8.8');
+    expect(maps.entries.map((entry) => entry.url)).toEqual(['http://8.8.8.8/home.htm', 'http://8.8.8.8/topics/deep.htm']);
+    expect(canonicalHosts.list()).toEqual(['8.8.4.4']);
+    // The declared inventory reaches the tree even though nothing links to the deep topic.
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/home.htm', fetcher, profile: getProfile('generic') });
+    expect(found.pages.map((page) => page.url).sort()).toEqual(['http://8.8.8.8/home.htm', 'http://8.8.8.8/topics/deep.htm']);
+
+    // Several hosts is not a statement of one canonical name: nothing is adopted and nothing is invented.
+    const mixedHosts = new CanonicalHosts('http://8.8.8.8');
+    const mixed = await discoverSitemaps(new Fetcher({ workspace: ws(), rps: 1000, canonicalHosts: mixedHosts, fetchImpl: twoHosts(urlset('http://8.8.4.4/home.htm', 'http://1.1.1.1/home.htm')) }), 'http://8.8.8.8');
+    expect(mixedHosts.list()).toEqual([]);
+    expect(mixed.entries.map((entry) => entry.url)).toEqual(['http://8.8.4.4/home.htm', 'http://1.1.1.1/home.htm']);
+  });
   it('keeps platform metadata authoritative for the sidebar label, the first group placement and the site config', async () => {
     const nav = [
       { group: 'Welcome', pages: [{ title: 'Acme Docs: Getting Started', sidebarTitle: 'Home', description: 'Everything Acme.', href: '/index' }] },
@@ -311,6 +340,147 @@ describe('discovery', () => {
       ] },
     ]);
     expect(found.pages.map((page) => new URL(page.url).pathname).sort()).toEqual(['/docs/blocks', '/docs/connect-overview', '/docs/imports', '/docs/introduction', '/docs/source-block']);
+  });
+  it('lays a spanned table cell over every position it covers, and never nests a link in a link', () => {
+    const html = '<main><table>'
+      + '<tr><th>Type</th><th>Event</th><th>Description</th></tr>'
+      + '<tr><td rowspan="2">Purchases</td><td>Any item</td><td>Buys anything.</td></tr>'
+      + '<tr><td>Minimum count</td><td>Buys a few.</td></tr>'
+      + '</table>'
+      // invalid markup a browser resolves by closing the outer anchor first
+      + '<p>See <a href="https://notes.example/doc"><a href="delivery.htm">Set up delivery</a></a> for guidance.</p>'
+      + '<p>A <a href="javascript:void(0);">script hook</a>.</p>'
+      + '</main>';
+    const doc = htmlToIr(html, htmlAdapterOptions(getProfile('generic'), { platform: 'generic', file: 'https://docs.example.com/a/b.htm' }));
+    const table = doc.children.find((block) => block.type === 'table') as { children: Array<{ children: Array<{ children: unknown[] }> }> };
+    const text = (cell: { children: unknown[] }): string => JSON.stringify(cell.children).match(/"value":"([^"]*)"/)?.[1] ?? '';
+    // every row is the same width, and the spanning cell states its value in each row it covers
+    expect(table.children.map((row) => row.children.length)).toEqual([3, 3, 3]);
+    expect(table.children.map((row) => row.children.map(text))).toEqual([
+      ['Type', 'Event', 'Description'],
+      ['Purchases', 'Any item', 'Buys anything.'],
+      ['Purchases', 'Minimum count', 'Buys a few.'],
+    ]);
+    // the inner anchor is the link; the outer one, which a browser closes, contributes nothing
+    const json = JSON.stringify(doc.children);
+    expect(json).toContain('delivery.htm');
+    expect(json).not.toContain('notes.example');
+    expect(json).toContain('Set up delivery');
+    // a script hook is not a link, but its words are still the author's
+    expect(json).toContain('script hook');
+    expect(json).not.toContain('javascript:');
+  });
+  it('keeps the text of an anchor that goes nowhere, and the MadCap collapsible around it', () => {
+    const html = '<main>'
+      + '<p>See <a href="#">this toggle</a> and <a href="/real.htm">that page</a> and <a>a bookmark</a>.</p>'
+      + '<div class="MCDropDown"><div class="MCDropDownHead"><a class="dropDownHotspot" href="#">View restrictions.</a></div>'
+      + '<div class="MCDropDownBody"><p>The restriction list.</p></div></div>'
+      + '<div class="call-out note"><p>Mind the gap.</p></div>'
+      + '</main>';
+    const doc = htmlToIr(html, htmlAdapterOptions(getProfile('generic'), { platform: 'generic', file: 'https://docs.example.com/a/b.htm' }));
+    const json = JSON.stringify(doc);
+    // the dead anchors contribute their words, not a link
+    expect(json).toContain('this toggle');
+    expect(json).toContain('a bookmark');
+    expect(doc.links ?? []).not.toContain('#');
+    // the collapsible is recognised with its label, and the themed aside is an admonition
+    expect(json).toContain('MCDropDown');
+    expect(json).toContain('View restrictions.');
+    expect(json).toContain('admonition');
+  });
+  it('addresses an asset on a fetched page relative to that page, not to the migrated site', async () => {
+    const doc = {
+      pageId: 'p', source: 'https://docs.example.com/Procedures/Admin/Create.htm', platform: 'generic',
+      frontmatter: { title: 'Create' },
+      children: [
+        { id: 'i1', type: 'image', url: '../../Resources/Images/one.png', alt: '' },
+        { id: 'i2', type: 'image', url: '/Resources/Images/two.png', alt: '' },
+        { id: 'i3', type: 'image', url: 'https://cdn.example.net/three.png', alt: '' },
+      ],
+    } as unknown as Parameters<typeof rewriteAssetRefs>[0];
+    // Two pages at different depths naming the same file are one asset, addressable off the page.
+    const manifest = { provider: 'none', entries: {}, byUrl: {} } as unknown as AssetManifest;
+    const out = rewriteAssetRefs(doc, manifest);
+    expect((out.children as Array<{ url: string }>).map((child) => child.url)).toEqual([
+      'https://docs.example.com/Resources/Images/one.png',
+      'https://docs.example.com/Resources/Images/two.png',
+      'https://cdn.example.net/three.png',
+    ]);
+    // A repository source has no URL to resolve against, so its paths are left exactly as authored.
+    const repo = { ...doc, source: 'docs/procedures/create.md' } as typeof doc;
+    expect((rewriteAssetRefs(repo, manifest).children as Array<{ url: string }>)[0].url).toBe('../../Resources/Images/one.png');
+  });
+  it('drops a dead page reached only by a link, and keeps one the site itself declares', async () => {
+    const site = fakeSite({
+      // The sitemap declares /Listed.htm; nothing serves it. The site also links /Stale.htm, which is gone.
+      '/Sitemap.xml': '<urlset><url><loc>http://8.8.8.8/home.htm</loc></url><url><loc>http://8.8.8.8/Listed.htm</loc></url></urlset>',
+      '/home.htm': '<html><title>Home</title><body><a href="/Live.htm">Live</a><a href="/Stale.htm">Stale</a></body></html>',
+      '/Live.htm': '<html><title>Live</title><body><p>Here.</p></body></html>',
+    });
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/home.htm', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('generic') });
+    // A stale link is not a statement that the page exists, so it leaves the scope with its reason recorded.
+    expect(found.pages.map((page) => new URL(page.url).pathname).sort()).toEqual(['/Listed.htm', '/Live.htm', '/home.htm']);
+    expect(found.failures).toEqual([{ url: 'http://8.8.8.8/Stale.htm', error: 'HTTP 404' }]);
+    // The sitemap entry is the site's own statement that the page exists: acquisition judges it, not discovery.
+    expect(found.pages.find((page) => page.url.endsWith('/Listed.htm'))?.reasons).toEqual(['sitemap']);
+  });
+  it('does not take a theme link cluster as the sidebar when the real one is built by JavaScript', async () => {
+    // A MadCap Flare skin: an off-canvas drawer holding a skip link and an unlabelled logo, and a
+    // strip beside the topic naming one sibling. The sidebar itself is assembled by a script.
+    const chrome = '<aside role="navigation" class="off-canvas" data-mc-ignore="true">'
+      + '<a href="#">Skip To Main Content</a><a href="/home.htm"><img src="/logo.png" /></a>'
+      + '</aside>'
+      + '<nav class="sidenav-wrapper"><a href="/Procedures/Two.htm">Second procedure</a><a href="#">Request a Demo Today</a></nav>';
+    const shell = (body: string): string => `<html><body>${chrome}<main>${body}</main></body></html>`;
+    const site = fakeSite({
+      '/Sitemap.xml': '<urlset>'
+        + '<url><loc>http://8.8.8.8/home.htm</loc></url>'
+        + '<url><loc>http://8.8.8.8/Procedures/One.htm</loc></url>'
+        + '<url><loc>http://8.8.8.8/Procedures/Two.htm</loc></url>'
+        + '<url><loc>http://8.8.8.8/Reference/Three.htm</loc></url>'
+        + '</urlset>',
+      '/home.htm': shell('<h1>Home</h1>'),
+      '/Procedures/One.htm': shell('<h1>One</h1>'),
+      '/Procedures/Two.htm': shell('<h1>Two</h1>'),
+      '/Reference/Three.htm': shell('<h1>Three</h1>'),
+    });
+    const fetcher = new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 });
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/home.htm', fetcher, profile: getProfile('generic') });
+
+    // A skip link and an unlabelled logo are decoration, so the drawer yields nothing at all.
+    expect(extractDomSidebarNavigation(shell('<h1>Home</h1>'), 'http://8.8.8.8/home.htm', 'http://8.8.8.8', getProfile('generic')))
+      .toEqual([{ type: 'page', url: 'http://8.8.8.8/Procedures/Two.htm', title: 'Second procedure' }]);
+    // One page out of four is a cluster, not the site's navigation: the URL path structures the tree.
+    expect(found.navigationSource).toBeUndefined();
+    expect(found.navigation).toBeUndefined();
+    // It stays on record as an independent witness of what the source rendered.
+    expect(found.navigationCandidates?.['dom-sidebar']).toHaveLength(1);
+    expect(found.pages.map((page) => new URL(page.url).pathname).sort())
+      .toEqual(['/Procedures/One.htm', '/Procedures/Two.htm', '/Reference/Three.htm', '/home.htm']);
+  });
+  it('finds a capital-S Sitemap.xml and keeps the assets it inventories out of the page set', async () => {
+    // MadCap Flare publishes `Sitemap.xml` and lists every image, font and download beside its topics.
+    const site = fakeSite({
+      '/Sitemap.xml': '<urlset>'
+        + '<url><loc>http://8.8.8.8/home.htm</loc></url>'
+        + '<url><loc>http://8.8.8.8/Procedures/Setup.htm</loc></url>'
+        + '<url><loc>http://8.8.8.8/Resources/Images/logo.png</loc></url>'
+        + '<url><loc>http://8.8.8.8/Resources/Fonts/body.otf</loc></url>'
+        + '<url><loc>http://8.8.8.8/Default.mcwebhelp</loc></url>'
+        + '</urlset>',
+      '/home.htm': '<html><title>Home</title><body><p>Welcome.</p></body></html>',
+      '/Procedures/Setup.htm': '<html><title>Setup</title><body><p>Steps.</p></body></html>',
+    });
+    const fetcher = new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 });
+    const maps = await discoverSitemaps(fetcher, 'http://8.8.8.8');
+    expect(maps.sources).toEqual(['http://8.8.8.8/Sitemap.xml']);
+    expect(maps.entries).toHaveLength(5);
+
+    // A font, an image and the Flare project descriptor are inventory, not pages.
+    expect(normaliseDiscoveryUrl('http://8.8.8.8/Resources/Fonts/body.otf', 'http://8.8.8.8/', 'http://8.8.8.8')).toBeUndefined();
+    expect(normaliseDiscoveryUrl('http://8.8.8.8/Default.mcwebhelp', 'http://8.8.8.8/', 'http://8.8.8.8')).toBeUndefined();
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/home.htm', fetcher, profile: getProfile('generic') });
+    expect(found.pages.map((page) => new URL(page.url).pathname).sort()).toEqual(['/Procedures/Setup.htm', '/home.htm']);
   });
   it('reads gzip-compressed sitemap URL sets', async () => {
     const xml = '<urlset><url><loc>http://8.8.8.8/docs/compressed</loc></url></urlset>';

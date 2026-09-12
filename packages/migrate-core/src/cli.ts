@@ -24,7 +24,7 @@ import { captureSpecGraph, writeSpecOutput, type SpecManifest } from './openapi/
 import { readmeCatalogSpecs } from './openapi/readme.js';
 import { assertOutsidePlugin, ensureWorkspace, readSession, writeSession, markStage, type Session, fileHash } from './session/workspace.js';
 import { newMigrationId, pageIdFromPlatform, sha256 } from './session/ids.js';
-import { captureMigratorProvenance } from './session/provenance.js';
+import { captureMigratorProvenance, describeMigrator, migratorDrift } from './session/provenance.js';
 import { countQuarantine, writeQuarantine } from './session/quarantine.js';
 import { preflight, probePushAccess } from './session/preflight.js';
 import { DaiClient, noDeploymentDiagnosis } from './session/platform.js';
@@ -32,7 +32,7 @@ import { fingerprint } from './scrape/fingerprint.js';
 import { CanonicalHosts, Fetcher, type FetchOptions } from './scrape/fetcher.js';
 import { Firecrawl, readFirecrawlPage, type FirecrawlOptions } from './scrape/firecrawl.js';
 import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, extractSectionTabs, sectionOfUrl, siteSectionNavigation, type DiscoveredNavigationNode } from './scrape/discovery.js';
+import { discoverLiveSite, extractMintlifyNavigation, navigationFromFrozenPages, sidebarObserved, type DiscoveredNavigationNode, type DiscoveryResult } from './scrape/discovery.js';
 import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
 import { acquirePages, acquireFirecrawlPages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
 import { htmlToIr } from './ir/from-html.js';
@@ -77,7 +77,10 @@ Commands (run in order; the workflow has exactly four standard human gates):
   init         --workspace <dir> --source <url|path> --target customer-org|demo-org --remote <git url> [--platform p] [--export <zip|dir>] [--fidelity exact|permissive] [--allowed-orgs a,b] [--customer-authorised]
                verifies the remote, the API key, the connected repository, previews and the media API up front; records the asset provider
   fingerprint  [--url <u>] [--export <zip|dir>] [--repo <dir>]     → plan/fingerprint.json
-  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] → plan/tree.yaml [gate 1: scope]
+  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] [--offline] → plan/tree.yaml [gate 1: scope]
+               --offline rebuilds the tree and navigation from the frozen source already in the workspace; it fetches nothing
+  rebase       --reason "<why>"                                     re-pins the migrator build after a fix, keeps the frozen source
+               and its acquisition pin, and stales every derivation; follow it with "discover --offline"
   acquire      [--fetcher local|firecrawl] [--zero-data-retention] [--profile p] [--urls file] [--proxy url] [--headers-file json] [--cookies-file file] → source-cache/acquired/
   inventory                                                         → snapshot/, inventory/*.json
   plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml [gate 2: conversion plan]
@@ -109,6 +112,7 @@ const { values: v, positionals } = parseArgs({
     concurrency: { type: 'string', default: process.env.MIGRATION_CONCURRENCY ?? '4' },
     rps: { type: 'string', default: process.env.MIGRATION_RPS ?? '2' },
     refresh: { type: 'boolean', default: false },
+    offline: { type: 'boolean', default: false }, reason: { type: 'string' },
     'zero-data-retention': { type: 'boolean', default: process.env.FIRECRAWL_ZERO_DATA_RETENTION === '1' },
     proxy: { type: 'string', default: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY },
     'headers-file': { type: 'string', default: process.env.MIGRATION_HEADERS_FILE }, 'cookies-file': { type: 'string', default: process.env.MIGRATION_COOKIES_FILE }, 'auth-origin': { type: 'string', default: process.env.MIGRATION_AUTH_ORIGINS },
@@ -269,7 +273,12 @@ function siteLinksForWorkspace(workspace: string, tree: Tree): SiteLinks {
   const llmsPath = join(workspace, 'inventory', 'llms.json');
   const llms = existsSync(llmsPath) ? readJson<{ entries?: Array<{ path: string }> } | null>(llmsPath) : null;
   const hosts = existsSync(canonicalHostsPath(workspace)) ? readJson<{ aliases?: string[] }>(canonicalHostsPath(workspace)).aliases ?? [] : [];
-  const sourcePages = [...(manifest?.pages ?? []).map((page) => page.location), ...(llms?.entries ?? []).map((entry) => entry.path)];
+  // The sitemap declares everything the source publishes, documents and media alongside pages. A link
+  // to a PDF the site serves is not a page this migration writes, but it is not an invented path
+  // either: without it the link stays relative and resolves to nothing inside the migrated site.
+  const sitemapPath = join(workspace, 'inventory', 'sitemaps.json');
+  const sitemap = existsSync(sitemapPath) ? readJson<{ entries?: Array<{ url: string }> }>(sitemapPath).entries ?? [] : [];
+  const sourcePages = [...(manifest?.pages ?? []).map((page) => page.location), ...(llms?.entries ?? []).map((entry) => entry.path), ...sitemap.map((entry) => entry.url)];
   return siteLinksFor(tree, { unmigrated: readUrlPlan(workspace)?.unmigratedLinks ?? 'keep', sourcePages, hosts });
 }
 
@@ -295,6 +304,30 @@ interface PlatformMeta {
   /** Source repository root the openapi specs are relative to. */
   root?: string;
   openapiCaptured?: boolean;
+}
+
+/** The HTML `acquire` froze for a page, if it has one. */
+function acquiredHtml(workspace: string, pageId: string): string | undefined {
+  const file = acquiredPath(workspace, pageId);
+  return existsSync(file) ? readJson<AcquiredPage>(file).html : undefined;
+}
+
+/**
+ * The frozen crawl, with the navigation re-read from the acquired pages by the current
+ * migrator. The source universe (which pages exist, and the evidence for each) comes from
+ * the frozen capture untouched; only what the migrator derives from those bytes is rebuilt,
+ * which is the part a fix to the migrator can change.
+ */
+function frozenDiscovery(workspace: string, session: Session, profile: ScrapeProfile, url: string, platform: string): { frozen: DiscoveryResult; derived: DiscoveryResult } {
+  const path = join(workspace, 'source-cache', 'discovery-result.json');
+  if (!existsSync(path)) fail('--offline needs the frozen discovery result, which this workspace never recorded; discover online once first');
+  requireSourceManifest(workspace, session.hashes.sourceManifest);
+  const discovery = readJson<DiscoveryResult>(path);
+  const frozen = discovery.pages.map((page) => ({ url: page.url, html: acquiredHtml(workspace, pageIdFromPlatform(platform, page.url)) })).filter((page) => page.html);
+  if (!frozen.length) fail('--offline found no acquired page bodies to re-read; run acquire before re-deriving');
+  const derived = navigationFromFrozenPages(frozen, platform, url, new URL(url).origin, profile);
+  ok(`${frozen.length} frozen page(s) re-read with no network; navigation from ${derived?.source ?? 'the frozen capture, unchanged'}`);
+  return { frozen: discovery, derived: derived ? { ...discovery, navigation: derived.nodes, navigationSource: derived.source } : discovery };
 }
 
 /** Captures full spec graphs before conversion; private catalogs need an explicitly supplied export. */
@@ -375,11 +408,11 @@ function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | un
   let navigationSource: string | undefined;
   if (seed && home.html) {
     const origin = new URL(seed).origin;
-    const extracted = tree.platform === 'mintlify' ? extractMintlifyNavigation(home.html, origin)?.navigation : undefined;
-    const fromDom = extracted ? undefined : reExtractDomNavigation(pages, tree, home, seed, origin, profile);
-    const nodes = extracted ?? fromDom;
-    if (nodes) {
-      navigationSource = extracted ? 'platform-metadata' : 'dom-sidebar';
+    const sourceById = new Map(tree.pages.map((page) => [page.id, page.source]));
+    const derived = navigationFromFrozenPages(pages.map((page) => ({ url: sourceById.get(page.pageId) ?? '', html: page.html })).filter((page) => /^https?:\/\//.test(page.url)), tree.platform, seed, origin, profile);
+    if (derived) {
+      const nodes = derived.nodes;
+      navigationSource = derived.source;
       const byUrl = new Map(tree.pages.map((page) => [page.source.replace(/\/$/, ''), page.id]));
       const toSource = (items: DiscoveredNavigationNode[]): SourceNavigationNode[] => items.flatMap((node): SourceNavigationNode[] => {
         if (node.type === 'page') { const id = byUrl.get(node.url.replace(/\/$/, '')); return id ? [{ type: 'page', pageId: id, title: node.title }] : []; }
@@ -390,31 +423,6 @@ function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | un
     }
   }
   return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route), links: siteLinksForWorkspace(workspace, tree) };
-}
-
-/**
- * The rendered navigation, re-read from the frozen pages. A site divided into sections
- * renders one sidebar per section, so each section's sidebar comes from a page inside it;
- * discovery assembled the tabs the same way, from the same HTML.
- */
-function reExtractDomNavigation(pages: RawSourcePage[], tree: Tree, home: RawSourcePage, seed: string, origin: string, profile: ScrapeProfile): DiscoveredNavigationNode[] | undefined {
-  const sections = home.html ? extractSectionTabs(home.html, seed, origin, profile) : undefined;
-  if (sections) {
-    const sourceById = new Map(tree.pages.map((page) => [page.id, page.source]));
-    const sidebars = new Map<string, DiscoveredNavigationNode[]>();
-    for (const page of pages) {
-      const url = sourceById.get(page.pageId);
-      if (!url || !page.html || !/^https?:\/\//.test(url)) continue;
-      const section = sectionOfUrl(url, sections);
-      if (!section || sidebars.has(section.url)) continue;
-      const dom = extractDomSidebarNavigation(page.html, url, origin, profile);
-      if (dom) sidebars.set(section.url, dom);
-      if (sidebars.size === sections.length) break;
-    }
-    const navigation = siteSectionNavigation(sections, sidebars);
-    if (navigation) return navigation;
-  }
-  return home.html ? extractDomSidebarNavigation(home.html, seed, origin, profile) : undefined;
 }
 
 /** The Documentation.AI renderer's sidebar container, used to check the deployed navigation. */
@@ -494,7 +502,11 @@ async function main() {
     }
     case 'discover': {
       const workspace = ws(); const s = readSession(workspace);
-      if (existsSync(sourceManifestPath(workspace))) fail('source evidence is already frozen; review the existing tree or use a new workspace for a new discovery');
+      if (existsSync(sourceManifestPath(workspace)) && !v.offline) fail('source evidence is already frozen; review the existing tree, or re-derive it from those frozen bytes with --offline after "rebase"');
+      if (v.offline) {
+        if (s.source.kind !== 'url') fail('--offline re-derives a live-site capture; a repository or export source is already local, so discover it in a new workspace');
+        requireStages(s, 'discover', 'acquire');
+      }
       const platform = s.source.platform ?? v.platform;
       let tree: Tree;
       let sourceManifest: SourceManifest | undefined;
@@ -579,15 +591,23 @@ async function main() {
           }
           const limit = Number(v['discovery-limit']);
           if (!Number.isInteger(limit) || limit < 1 || limit > 50_000) fail('--discovery-limit must be an integer from 1 to 50000');
-          const discovery = await discoverLiveSite({ seedUrl: url, fetcher: f, profile, limit, concurrency: Number(v.concurrency), map: fc ? (u, n) => fc!.map(u, { limit: n }) : undefined });
-          sourceManifest = liveSourceManifest({ ...captureContext, location: url }, discovery);
-          writeFileSync(join(workspace, 'source-cache', 'discovery-result.json'), JSON.stringify(discovery), { mode: 0o600 });
+          const reread = v.offline ? frozenDiscovery(workspace, s, profile, url, platform ?? 'generic') : undefined;
+          const discovery = reread ? reread.derived : await discoverLiveSite({ seedUrl: url, fetcher: f, profile, limit, concurrency: Number(v.concurrency), map: fc ? (u, n) => fc!.map(u, { limit: n }) : undefined });
+          // The manifest describes the capture, so it is built from the frozen crawl and keeps its
+          // timestamp; only the tree below is rebuilt from it. A re-derivation that would alter the
+          // manifest is a different capture, and writeSourceManifest refuses it.
+          const capturedAt = reread ? requireSourceManifest(workspace, s.hashes.sourceManifest).capturedAt : captureContext.capturedAt;
+          sourceManifest = liveSourceManifest({ ...captureContext, capturedAt, location: url }, reread ? reread.frozen : discovery);
+          if (!reread) writeFileSync(join(workspace, 'source-cache', 'discovery-result.json'), JSON.stringify(discovery), { mode: 0o600 });
           writeJson(join(workspace, 'inventory', 'discovery-failures.json'), discovery.failures);
           writeJson(join(workspace, 'inventory', 'sitemaps.json'), discovery.sitemaps);
           writeJson(join(workspace, 'inventory', 'llms.json'), discovery.llms ?? null);
           writeJson(canonicalHostsPath(workspace), { seed: canonicalHosts.seedOrigin, aliases: discovery.canonicalHosts });
           const orderTier = { sidebar: 0, sitemap: 1, crawl: 2 } as const;
-          const pages: TreePage[] = discovery.pages.sort((a, b) => orderTier[a.orderSource] - orderTier[b.orderSource] || a.orderHint - b.orderHint || a.url.localeCompare(b.url)).map(({ url: u, reasons, title, description, sidebarTitle, domSidebarTitle, llms, groupHint, locale, version, sitemap }, i) => {
+          // A site that builds its navigation in the browser renders no sidebar in any page we hold.
+          // That is unobserved, not absent, so no page is told to hide a sidebar on that evidence.
+          const observedSidebar = sidebarObserved(discovery.pages);
+          const pages: TreePage[] = discovery.pages.sort((a, b) => orderTier[a.orderSource] - orderTier[b.orderSource] || a.orderHint - b.orderHint || a.url.localeCompare(b.url)).map(({ url: u, reasons, title, description, sidebarTitle, domSidebarTitle, llms, groupHint, locale, version, sitemap, sidebarPages }, i) => {
             const parsed = new URL(u);
             const parts = parsed.pathname.split('/').filter(Boolean);
             let pathGroups = parts.slice(0, -1);
@@ -596,8 +616,9 @@ async function main() {
             // A URL-derived title is a placeholder, marked as such: inventory replaces it with the page's own H1 and exact mode refuses one that survives.
             const titleSource: TreePage['titleSource'] = llms?.title ? 'llms-txt' : title ? 'platform-metadata' : 'path';
             return {
-              id: pageIdFromPlatform(platform ?? 'generic', u), title: llms?.title ?? title ?? decodeURIComponent(parts.at(-1) ?? 'index').replace(/[-_]+/g, ' '), titleSource, sidebarTitle, domSidebarTitle, description, llms, source: u,
+              id: pageIdFromPlatform(platform ?? 'generic', u), title: llms?.title ?? title ?? decodeURIComponent(parts.at(-1) ?? 'index').replace(/\.(?:html?|xhtml|md|mdx|aspx?|php|jsp)$/i, '').replace(/[-_]+/g, ' '), titleSource, sidebarTitle, domSidebarTitle, description, llms, source: u,
               group: groups, order: i, oldPath: parsed.pathname, migrate: true, locale, version, reason: reasons.join('+'),
+              ...(observedSidebar ? { sourceSidebar: (sidebarPages ?? 0) >= 2 ? 'rendered' as const : 'absent' as const } : {}),
               discovery: sitemap ? { sitemap: sitemap.source, sitemapOrder: sitemap.order, lastmod: sitemap.lastmod, changefreq: sitemap.changefreq, priority: sitemap.priority, groupHint } : undefined,
             };
           });
@@ -645,17 +666,39 @@ async function main() {
             ...(discovery.siteConfig?.name ? {} : discovery.siteName ? { name: discovery.siteName } : {}),
           };
           writeJson(join(workspace, 'inventory', 'platform-meta.json'), siteMeta);
+          const withoutSidebar = pages.filter((page) => page.sourceSidebar === 'absent').length;
+          if (!observedSidebar) console.log('· no page in the capture rendered a navigation sidebar; the source builds one in the browser or shows none. Page layout is left at the Documentation.AI default and the navigation could not be read from the rendered pages.');
+          else if (withoutSidebar) ok(`${withoutSidebar} page(s) render no navigation sidebar in the source and will be written with "show-sidebar": false`);
           ok(`${pages.length} unique URLs from ${discovery.llms ? `${discovery.llms.entries.length} llms.txt entries, ` : ''}recursive links, sidebars, ${discovery.sitemaps.sources.length} sitemap file(s) and configured map sources${discovery.canonicalHosts.length ? ` (canonical hosts: ${discovery.canonicalHosts.join(', ')})` : ''}; ${discovery.failures.length} fetch failures${discovery.truncated ? '; limit reached' : ''}`);
         }
       }
       if (frozen && !sourceManifest) sourceManifest = nativeSourceManifest({ ...captureContext, platform: tree.platform, kind: s.source.kind === 'export' ? 'export' : 'repo', root: frozenRootPath(workspace), freeze: frozen });
       if (!sourceManifest) fail('discovery produced no independent source manifest');
-      const manifestHash = writeSourceManifest(workspace, sourceManifest);
+      // The frozen manifest is never rewritten. If this build would capture a different source
+      // universe, that is a new capture, not a re-derivation, and it needs its own workspace.
+      let manifestHash: string;
+      try { manifestHash = writeSourceManifest(workspace, sourceManifest); }
+      catch (error) {
+        if (!v.offline) throw error;
+        fail(`offline re-derivation would change the frozen source universe (${(error as Error).message}); capture it afresh in a new workspace`);
+      }
       const discoveredSession = readSession(workspace);
       discoveredSession.hashes.sourceManifest = manifestHash;
       if (sourceManifest.source.kind === 'api') discoveredSession.hashes.acquisition = pinAcquisition(workspace, sourceManifest, tree.pages.filter((page) => page.migrate), false);
       writeSession(workspace, discoveredSession);
       ensureScopeDecisionsFile(workspace);
+      if (v.offline && existsSync(join(workspace, 'plan', 'tree.yaml'))) {
+        // the operator's reviewed scope survives; only the structure the migrator derives is rebuilt
+        const reviewed = new Map(readTree(workspace).pages.map((page) => [page.id, page]));
+        let carried = 0;
+        for (const page of tree.pages) {
+          const previous = reviewed.get(page.id);
+          if (previous && previous.migrate !== page.migrate) { page.migrate = previous.migrate; page.reason = previous.reason; carried++; }
+        }
+        const absent = [...reviewed.values()].filter((page) => !tree.pages.some((entry) => entry.id === page.id));
+        if (carried) ok(`${carried} reviewed scope decision(s) carried onto the rebuilt tree`);
+        for (const page of absent.slice(0, 5)) console.log(`· page in the reviewed tree is absent from the rebuilt tree: ${page.source}`);
+      }
       writeTree(workspace, tree);
       if (sourceManifest.issues?.length && (s.fidelityMode ?? 'exact') === 'exact') {
         markStage(workspace, 'discover', 'failed', 'source universe unproven');
@@ -663,6 +706,33 @@ async function main() {
       }
       markStage(workspace, 'discover', 'done');
       humanGate(1, 'scope and structure', `review ${join(workspace, 'plan', 'tree.yaml')} plus source-specific inventory; confirm pages, groups, order, versions and locales before acquisition/inventory`);
+      break;
+    }
+    case 'rebase': {
+      // A fix to the migrator invalidates what the migrator derived, never what the source served.
+      // Rebasing keeps the frozen bytes and their pins, stales every derivation, and records the
+      // build change so the certificate shows each build that touched this migration.
+      const workspace = ws(); const s = readSession(workspace);
+      requireStages(s, 'discover');
+      const reason = (v.reason ?? '').trim();
+      if (!reason) fail('--reason is required: record why this workspace moves onto a new migrator build');
+      const current = captureMigratorProvenance({ repoRoot: PLUGIN_ROOT, packageVersion: CORE_VERSION });
+      const drift = migratorDrift(s.migrator, current);
+      if (!drift.length) fail(`the migrator has not changed since this session was pinned (${describeMigrator(current)}); there is nothing to rebase`);
+      const manifest = requireSourceManifest(workspace, s.hashes.sourceManifest);
+      requireAcquisition(workspace, manifest, s.hashes.acquisition, readTree(workspace).pages);
+      s.rebases = [...(s.rebases ?? []), { at: new Date().toISOString(), reason, from: s.migrator, to: current, sourceManifest: s.hashes.sourceManifest, acquisition: s.hashes.acquisition }];
+      s.migrator = current;
+      // every derivation of the frozen bytes is stale; the frozen bytes, their pins and the
+      // captured OpenAPI graph are untouched, because no fix to this migrator can change them
+      for (const key of ['snapshot', 'componentPlan', 'urlPlan', 'assetPlan', 'blockExclusions', 'scopeDecisions', 'canonicalOutput', 'convertInputs', 'convertOutput', 'previousConvertOutput'] as const) s.hashes[key] = undefined;
+      for (const stage of ['inventory', 'plan', 'assets', 'convert', 'nav', 'verify', 'write', 'report']) {
+        if (s.stages[stage]) s.stages[stage] = { status: 'pending', at: new Date().toISOString(), note: `stale: rebased onto ${current.gitSha.slice(0, 12)}` };
+      }
+      writeSession(workspace, s);
+      ok(`rebased onto ${describeMigrator(current)} (${drift.join('; ')})`);
+      ok(`frozen source kept: ${manifest.pages.length} page(s) and their acquisition pin are intact, so nothing is fetched again`);
+      ok(`next: "discover --offline" to rebuild the tree and navigation from those bytes, then inventory onward`);
       break;
     }
     case 'acquire': {
@@ -714,6 +784,8 @@ async function main() {
       const tree = readTree(workspace);
       const inScope = tree.pages.filter((p) => p.migrate);
       const docs: DocIR[] = [];
+      /** Pages whose URL-derived placeholder title the source's own H1 replaced here. */
+      let statedTitles = 0;
       let root = sourceManifest.frozenRoot ? frozenRootPath(workspace) : resolve(s.source.location);
       if (tree.platform === 'document360' && s.source.kind === 'export') {
         const exp = readD360Export(root);
@@ -749,6 +821,7 @@ async function main() {
             const stated = p.llms?.title ?? published.title ?? (p.titleSource && p.titleSource !== 'path' ? p.title : undefined);
             if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry and published Markdown H1 lack one, and the tree title is a URL-derived placeholder (titleSource ${p.titleSource ?? 'unset'}); re-run init with --fidelity permissive to fall back to the URL`);
             const title = stated ?? p.title;
+            if (stated && p.titleSource === 'path') { p.title = stated; p.titleSource = p.llms?.title ? 'llms-txt' : 'published-markdown'; statedTitles++; }
             docs.push(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}) }, codeMetaStrip: profile.codeMetaStrip }));
           }
           else {
@@ -762,11 +835,22 @@ async function main() {
             const stated = p.llms?.title ?? h1 ?? (p.titleSource && p.titleSource !== 'path' ? p.title : undefined);
             if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry, rendered <h1> and platform metadata all lack one (titleSource ${p.titleSource ?? 'unset'}); re-run init with --fidelity permissive to fall back to the URL`);
             const title = stated ?? p.title;
+            if (stated && p.titleSource === 'path') { p.title = stated; p.titleSource = p.llms?.title ? 'llms-txt' : 'rendered-h1'; statedTitles++; }
             const description = page.llms?.description ?? page.description ?? p.description;
-            docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}) }, children: ir.children });
+            // The target renders the frontmatter title as the page heading. The source H1 that stated
+            // that title would then print a second time under it, so it becomes the title and leaves
+            // the body — exactly what unwrapPublishedMarkdown does with a published page's leading H1.
+            // Only that one heading goes, and only when it is the title: any other H1 is still content.
+            const children = firstHeading && h1 && h1 === title ? ir.children.filter((block) => block !== firstHeading) : ir.children;
+            docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}) }, children });
           }
         }
       }
+      // The title the source states reaches the tree, not only the page: the sidebar label and the
+      // restructured path both read it from there, so leaving the placeholder behind would ship a
+      // navigation of URL stems ("p a DeleteAudience") beside pages correctly titled by their H1.
+      if (statedTitles) writeTree(workspace, tree);
+
       // Every offending page is reported in one message: an operator sees the whole list instead of
       // bisecting a repository one failed run at a time.
       const unreadableDimensions = docs.flatMap((doc) => unreadableImageDimensions(doc));
@@ -798,7 +882,7 @@ async function main() {
       const snapHash = sha256(readdirSync(snapDir).sort().map((f) => fileHash(join(snapDir, f))).join('\n'));
       s.hashes.snapshot = snapHash; writeSession(workspace, s);
       markStage(workspace, 'inventory', 'done');
-      ok(`${docs.length} pages snapshotted, ${clusters.length} component clusters, ${links.length} links; snapshot ${snapHash.slice(0, 12)}`);
+      ok(`${docs.length} pages snapshotted, ${clusters.length} component clusters, ${links.length} links${statedTitles ? `, ${statedTitles} URL-derived title(s) replaced by the source's own` : ''}; snapshot ${snapHash.slice(0, 12)}`);
       break;
     }
     case 'plan': {

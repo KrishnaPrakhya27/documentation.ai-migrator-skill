@@ -50,6 +50,11 @@ valueMaps:
       caution: alert
       important: info
       check: success
+      # Decision 2026-09-12: a themed aside class spelled "call-out"/"callout" (MadCap Flare, and
+      # common in hand-written HTML themes) is the informational kind; without this the class name
+      # reaches the renderer as a kind the enum does not contain.
+      call-out: info
+      callout: info
 
 notes:
   kbd: "Registered on the client renderer only; safe to emit as lowercase <kbd> (HTML element, not a custom component)."

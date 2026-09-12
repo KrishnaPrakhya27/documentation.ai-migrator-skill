@@ -349,15 +349,29 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     platform: 'generic',
     signals: [],
     articleSelector: 'article, main, [role=main], #content, .content',
-    removeSelectors: ['nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript', '[role=navigation]', '.sidebar', '.toc', '.breadcrumb', '.breadcrumbs'],
-    navSelector: 'nav, aside, .sidebar',
-    navLinkSelector: 'nav a[href], aside a[href], .sidebar a[href]',
-    // A generic theme's sidebar headings have no shared markup: headings inside the navigation are the cross-theme floor.
-    navGroupSelector: 'nav h2, nav h3, nav h4, aside h2, aside h3, aside h4, .sidebar h2, .sidebar h3, .sidebar h4',
+    // A form is interactive chrome a static migration can never carry: a site search, a feedback
+    // widget, a filter. Themes render it inside the article region, so removing the element takes
+    // its inputs and buttons with it instead of leaving them stranded in the page.
+    removeSelectors: ['nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript', 'form', '[role=navigation]', '[role=search]', '.sidebar', '.toc', '.breadcrumb', '.breadcrumbs'],
+    // Containers in preference order: the documentation sidebar before the page's own <nav>,
+    // which on most sites is the site header. The first one holding navigation is used.
+    navSelector: '.sidebar, [role=navigation], aside, nav',
+    navLinkSelector: 'a[href]',
+    // A generic theme labels a sidebar group with whatever it likes: a heading, a collapsible
+    // button, or a div whose class names it. A candidate containing links is a wrapper, not a label.
+    navGroupSelector: 'h2, h3, h4, h5, h6, strong, button, summary, [class*=group], [class*=category], [class*=section], [class*=heading]',
+    // The common HTML shape for subpages: a list right after the page's own link.
+    navChildListSelector: 'ul, ol',
+    // A status pill rendered inside an entry ("Beta", "New") decorates the label, it is not part of it.
+    navBadgeSelector: '[data-tag], [class*=badge], [class*=pill], [class*=chip]',
     chromeStrings: COMMON_CHROME_STRINGS,
     recognisers: [
       { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] },
       { selector: '.admonition, .callout, .alert, .note, .warning, .tip, .info', name: 'admonition', props: { kind: '@class-suffix:' } },
+      // MadCap Flare publishes a collapsible section as a head holding the clickable label and a
+      // body holding the content. Flare has no adapter of its own and the router sends it here;
+      // a dedicated MadCap profile is the proper home if more of its markup needs recognising.
+      { selector: '.MCDropDown', name: 'MCDropDown', props: { title: '@text:.MCDropDownHead' }, strip: ['.MCDropDownHead'] },
     ],
     assetHosts: [],
   },

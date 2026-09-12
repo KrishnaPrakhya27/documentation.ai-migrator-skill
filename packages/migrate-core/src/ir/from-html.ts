@@ -5,6 +5,7 @@
  */
 import { Parser } from 'htmlparser2';
 import type { Block, Inline, ImageNode, ComponentNode, HeadingNode, ListItemNode, TableRowNode, Frontmatter, DocIR } from './types.js';
+import { inlineText } from './types.js';
 import { readPixelDimension } from './dimensions.js';
 import { nodeId } from '../session/ids.js';
 
@@ -71,11 +72,16 @@ function matchesCompound(el: El, compound: string): boolean {
   const cls = (el.attribs.class ?? '').split(/\s+/).filter(Boolean);
   for (const c of classes.split('.').filter(Boolean)) if (!cls.includes(c)) return false;
   for (const a of attrs.match(/\[[^\]]+\]/g) ?? []) {
-    const am = a.slice(1, -1).match(/^([^=]+)(?:=["']?([^"']*)["']?)?$/);
+    const am = a.slice(1, -1).match(/^([^\]=~^$*|]+)(?:([~^$*|]?)=["']?([^"']*)["']?)?$/);
     if (!am) return false;
-    const [, k, v] = am;
-    if (!(k in el.attribs)) return false;
-    if (v !== undefined && el.attribs[k] !== v) return false;
+    const [, k, op, v] = am;
+    const actual = el.attribs[k];
+    if (actual === undefined) return false;
+    if (v === undefined) continue;
+    // [a=v] exact, [a^=v] starts, [a$=v] ends, [a*=v] contains, [a~=v] one whitespace-separated word
+    const ok = op === '^' ? actual.startsWith(v) : op === '$' ? actual.endsWith(v) : op === '*' ? actual.includes(v)
+      : op === '~' ? actual.split(/\s+/).includes(v) : op === '|' ? actual === v || actual.startsWith(`${v}-`) : actual === v;
+    if (!ok) return false;
   }
   return true;
 }
@@ -98,6 +104,32 @@ export interface ComponentRecogniser {
   /** Elements to strip from children before conversion (e.g. the summary of a details). */
   strip?: string[];
 }
+
+/** Whether a link is written anywhere inside this inline subtree. */
+function containsLink(node: Inline): boolean {
+  if (node.type === 'link') return true;
+  return 'children' in node && Array.isArray(node.children) && node.children.some(containsLink);
+}
+
+/** Any inline content that renders as characters, so an anchor wrapping only an icon adds no link. */
+function hasVisibleText(node: Inline): boolean {
+  if (node.type === 'text') return node.value.trim().length > 0;
+  if (node.type === 'inlineCode') return node.value.trim().length > 0;
+  if (node.type === 'image') return true;
+  return 'children' in node && Array.isArray(node.children) && node.children.some(hasVisibleText);
+}
+
+/** The same content with every nested link lifted to this level, in document order. */
+function hoistLinks(nodes: Inline[]): Inline[] {
+  return nodes.flatMap((node) => {
+    if (node.type === 'link') return [node];
+    if ('children' in node && Array.isArray(node.children) && node.children.some(containsLink)) return hoistLinks(node.children as Inline[]);
+    return [node];
+  });
+}
+
+/** A table wider than this is malformed markup, not a table; a bad colspan must not build an endless row. */
+const MAX_TABLE_COLUMNS = 64;
 
 export interface HtmlAdapterOptions {
   platform: string;
@@ -243,9 +275,27 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
         case 'kbd': out.push({ id: id(p, 'kbd'), type: 'kbd', children: kids() }); break;
         case 'br': out.push({ id: id(p, 'br'), type: 'break' }); break;
         case 'a': {
-          const url = n.attribs.href ?? '';
-          if (url) links.push(url);
-          out.push({ id: id(p, url), type: 'link', url, title: n.attribs.title, children: kids() });
+          const url = (n.attribs.href ?? '').trim();
+          // An anchor with no href, one pointing at the bare fragment, or one whose href is a
+          // script call goes nowhere: it is a disclosure toggle, a skip link, or a named anchor
+          // marking a spot in the page. None survives as a link, and emitting one would put a dead
+          // link in the output, so the text it wraps is kept and the anchor itself is dropped.
+          if (!url || url === '#' || /^javascript:/i.test(url)) { out.push(...kids()); break; }
+          const children = kids();
+          // HTML parsing closes an open <a> when another <a> starts, so an anchor written inside
+          // another is a sibling of it, never its content. Keeping the nesting would emit a link
+          // inside a link, which is not expressible in Markdown and corrupts both of them.
+          if (children.some(containsLink)) {
+            let run: Inline[] = [];
+            const flush = (): void => {
+              if (run.length) { if (run.some(hasVisibleText)) { links.push(url); out.push({ id: id(p, url), type: 'link', url, title: n.attribs.title, children: run }); } else out.push(...run); run = []; }
+            };
+            for (const part of hoistLinks(children)) { if (part.type === 'link') { flush(); out.push(part); } else run.push(part); }
+            flush();
+            break;
+          }
+          links.push(url);
+          out.push({ id: id(p, url), type: 'link', url, title: n.attribs.title, children });
           break;
         }
         case 'img': {
@@ -295,6 +345,19 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
       if (first && first.type === 'text') inl[0] = { ...first, value: first.value.replace(/^\s+/, '') };
       if (last && last.type === 'text') inl[inl.length - 1] = { ...last, value: last.value.replace(/\s+$/, '') };
       if (inl.length === 1 && inl[0].type === 'image') { out.push(inl[0] as ImageNode); run = []; return; }
+      // A run of nothing but links with not even whitespace between them is a set of separate targets
+      // the source lays out as blocks of its own — a card grid, a row of buttons. Merged into one
+      // paragraph their labels abut with nothing between, and the reader sees the words run together
+      // ("Account ManagementAdmin and RightsAudiences"), so each link keeps its own block. A run with
+      // any text in it, a space included, already reads correctly and is left as one paragraph.
+      if (inl.length > 1 && inl.every((x) => x.type === 'link')) {
+        inl.forEach((node, k) => {
+          const text = inlineText([node]).trim();
+          out.push({ id: id([...path, i, k], text), type: 'paragraph', children: [node] });
+        });
+        run = [];
+        return;
+      }
       const txt = inl.map((x) => (x.type === 'text' ? x.value : 'x')).join('').trim();
       if (txt) out.push({ id: id([...path, i], txt), type: 'paragraph', children: inl });
       run = [];
@@ -341,11 +404,38 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
         return blocksOf(n.children, p);
       }
       case 'table': {
-        const rows: TableRowNode[] = [];
         const trs = findAll(n, 'tr');
+        // A Markdown table is a plain grid, so a cell spanning rows or columns is laid out over
+        // every position it covers and its content repeated there. Dropping the span instead would
+        // shift every later cell in the row one column left, silently filing values under the wrong
+        // heading; leaving the covered positions blank would read as missing data.
+        const span = (cell: El, attribute: string, limit: number): number => {
+          const declared = Number.parseInt(cell.attribs[attribute] ?? '1', 10);
+          return Number.isFinite(declared) && declared > 1 ? Math.min(declared, limit) : 1;
+        };
+        const covering = new Map<string, El>();
+        const rowCells: El[][] = [];
         trs.forEach((tr, ri) => {
           const cells = tr.children.filter((c): c is El => c.type === 'tag' && (c.name === 'td' || c.name === 'th'));
-          rows.push({ id: id([...p, ri], 'tr'), type: 'tableRow', isHeader: cells.length > 0 && cells.every((c) => c.name === 'th'), children: cells.map((c, ci) => ({ id: id([...p, ri, ci], textOf(c)), type: 'tableCell', children: inlineOf(c.children, [...p, ri, ci]) })) });
+          rowCells.push(cells);
+          let column = 0;
+          for (const cell of cells) {
+            while (covering.has(`${ri},${column}`)) column++;
+            const rows = span(cell, 'rowspan', trs.length - ri);
+            const columns = span(cell, 'colspan', MAX_TABLE_COLUMNS - column);
+            for (let r = 0; r < rows; r++) for (let c = 0; c < columns; c++) covering.set(`${ri + r},${column + c}`, cell);
+            column += columns;
+          }
+        });
+        let width = 0;
+        for (const key of covering.keys()) width = Math.max(width, Number(key.split(',')[1]) + 1);
+        const rows: TableRowNode[] = trs.map((tr, ri) => {
+          const cells = rowCells[ri];
+          const children = Array.from({ length: width }, (unused, ci) => {
+            const cell = covering.get(`${ri},${ci}`);
+            return { id: id([...p, ri, ci], cell ? textOf(cell) : ''), type: 'tableCell' as const, children: cell ? inlineOf(cell.children, [...p, ri, ci]) : [] };
+          });
+          return { id: id([...p, ri], 'tr'), type: 'tableRow', isHeader: cells.length > 0 && cells.every((c) => c.name === 'th'), children };
         });
         return [{ id: id(p, 'table'), type: 'table', children: rows }];
       }

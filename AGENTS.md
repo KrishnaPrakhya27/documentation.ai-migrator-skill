@@ -15,6 +15,11 @@ So: when a stage cannot prove something, it stops and says what to fix. Never wo
 around a stopped stage. Never hand-edit `output/`. Never weaken or skip a gate to
 make a run finish.
 
+When you fix this plugin part-way through a migration, do not start a new workspace and crawl the
+source again: run `dai-migrate rebase --reason "<what changed>"` then `dai-migrate discover
+--offline`. The frozen bytes are the customer's, not ours, so a fix to our code stales only what we
+derived from them. See "After fixing the migrator mid-run" in `skills/migrate/SKILL.md`.
+
 ## How to run a migration
 
 Follow `skills/migrate/SKILL.md`. It is the router: it fingerprints the source and

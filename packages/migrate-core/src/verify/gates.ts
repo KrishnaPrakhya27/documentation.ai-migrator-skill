@@ -6,7 +6,7 @@ import { readdirSync, readFileSync, existsSync, statSync, lstatSync } from 'node
 import { join, relative } from 'node:path';
 import { validateMdx, validateNavigation } from '@dai/content-contract';
 import { Ledger, effectiveExclusions, summarize, type LedgerSummary } from '../ledger/dispositions.js';
-import type { Block, DocIR } from '../ir/types.js';
+import type { Block, DocIR, Inline } from '../ir/types.js';
 import { walkBlocks, inlineText } from '../ir/types.js';
 import { redirectMaps, readUrlPlan } from '../urls/plan.js';
 import type { SiteLinks } from '../urls/site-links.js';
@@ -112,14 +112,54 @@ function chromeContentIds(doc: DocIR): Set<string> {
   return ids;
 }
 
-export function proseSegments(doc: DocIR): string[] {
+/**
+ * Prose text of an inline run, spaced the way `normaliseMdxText` spaces the output: an inline image
+ * becomes ` alt ` there, so it has to separate its neighbours here too. Without that, two cards
+ * rendered side by side compare as one run — `…"buy one, get one free" offer` followed by
+ * `Send 50% discount…` joins into `offersend` and the segment reads as missing though every word
+ * of it is in the output.
+ */
+function proseText(nodes: Inline[] | undefined): string {
+  if (!nodes) return '';
+  return nodes.map((n) => {
+    switch (n.type) {
+      case 'text': return n.value;
+      case 'inlineCode': return n.value;
+      case 'break': return '\n';
+      case 'image': return ` ${n.alt} `;
+      // Raw inline HTML (`<u>prior to store catalog ingest</u>`) is emitted as written, and the output
+      // normaliser strips its tags and keeps the words. Dropping it here instead would cut the words
+      // out of the middle of a sentence and report the whole sentence missing.
+      case 'inlineHtml': return ` ${n.value.replace(/<[^<>]*>/g, ' ')} `;
+      default: return proseText((n as { children?: Inline[] }).children);
+    }
+  }).join('');
+}
+
+/**
+ * Source IR text is text, never markup. An angle bracket the author wrote (`<%= user.first_name %>`
+ * in a template example) must survive tag-stripping exactly as the serializer's character reference
+ * does on the output side, or the two sides normalise differently and the segment reads as missing.
+ */
+function escapeSourceText(text: string): string {
+  // Only `<`, exactly as the serializer writes it: a bare `>` stays literal in the output and is
+  // normalised away there, so escaping it here would make the two sides disagree the other way.
+  return text.replace(/</g, '&lt;');
+}
+
+/**
+ * `excludedIds` are the node ids the ledger records as excluded for this page. A block removed by a
+ * reviewed plan decision is accounted for there; counting it here as well would report the operator's
+ * own approved exclusion as lost prose.
+ */
+export function proseSegments(doc: DocIR, excludedIds: ReadonlySet<string> = new Set()): string[] {
   const segs: string[] = [];
-  const norm = (s: string) => normaliseMdxText(s).trim();
+  const norm = (s: string) => normaliseMdxText(escapeSourceText(s)).trim();
   const chrome = chromeContentIds(doc);
   walkBlocks(doc.children, (b) => {
-    if (chrome.has(b.id)) return;
-    if (b.type === 'paragraph' || b.type === 'heading') { const t = norm(inlineText(b.children)); if (t.length >= 12) segs.push(t); }
-    else if (b.type === 'table') for (const r of b.children) for (const c of r.children) { const t = norm(inlineText(c.children)); if (t.length >= 12) segs.push(t); }
+    if (chrome.has(b.id) || excludedIds.has(b.id)) return;
+    if (b.type === 'paragraph' || b.type === 'heading') { const t = norm(proseText(b.children)); if (t.length >= 12) segs.push(t); }
+    else if (b.type === 'table') for (const r of b.children) for (const c of r.children) { const t = norm(proseText(c.children)); if (t.length >= 12) segs.push(t); }
   });
   return segs;
 }
@@ -143,11 +183,22 @@ export function normaliseMdxText(mdx: string): string {
     .replace(/[#>|-]+/g, ' ')
     // a less-than written as a reference is text, so it is read only once tags are gone
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
-    .replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"')
     .replace(/\s+/g, ' ')
     // the space a code span is padded with before punctuation is not text
     .replace(/ ([,.;:!?])/g, '$1')
     .toLowerCase();
+}
+
+/**
+ * Text taken from the IR, which is what the author wrote and never markup: a heading reading
+ * "<move>What are the attributes…" holds those characters because the source wrote them escaped.
+ * Read as MDX it would be stripped as a tag, while the output keeps it, and the two sides would
+ * disagree about a page that converted perfectly. Escaping the one character the serializer escapes,
+ * and only that one, puts both sides in the spelling the output actually carries.
+ */
+export function normaliseSourceText(text: string): string {
+  return normaliseMdxText(text.replace(/</g, '&lt;'));
 }
 
 /** Ordered outline: heading depth + normalised text. Structure must survive one to one, not just the words. */
@@ -165,7 +216,7 @@ export function headingOutline(doc: DocIR): string[] {
   });
   walkBlocks(doc.children, (b) => {
     if (b.type !== 'heading' || chrome.has(b.id)) return;
-    const text = normaliseMdxText(inlineText(b.children)).trim();
+    const text = normaliseSourceText(inlineText(b.children)).trim();
     out.push(stepTitles.has(b.id) ? `step:${text}` : `${b.depth}:${text}`);
   });
   return out;
@@ -445,6 +496,14 @@ export function runGates(input: GateInput): GateResult[] {
   gates.push({ id: 'assets-ready', status: unresolvedAssets.length ? 'fail' : 'pass', detail: assets.provider === 'none' ? `${Object.values(assets.entries).filter((e) => e.status === 'kept-external').length} assets intentionally remain on source hosts (provider none)` : `${unresolvedAssets.length} assets failed, remain external, or lack a final ingested URL`, count: unresolvedAssets.length, samples: unresolvedAssets.slice(0, 5).flatMap((e) => e.sourceUrls.slice(0, 1)) });
 
   // 3. prose match + code blocks + tables
+  // A block the ledger records as excluded was removed by a reviewed decision, so it is not prose the
+  // conversion lost; `effectiveExclusions` already covers the whole excluded subtree.
+  const excludedByPage = new Map<string, Set<string>>();
+  for (const d of exclusions) {
+    let page = excludedByPage.get(d.pageId);
+    if (!page) { page = new Set(); excludedByPage.set(d.pageId, page); }
+    page.add(d.sourceNodeId);
+  }
   let unmatched = 0; const unmatchedSamples: string[] = [];
   let codeMismatch = 0; const codeSamples: string[] = [];
   let tableMismatch = 0; const tableSamples: string[] = [];
@@ -452,7 +511,7 @@ export function runGates(input: GateInput): GateResult[] {
     if (!outputFile || !existsSync(outputFile)) continue;
     const mdx = readFileSync(outputFile, 'utf8');
     const hay = normaliseMdxText(mdx);
-    for (const seg of proseSegments(doc)) if (!hay.includes(seg)) { unmatched++; if (unmatchedSamples.length < 5) unmatchedSamples.push(`${doc.source}: "${seg.slice(0, 60)}"`); }
+    for (const seg of proseSegments(doc, excludedByPage.get(doc.pageId))) if (!hay.includes(seg)) { unmatched++; if (unmatchedSamples.length < 5) unmatchedSamples.push(`${doc.source}: "${seg.slice(0, 60)}"`); }
     const src = codeBlocks(doc); const out = new Set(mdxCodeBlocks(mdx));
     for (const c of src) if (!out.has(c)) { codeMismatch++; if (codeSamples.length < 5) codeSamples.push(`${doc.source}: ${c.slice(0, 40)}`); }
     const outputTables = mdxTableSignatures(mdx);

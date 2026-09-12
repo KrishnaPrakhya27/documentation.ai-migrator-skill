@@ -6,6 +6,16 @@ rules:
     tier: T1
     match: { name: details }
     to: { name: Expandable, props: { title: $summary } }
+  - id: generic/admonition-callout
+    tier: T1
+    match: { name: admonition }
+    to: { name: Callout, props: { kind: $map(kind) } }
+    note: "a themed aside (.note, .callout, .warning, .tip) is a callout; its class suffix names the kind through the contract value map"
+  - id: generic/madcap-dropdown-expandable
+    tier: T1
+    match: { name: MCDropDown }
+    to: { name: Expandable, props: { title: $title } }
+    note: "MadCap Flare collapsible section; the head's label titles the Expandable and the body becomes its content"
   - id: generic/iframe
     tier: T3
     match: { name: iframe }

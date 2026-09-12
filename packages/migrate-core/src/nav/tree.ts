@@ -16,7 +16,7 @@ export interface TreePage {
    * is a placeholder the page's own H1 must replace at inventory; exact mode refuses
    * to migrate a page still holding one.
    */
-  titleSource?: 'llms-txt' | 'platform-metadata' | 'source-config' | 'published-markdown' | 'path';
+  titleSource?: 'llms-txt' | 'platform-metadata' | 'source-config' | 'published-markdown' | 'rendered-h1' | 'path';
   /** Exact label shown in source navigation. It may intentionally differ from the page title. */
   sidebarTitle?: string;
   icon?: string;
@@ -31,6 +31,14 @@ export interface TreePage {
    * and are reported, never invented into a group.
    */
   navMembership?: 'listed' | 'unlisted';
+  /**
+   * Whether the source rendered a navigation sidebar on this page. A source varies this per
+   * page: a landing page shows the reader no sidebar while its section pages do, and migrating
+   * both with a sidebar changes the structure the source presents. `absent` is written only
+   * from a page the source served; undefined means it could not be observed (a site that builds
+   * its navigation in JavaScript), and then the migration asserts nothing.
+   */
+  sourceSidebar?: 'rendered' | 'absent';
   /** Source page description, preserved independently from the title/body. */
   description?: string;
   /** The page's llms.txt entry when the site publishes one: the exact title, description and published-Markdown URL. */
@@ -135,7 +143,7 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
       for (const node of nodes) {
       if (node.type === 'page') {
         const page = eligible.get(node.pageId);
-        if (page) out.push({ ...pageMetadata(page), ...pageMetadata(node), title: node.title ?? page.sidebarTitle ?? page.title, path: page.newPath! });
+        if (page) out.push({ ...pageMetadata(page), ...pageMetadata(node), ...pageLayout(page), title: node.title ?? page.sidebarTitle ?? page.title, path: page.newPath! });
         continue;
       }
       const children = convert(node.children);
@@ -159,12 +167,21 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
       if (!node) { node = { group: g, pages: [], _order: p.order }; byPath.set(key, node); container.push(node); }
       container = node.pages;
     }
-    container.push({ ...pageMetadata(p), title: p.sidebarTitle ?? p.title, path: p.newPath! }); // the renderer rejects bare path strings
+    container.push({ ...pageMetadata(p), ...pageLayout(p), title: p.sidebarTitle ?? p.title, path: p.newPath! }); // the renderer rejects bare path strings
   }
   const clean = (items: Array<PageRef | Node>): Array<PageRef | { group: string; pages: unknown[] }> => items.map((it) => ('group' in it ? { group: it.group, pages: clean(it.pages) } : it));
   const top = clean(roots);
   const allGroups = top.every((t) => 'group' in t);
   return allGroups && top.length ? { groups: top } : { pages: top };
+}
+
+/**
+ * Per-page layout the renderer reads from the page's navigation entry. Only a difference the
+ * source actually showed is written: `show-sidebar` defaults to true, so a page that rendered a
+ * sidebar carries nothing, and a page that rendered none carries false.
+ */
+function pageLayout(page: { sourceSidebar?: 'rendered' | 'absent' }): Record<string, boolean> {
+  return page.sourceSidebar === 'absent' ? { 'show-sidebar': false } : {};
 }
 
 function pageMetadata(page: { icon?: string; tags?: string; badge?: string; method?: string }): Record<string, string> {
