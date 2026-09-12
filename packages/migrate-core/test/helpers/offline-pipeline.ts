@@ -26,7 +26,7 @@ import { buildDocumentationNavigation, placedPageIds, type SourceNavigationNode,
 import { canonicalHash, runGates, type GateInput, type GateResult, type SourceEvidence } from '../../src/verify/gates.js';
 import { loadRawSourcePages } from '../../src/verify/source-truth.js';
 import { unconvertedFidelityRecord, writeFidelityRecords, type FidelityRecord } from '../../src/verify/fidelity-records.js';
-import { authoredContentSnapshot, renderedDocSnapshot } from '../../src/verify/fidelity.js';
+import { authoredContentSnapshot, renderedDocSnapshot, firstFidelityDifference } from '../../src/verify/fidelity.js';
 import { ensureWorkspace } from '../../src/session/workspace.js';
 import { captureMigratorProvenance } from '../../src/session/provenance.js';
 import { sha256 } from '../../src/session/ids.js';
@@ -104,7 +104,10 @@ export async function runOfflinePipeline(input: OfflineRunInput): Promise<Offlin
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, mdx);
     writeFileSync(join(workspace, 'snapshot', 'pages', `${page.id}.json`), JSON.stringify(resolved, null, 2));
-    records.push({ pageId: page.id, source: page.source, pass: true, sourceSnapshot: authoredContentSnapshot(source), resolvedSnapshot: authoredContentSnapshot(resolved), expectedOutput: renderedDocSnapshot(resolved) });
+    const sourceSnapshot = authoredContentSnapshot(source);
+    const resolvedSnapshot = authoredContentSnapshot(resolved);
+    const difference = firstFidelityDifference(sourceSnapshot, resolvedSnapshot);
+    records.push({ pageId: page.id, source: page.source, pass: difference === undefined, difference, sourceSnapshot, resolvedSnapshot, expectedOutput: renderedDocSnapshot(resolved) });
   }
   writeFidelityRecords(workspace, records);
   writeManifest(workspace, { provider: 'none', entries: {}, byUrl: {} });
@@ -165,7 +168,7 @@ function sourceEvidence(workspace: string, outputDir: string, tree: Tree, seedUr
       const toSource = (items: DiscoveredNavigationNode[]): SourceNavigationNode[] => items.flatMap((node): SourceNavigationNode[] => {
         if (node.type === 'page') { const id = byUrl.get(node.url.replace(/\/$/, '')); return id ? [{ type: 'page', pageId: id, title: node.title }] : []; }
         const children = toSource(node.children);
-        return children.length ? [{ type: 'group', label: node.label, children }] : [];
+        return children.length || node.href ? [{ ...node, children }] : [];
       });
       navigation = buildDocumentationNavigation({ ...tree, navigation: toSource(nodes) }, new Set(tree.pages.map((page) => page.newPath!)), meta).navigation;
     }

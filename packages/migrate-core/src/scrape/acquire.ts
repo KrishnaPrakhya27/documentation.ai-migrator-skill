@@ -5,13 +5,15 @@
  * reconciliation. In exact mode a page whose .md is missing or is not Markdown
  * stops the run: nothing is written for that page and no HTML stands in.
  */
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sha256 } from '../session/ids.js';
 import type { TreePage } from '../nav/tree.js';
 import type { FetchedPage, Fetcher } from './fetcher.js';
 import type { ScrapeProfile } from './profiles.js';
 import { markdownAlternateUrl, markdownUrlOfPage, publishedMarkdownProblem, type LlmsEntry } from './published-markdown.js';
+import { mapConcurrent } from './concurrency.js';
+import type { FirecrawlPage } from './firecrawl.js';
 
 export interface AcquiredPage {
   url: string;
@@ -35,9 +37,12 @@ export interface AcquiredPage {
 export interface AcquireInput {
   workspace: string;
   pages: TreePage[];
-  fetcher: Fetcher;
+  fetcher: Pick<Fetcher, 'get'>;
   profile: ScrapeProfile;
   fidelityMode: 'exact' | 'permissive';
+  concurrency?: number;
+  /** Reuse complete hash-checked records within this frozen migration; refresh explicitly starts new acquisition. */
+  resume?: boolean;
 }
 
 export interface AcquiredPageSummary {
@@ -57,7 +62,8 @@ export interface AcquireResult {
 
 export class AcquisitionError extends Error {
   constructor(readonly pages: Array<{ url: string; reason: string }>) {
-    super(`published Markdown is required in exact mode but could not be acquired for ${pages.length} page(s):\n${pages.map((page) => `  ${page.url}: ${page.reason}`).join('\n')}`);
+    // Every mode needs a page's HTML; only exact mode also needs its published Markdown. The reason says which failed.
+    super(`source could not be acquired for ${pages.length} page(s):\n${pages.map((page) => `  ${page.url}: ${page.reason}`).join('\n')}`);
     this.name = 'AcquisitionError';
   }
 }
@@ -67,7 +73,9 @@ export function acquiredPath(workspace: string, pageId: string): string {
 }
 
 function writeAcquired(workspace: string, pageId: string, page: AcquiredPage): void {
-  writeFileSync(acquiredPath(workspace, pageId), JSON.stringify(page, null, 2) + '\n', { mode: 0o600 });
+  const path = acquiredPath(workspace, pageId);
+  writeFileSync(`${path}.tmp`, JSON.stringify(page, null, 2) + '\n', { mode: 0o600 });
+  renameSync(`${path}.tmp`, path);
 }
 
 /** The page's own declaration wins (`<link rel="alternate" type="text/markdown">`), then its llms.txt entry on the page's origin, then the `<path>.md` convention. */
@@ -85,7 +93,7 @@ function publishedMarkdownUrl(page: TreePage, html: string, pageUrl: string): st
 }
 
 /** Fetches the published Markdown into `record`; returns the reason when the response cannot stand as Markdown. */
-async function acquireMarkdown(fetcher: Fetcher, markdownUrl: string, record: AcquiredPage): Promise<string | undefined> {
+async function acquireMarkdown(fetcher: Pick<Fetcher, 'get'>, markdownUrl: string, record: AcquiredPage): Promise<string | undefined> {
   let response: FetchedPage;
   try { response = await fetcher.get(markdownUrl); }
   catch (error) { return (error as Error).message; }
@@ -100,8 +108,19 @@ async function acquireMarkdown(fetcher: Fetcher, markdownUrl: string, record: Ac
 export async function acquirePages(input: AcquireInput): Promise<AcquireResult> {
   mkdirSync(join(input.workspace, 'source-cache', 'acquired'), { recursive: true, mode: 0o700 });
   const result: AcquireResult = { pages: [], markdownUnavailable: [] };
-  const missingMarkdown: Array<{ url: string; reason: string }> = [];
-  for (const page of input.pages) {
+  if (new Set(input.pages.map((page) => page.id)).size !== input.pages.length) throw new Error('acquisition page IDs must be unique');
+  const summarize = (page: TreePage, record: AcquiredPage): { summary: AcquiredPageSummary; fallback?: string } => ({ summary: { id: page.id, url: page.source, htmlSha256: record.htmlSha256!, markdownUrl: record.markdownUrl, markdownSha256: record.markdownSha256 }, fallback: record.markdownUnavailable });
+  const records = await mapConcurrent(input.pages, input.concurrency ?? 4, async (page): Promise<{ summary?: AcquiredPageSummary; fallback?: string; url?: string; problem?: string }> => {
+    try {
+    const cachedPath = acquiredPath(input.workspace, page.id);
+    if (input.resume !== false && existsSync(cachedPath)) {
+      let cached: AcquiredPage | undefined;
+      try { cached = JSON.parse(readFileSync(cachedPath, 'utf8')) as AcquiredPage; } catch { /* Incomplete cache records must be reacquired. */ }
+      if (cached && cached.url === page.source && cached.title === page.title && cached.description === page.description && JSON.stringify(cached.llms) === JSON.stringify(page.llms)
+        && typeof cached.html === 'string' && cached.htmlSha256 === sha256(cached.html)
+        && (cached.markdown === undefined || cached.markdownSha256 === sha256(cached.markdown))
+        && (!input.profile.mdSuffix || typeof cached.markdown === 'string' || input.fidelityMode === 'permissive' && !!cached.markdownUnavailable)) return summarize(page, cached);
+    }
     const html = await input.fetcher.get(page.source);
     if (html.status < 200 || html.status >= 300) throw new Error(`HTTP ${html.status} for ${page.source}`);
     const htmlSha256 = sha256(html.body);
@@ -115,16 +134,40 @@ export async function acquirePages(input: AcquireInput): Promise<AcquireResult> 
         if (input.fidelityMode === 'exact') {
           // A record from an earlier run must not outlive a failed acquisition.
           rmSync(acquiredPath(input.workspace, page.id), { force: true });
-          missingMarkdown.push({ url: page.source, reason });
-          continue;
+          return { url: page.source, problem: reason };
         }
         record.markdownUnavailable = reason;
-        result.markdownUnavailable.push({ url: page.source, reason });
       }
     }
     writeAcquired(input.workspace, page.id, record);
-    result.pages.push({ id: page.id, url: page.source, htmlSha256, markdownUrl: record.markdownUrl, markdownSha256: record.markdownSha256 });
+    return summarize(page, record);
+    } catch (error) {
+      rmSync(acquiredPath(input.workspace, page.id), { force: true });
+      return { url: page.source, problem: (error as Error).message };
+    }
+  });
+  const failures: Array<{ url: string; reason: string }> = [];
+  for (const { summary, fallback, url, problem } of records) {
+    if (!summary) { failures.push({ url: url!, reason: problem ?? 'no acquisition record' }); continue; }
+    result.pages.push(summary);
+    if (fallback) result.markdownUnavailable.push({ url: summary.url, reason: fallback });
   }
-  if (missingMarkdown.length) throw new AcquisitionError(missingMarkdown);
+  if (failures.length) throw new AcquisitionError(failures);
   return result;
+}
+
+/** Firecrawl supplies HTML; published Markdown still comes from the publisher through the common checks. */
+export async function acquireFirecrawlPages(input: AcquireInput & { responses: readonly FirecrawlPage[]; loadResponse?: (url: string) => FirecrawlPage }): Promise<AcquireResult> {
+  const byUrl = new Map(input.responses.map((page) => [page.url.replace(/\/$/, ''), page]));
+  const pageUrls = new Set(input.pages.map((page) => page.source));
+  return acquirePages({ ...input, fetcher: {
+    get: async (url) => {
+      if (!pageUrls.has(url)) return input.fetcher.get(url);
+      const summary = byUrl.get(url.replace(/\/$/, ''));
+      const result = summary && input.loadResponse ? input.loadResponse(summary.url) : summary;
+      if (!result || result.html === undefined) throw new Error(`Firecrawl HTML missing for ${url}`);
+      if (result.statusCode === undefined) throw new Error(`Firecrawl response status missing for ${url}; acquisition cannot be certified`);
+      return { url, finalUrl: result.url, status: result.statusCode, contentType: 'text/html', body: result.html, fetchedAt: new Date().toISOString(), fromCache: false };
+    },
+  } });
 }

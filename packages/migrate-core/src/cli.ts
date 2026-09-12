@@ -11,10 +11,17 @@
 import { parseArgs } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse as parseYaml, stringify as toYaml } from 'yaml';
 import { Cookie, CookieJar } from 'tough-cookie';
 import { loadContract } from '@dai/content-contract';
+import { freezeDirectory, frozenRootPath, sourceManifestPath, writeSourceManifest, type SourceManifest, type FreezeResult } from './evidence/manifest.js';
+import { nativeSourceManifest, liveSourceManifest } from './evidence/capture.js';
+import { requireSourceManifest } from './evidence/verify.js';
+import { pinAcquisition, requireAcquisition } from './evidence/acquisition.js';
+import { ensureScopeDecisionsFile, scopeDecisionsPath } from './evidence/scope.js';
+import { captureSpecGraph, writeSpecOutput, type SpecManifest } from './openapi/graph.js';
+import { readmeCatalogSpecs } from './openapi/readme.js';
 import { assertOutsidePlugin, ensureWorkspace, readSession, writeSession, markStage, type Session, fileHash } from './session/workspace.js';
 import { newMigrationId, pageIdFromPlatform, sha256 } from './session/ids.js';
 import { captureMigratorProvenance } from './session/provenance.js';
@@ -23,11 +30,11 @@ import { preflight, probePushAccess } from './session/preflight.js';
 import { DaiClient, noDeploymentDiagnosis } from './session/platform.js';
 import { fingerprint } from './scrape/fingerprint.js';
 import { CanonicalHosts, Fetcher, type FetchOptions } from './scrape/fetcher.js';
-import { Firecrawl, type FirecrawlOptions } from './scrape/firecrawl.js';
+import { Firecrawl, readFirecrawlPage, type FirecrawlOptions } from './scrape/firecrawl.js';
 import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, type DiscoveredNavigationNode } from './scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, extractSectionTabs, sectionOfUrl, siteSectionNavigation, type DiscoveredNavigationNode } from './scrape/discovery.js';
 import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
-import { acquirePages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
+import { acquirePages, acquireFirecrawlPages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
 import { htmlToIr } from './ir/from-html.js';
 import { markdownToIr } from './ir/from-markdown.js';
 import { extractIfZip, readD360Export, d360ArticleToIr, type D360Export } from './adapters/document360.js';
@@ -38,6 +45,7 @@ import { scanComponentDefinitions, attachDefinitions } from './adapters/definiti
 import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacement, placedPageIds, type GroupOpenapiRef, type SourceNavigationNode, type Tree, type TreePage } from './nav/tree.js';
 import { documentationSiteSettings, withoutSourceBranding } from './nav/site-settings.js';
 import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
+import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor, type SiteLinks } from './urls/site-links.js';
 import { RulesEngine, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
 import { Ledger } from './ledger/dispositions.js';
@@ -49,7 +57,7 @@ import { walkBlocks, inlineText } from './ir/types.js';
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
 import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
 import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';
-import type { AssetProviderOptions } from './assets/providers.js';
+import { s3StorageFromEnv, s3StorageProblems, type AssetProviderOptions } from './assets/providers.js';
 import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
 import { runGates, canonicalHash, previewPushBlockers, waivedExactnessGates, type GateResult, type SourceEvidence } from './verify/gates.js';
 import { loadRawSourcePages, rawSourceIr, type RawSourcePage } from './verify/source-truth.js';
@@ -96,6 +104,11 @@ const { values: v, positionals } = parseArgs({
     'discovery-limit': { type: 'string', default: process.env.MIGRATION_DISCOVERY_LIMIT ?? '5000' },
     'firecrawl-proxy': { type: 'string', default: process.env.FIRECRAWL_PROXY_MODE ?? 'auto' },
     'max-concurrency': { type: 'string', default: process.env.FIRECRAWL_MAX_CONCURRENCY },
+    'firecrawl-timeout-min': { type: 'string', default: process.env.FIRECRAWL_TIMEOUT_MIN ?? '360' },
+    openapi: { type: 'string', multiple: true },
+    concurrency: { type: 'string', default: process.env.MIGRATION_CONCURRENCY ?? '4' },
+    rps: { type: 'string', default: process.env.MIGRATION_RPS ?? '2' },
+    refresh: { type: 'boolean', default: false },
     'zero-data-retention': { type: 'boolean', default: process.env.FIRECRAWL_ZERO_DATA_RETENTION === '1' },
     proxy: { type: 'string', default: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY },
     'headers-file': { type: 'string', default: process.env.MIGRATION_HEADERS_FILE }, 'cookies-file': { type: 'string', default: process.env.MIGRATION_COOKIES_FILE }, 'auth-origin': { type: 'string', default: process.env.MIGRATION_AUTH_ORIGINS },
@@ -161,7 +174,9 @@ function networkOptions(workspace: string, session: Session, allowHosts?: string
   const sourceOrigin = /^https?:\/\//.test(session.source.location) ? new URL(session.source.location).origin : undefined;
   const extraOrigins = (v['auth-origin'] ?? '').split(',').map((x) => x.trim()).filter(Boolean).map((x) => new URL(x).origin);
   const credentialOrigins = [...new Set([sourceOrigin, ...extraOrigins].filter((x): x is string => !!x))];
-  return { workspace, customerAuthorised: session.customerAuthorisedCrawl, allowHosts, proxy: v.proxy, headers: requestHeaders(), cookieJar: requestCookieJar(), credentialOrigins };
+  const rps = Number(v.rps);
+  if (!Number.isFinite(rps) || rps <= 0) fail('--rps must be a positive finite number');
+  return { workspace, rps, customerAuthorised: session.customerAuthorisedCrawl, allowHosts, proxy: v.proxy, headers: requestHeaders(), cookieJar: requestCookieJar(), credentialOrigins };
 }
 async function firecrawlOptions(workspace: string, session: Session, targetUrl: string): Promise<FirecrawlOptions> {
   const net = networkOptions(workspace, session, [new URL(targetUrl).hostname]);
@@ -170,13 +185,18 @@ async function firecrawlOptions(workspace: string, session: Session, targetUrl: 
   if (cookie) headers.cookie = cookie;
   const proxy = v['firecrawl-proxy'];
   if (proxy !== 'basic' && proxy !== 'enhanced' && proxy !== 'auto') fail('--firecrawl-proxy must be basic, enhanced, or auto');
-  const maxConcurrency = v['max-concurrency'] ? Number(v['max-concurrency']) : undefined;
+  const maxConcurrency = Number(v['max-concurrency'] ?? v.concurrency);
   if (maxConcurrency !== undefined && (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 100)) fail('--max-concurrency must be an integer from 1 to 100');
-  return { apiKey: process.env.FIRECRAWL_API_KEY!, workspace, proxy: proxy as FirecrawlOptions['proxy'], maxConcurrency, zeroDataRetention: !!v['zero-data-retention'], headers: Object.keys(headers).length ? headers : undefined };
+  return { apiKey: process.env.FIRECRAWL_API_KEY!, workspace, proxy: proxy as FirecrawlOptions['proxy'], maxConcurrency, timeoutMinutes: Number(v['firecrawl-timeout-min']), retainBodies: false, zeroDataRetention: !!v['zero-data-retention'], headers: Object.keys(headers).length ? headers : undefined };
 }
 function requireStages(session: Session, ...stages: string[]): void {
   const missing = stages.filter((stage) => session.stages[stage]?.status !== 'done');
   if (missing.length) fail(`required stage(s) not complete: ${missing.join(', ')}`);
+}
+function requireFrozenInputs(workspace: string, session: Session): SourceManifest {
+  const manifest = requireSourceManifest(workspace, session.hashes.sourceManifest);
+  requireAcquisition(workspace, manifest, session.hashes.acquisition, readTree(workspace).pages);
+  return manifest;
 }
 function resetDir(path: string): void {
   if (existsSync(path)) rmSync(path, { recursive: true, force: true });
@@ -243,6 +263,16 @@ function sourceCanonicalHosts(workspace: string, seedUrl: string, profile: Scrap
   return new CanonicalHosts(new URL(seedUrl).origin, [...profileHostAliases(profile, new URL(seedUrl).hostname), ...recorded]);
 }
 
+/** How links resolve in this workspace's migrated site: the tree's routes, every path the frozen source is known to publish, the source's host aliases and the URL plan's choice for unmigrated links. */
+function siteLinksForWorkspace(workspace: string, tree: Tree): SiteLinks {
+  const manifest = existsSync(sourceManifestPath(workspace)) ? readJson<SourceManifest>(sourceManifestPath(workspace)) : undefined;
+  const llmsPath = join(workspace, 'inventory', 'llms.json');
+  const llms = existsSync(llmsPath) ? readJson<{ entries?: Array<{ path: string }> } | null>(llmsPath) : null;
+  const hosts = existsSync(canonicalHostsPath(workspace)) ? readJson<{ aliases?: string[] }>(canonicalHostsPath(workspace)).aliases ?? [] : [];
+  const sourcePages = [...(manifest?.pages ?? []).map((page) => page.location), ...(llms?.entries ?? []).map((entry) => entry.path)];
+  return siteLinksFor(tree, { unmigrated: readUrlPlan(workspace)?.unmigratedLinks ?? 'keep', sourcePages, hosts });
+}
+
 function readComponentPlan(workspace: string): Record<string, ComponentPlanEntry> {
   const p = join(workspace, 'plan', 'component-plan.yaml');
   if (!existsSync(p)) return {};
@@ -264,6 +294,61 @@ interface PlatformMeta {
   openapi?: GroupOpenapiRef[];
   /** Source repository root the openapi specs are relative to. */
   root?: string;
+  openapiCaptured?: boolean;
+}
+
+/** Captures full spec graphs before conversion; private catalogs need an explicitly supplied export. */
+async function captureOpenapi(workspace: string, session: Session, tree: Tree): Promise<string | undefined> {
+  const path = join(workspace, 'inventory', 'openapi.json');
+  if (session.hashes.openapi) {
+    if (!existsSync(path) || fileHash(path) !== session.hashes.openapi) fail('OpenAPI manifest changed after acquisition');
+    return session.hashes.openapi;
+  }
+  const meta = readPlatformMeta(workspace);
+  const supplied = (v.openapi ?? []).map((source) => /^https?:\/\//i.test(source) ? source : pathToFileURL(resolve(source)).toString());
+  const frozenRoot = frozenRootPath(workspace);
+  // Mintlify writes repository paths as "/api-reference/openapi.json"; they are relative to the repository, never the filesystem root
+  const native = (meta.openapi ?? []).map((entry) => {
+    if (/^https?:\/\//i.test(entry.spec)) return entry.spec;
+    const file = resolve(frozenRoot, entry.spec.replace(/^\/+/, ''));
+    if (!file.startsWith(frozenRoot + '/')) fail(`openapi spec ${entry.spec} for group ${entry.groupPath.join(' / ')} points outside the source repository`);
+    return pathToFileURL(file).toString();
+  });
+  const fetcher = new Fetcher(networkOptions(workspace, session));
+  let catalog: string[] = [];
+  if (tree.platform === 'readme' && session.source.kind === 'url' && !supplied.length) {
+    const catalogUrl = new URL('/.well-known/api-catalog', session.source.location).toString();
+    const response = await fetcher.get(catalogUrl);
+    if (response.status === 200) {
+      writeFileSync(join(workspace, 'source-cache', 'readme-api-catalog.json'), response.body, { mode: 0o600 });
+      catalog = readmeCatalogSpecs(response.body, catalogUrl);
+    } else if (![404, 401, 403].includes(response.status)) fail(`ReadMe API catalog returned HTTP ${response.status}`);
+    writeJson(join(workspace, 'inventory', 'readme-api-catalog.json'), { url: catalogUrl, status: response.status, specs: catalog, ...(catalog.length ? {} : { issue: 'No public specs available; supply authorized exports with acquire --openapi <file-or-url>. API-reference completeness remains unproven.' }) });
+  }
+  const roots = [...new Set([...native, ...supplied, ...catalog])];
+  if (!roots.length) return undefined;
+  // native specs may reference anything in the frozen repository; a supplied spec only its own directory
+  const localRoots = supplied.filter((url) => url.startsWith('file:')).map((url) => dirname(fileURLToPath(url)));
+  if (native.some((url) => url.startsWith('file:'))) localRoots.push(frozenRoot);
+  const manifest = await captureSpecGraph({ workspace, roots, concurrency: Number(v.concurrency), fetch: async (url) => {
+    if (url.startsWith('file:')) {
+      const file = resolve(fileURLToPath(url));
+      if (!localRoots.some((root) => file.startsWith(root + '/')) || !/\.(?:json|ya?ml)$/i.test(file)) throw new Error(`OpenAPI file reference is outside supplied spec directories or has an unsupported extension: ${file}`);
+      return { body: readFileSync(file, 'utf8'), status: 200, finalUrl: url };
+    }
+    if (!/^https?:\/\//i.test(url)) throw new Error(`unsupported OpenAPI source protocol: ${url}`);
+    return fetcher.get(url);
+  } });
+  writeJson(path, manifest);
+  if (meta.openapi?.length) {
+    const rewritten = meta.openapi.map((entry, i) => {
+      const url = new URL(native[i]); url.hash = '';
+      return { ...entry, spec: `openapi/${manifest.documents.find((document) => document.source === url.toString())!.file}` };
+    });
+    writeJson(join(workspace, 'inventory', 'platform-meta.json'), { ...meta, openapi: rewritten, openapiCaptured: true });
+  }
+  ok(`${manifest.documents.length} OpenAPI documents captured without flattening; ${manifest.operations.length} operations indexed`);
+  return fileHash(path);
 }
 
 function readPlatformMeta(workspace: string): PlatformMeta {
@@ -291,7 +376,7 @@ function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | un
   if (seed && home.html) {
     const origin = new URL(seed).origin;
     const extracted = tree.platform === 'mintlify' ? extractMintlifyNavigation(home.html, origin)?.navigation : undefined;
-    const fromDom = extracted ? undefined : extractDomSidebarNavigation(home.html, seed, origin, profile);
+    const fromDom = extracted ? undefined : reExtractDomNavigation(pages, tree, home, seed, origin, profile);
     const nodes = extracted ?? fromDom;
     if (nodes) {
       navigationSource = extracted ? 'platform-metadata' : 'dom-sidebar';
@@ -299,12 +384,37 @@ function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | un
       const toSource = (items: DiscoveredNavigationNode[]): SourceNavigationNode[] => items.flatMap((node): SourceNavigationNode[] => {
         if (node.type === 'page') { const id = byUrl.get(node.url.replace(/\/$/, '')); return id ? [{ type: 'page', pageId: id, title: node.title }] : []; }
         const children = toSource(node.children);
-        return children.length ? [{ type: 'group', label: node.label, children }] : [];
+        return children.length || node.href ? [{ ...node, children }] : [];
       });
       navigation = buildDocumentationNavigation({ ...tree, navigation: toSource(nodes) }, writtenPagePaths(workspace, tree), readPlatformMeta(workspace)).navigation;
     }
   }
-  return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route) };
+  return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route), links: siteLinksForWorkspace(workspace, tree) };
+}
+
+/**
+ * The rendered navigation, re-read from the frozen pages. A site divided into sections
+ * renders one sidebar per section, so each section's sidebar comes from a page inside it;
+ * discovery assembled the tabs the same way, from the same HTML.
+ */
+function reExtractDomNavigation(pages: RawSourcePage[], tree: Tree, home: RawSourcePage, seed: string, origin: string, profile: ScrapeProfile): DiscoveredNavigationNode[] | undefined {
+  const sections = home.html ? extractSectionTabs(home.html, seed, origin, profile) : undefined;
+  if (sections) {
+    const sourceById = new Map(tree.pages.map((page) => [page.id, page.source]));
+    const sidebars = new Map<string, DiscoveredNavigationNode[]>();
+    for (const page of pages) {
+      const url = sourceById.get(page.pageId);
+      if (!url || !page.html || !/^https?:\/\//.test(url)) continue;
+      const section = sectionOfUrl(url, sections);
+      if (!section || sidebars.has(section.url)) continue;
+      const dom = extractDomSidebarNavigation(page.html, url, origin, profile);
+      if (dom) sidebars.set(section.url, dom);
+      if (sidebars.size === sections.length) break;
+    }
+    const navigation = siteSectionNavigation(sections, sidebars);
+    if (navigation) return navigation;
+  }
+  return home.html ? extractDomSidebarNavigation(home.html, seed, origin, profile) : undefined;
 }
 
 /** The Documentation.AI renderer's sidebar container, used to check the deployed navigation. */
@@ -347,7 +457,7 @@ async function main() {
       ensureWorkspace(workspace);
       const contract = loadContract();
       const allowedOrgs = v['allowed-orgs']!.split(',').map((s) => s.trim()).filter(Boolean);
-      const s3Configured = !!((process.env.MIGRATION_S3_BUCKET ?? process.env.MIGRATION_R2_BUCKET) && process.env.MIGRATION_ASSET_PUBLIC_BASE);
+      const s3Configured = s3StorageProblems(s3StorageFromEnv(process.env)).length === 0;
       const pre = await preflight({ target: { landing: v.target as 'customer-org' | 'demo-org', repoRemote: v.remote }, allowedRemoteOrgs: allowedOrgs, daiApiBase: process.env.DAI_API_BASE, daiApiKey: process.env.DAI_API_KEY, s3Configured });
       for (const c of pre.checks) console.log(`  ${c.status === 'ok' ? '✔' : c.status === 'fail' ? '✖' : '·'} ${c.id}: ${c.detail}`);
       if (pre.checks.some((c) => c.status === 'fail')) fail('preflight failed; fix the connection issues above before migrating (nothing was written)');
@@ -384,11 +494,17 @@ async function main() {
     }
     case 'discover': {
       const workspace = ws(); const s = readSession(workspace);
+      if (existsSync(sourceManifestPath(workspace))) fail('source evidence is already frozen; review the existing tree or use a new workspace for a new discovery');
       const platform = s.source.platform ?? v.platform;
       let tree: Tree;
+      let sourceManifest: SourceManifest | undefined;
+      let frozen: FreezeResult | undefined;
+      const captureContext = { location: s.source.location, platform: platform ?? 'generic', contentContractVersion: s.versions.contentContract, capturedAt: new Date().toISOString() };
       if (v.export ?? (s.source.kind === 'export' ? s.source.location : undefined)) {
         const src = v.export ?? s.source.location;
-        const root = await extractIfZip(src, join(workspace, 'source-cache', 'export'));
+        const extracted = await extractIfZip(src, join(workspace, 'source-cache', 'export'));
+        const root = frozenRootPath(workspace);
+        frozen = freezeDirectory(extracted, root);
         if (platform !== 'document360') fail(`export discovery is implemented for document360; got ${platform ?? 'unknown'} (pass --platform document360 at init)`);
         const exp: D360Export = readD360Export(root);
         writeJson(join(workspace, 'inventory', 'export-unplaced.json'), exp.unplaced);
@@ -402,24 +518,29 @@ async function main() {
       } else {
         const url = v.url ?? s.source.location;
         if (!/^https?:\/\//.test(url) && existsSync(url)) {
-          const root = resolve(url);
+          const root = frozenRootPath(workspace);
+          frozen = freezeDirectory(resolve(url), root);
           const meta: Record<string, unknown> = { platform: platform ?? 'generic', root };
           if ((platform === 'mintlify' || !platform) && (existsSync(join(root, 'docs.json')) || existsSync(join(root, 'mint.json')))) {
+            sourceManifest = nativeSourceManifest({ ...captureContext, platform: 'mintlify', kind: 'repo', root, freeze: frozen });
             const r = readMintlifyRepo(root);
             tree = r.tree;
             Object.assign(meta, { platform: 'mintlify', configFile: r.configFile, name: r.name, colors: r.colors, logo: r.logo, favicon: r.favicon, redirects: r.redirects, openapi: r.openapi, missing: r.missing });
             ok(`${tree.pages.length} pages from ${r.configFile} (${[...new Set(tree.pages.map((p) => p.version).filter(Boolean))].length || 1} version(s)); ${r.missing.length} listed pages missing; ${r.redirects.exact.length} exact + ${r.redirects.wildcard.length} wildcard redirects; ${r.openapi.length} openapi group(s)`);
           } else if ((platform === 'gitbook' || !platform) && existsSync(join(root, 'SUMMARY.md')) || existsSync(join(root, '.gitbook.yaml'))) {
+            sourceManifest = nativeSourceManifest({ ...captureContext, platform: 'gitbook', kind: 'repo', root, freeze: frozen });
             const r = readGitbookRepo(root);
             tree = r.tree;
             Object.assign(meta, { platform: 'gitbook', redirects: { exact: r.redirects, wildcard: [] }, missing: r.missing, unlisted: r.unlisted });
             ok(`${tree.pages.length} pages from SUMMARY.md; ${r.missing.length} missing, ${r.unlisted.length} unlisted files (review plan/tree.yaml)`);
           } else if (platform === 'readme' || (!platform && existsSync(join(root, 'docs')) && sourceFiles(join(root, 'docs')).some((f) => /^---[\s\S]*?^(slug|excerpt):/m.test(readFileSync(f, 'utf8'))))) {
+            sourceManifest = nativeSourceManifest({ ...captureContext, platform: 'readme', kind: 'repo', root, freeze: frozen });
             const r = readReadmeRepo(root);
             tree = r.tree;
             Object.assign(meta, { platform: 'readme', hidden: r.hidden });
             ok(`${tree.pages.length} pages from the ReadMe sync repository; ${r.hidden.length} hidden pages skipped`);
           } else {
+            sourceManifest = nativeSourceManifest({ ...captureContext, kind: 'repo', root, freeze: frozen });
             tree = repoTree(root, platform ?? 'generic');
             ok(`${tree.pages.length} Markdown, MDX, and HTML pages discovered in the source repository (provisional groups from paths)`);
           }
@@ -429,6 +550,14 @@ async function main() {
           // Native source: ReadMe API v2. Bodies are stored as acquired pages so inventory needs no scraping.
           const api = new ReadmeApi({ apiKey: process.env.README_API_KEY, branch: process.env.README_BRANCH });
           const pages = [...(await api.pages('guides')), ...(await api.pages('reference'))];
+          const apiIndex = JSON.stringify(pages);
+          writeFileSync(join(workspace, 'source-cache', 'api-index.json'), apiIndex, { mode: 0o600 });
+          sourceManifest = {
+            schemaVersion: 1, capturedAt: captureContext.capturedAt, source: { kind: 'api', platform: 'readme', location: s.source.location }, contentContractVersion: s.versions.contentContract,
+            indexes: [{ kind: 'api-list', location: 'api-index.json', sha256: sha256(apiIndex), entries: pages.length }],
+            pages: pages.map((page) => ({ pageId: pageIdFromPlatform('readme', `${page.kind}:${page.slug}`), sourceId: `${page.kind}:${page.slug}`, location: `readme-api://${page.kind}/${page.slug}`, published: !page.hidden, evidence: ['api-list'], rawSha256: sha256(page.body) })),
+            issues: ['ReadMe API pagination completeness is not independently proven'],
+          };
           tree = readmeApiTree(pages);
           const bodies = new Map(pages.map((p) => [`${p.kind}:${p.slug}`, p]));
           mkdirSync(join(workspace, 'source-cache', 'acquired'), { recursive: true, mode: 0o700 });
@@ -450,7 +579,9 @@ async function main() {
           }
           const limit = Number(v['discovery-limit']);
           if (!Number.isInteger(limit) || limit < 1 || limit > 50_000) fail('--discovery-limit must be an integer from 1 to 50000');
-          const discovery = await discoverLiveSite({ seedUrl: url, fetcher: f, profile, limit, map: fc ? (u, n) => fc!.map(u, { limit: n }) : undefined });
+          const discovery = await discoverLiveSite({ seedUrl: url, fetcher: f, profile, limit, concurrency: Number(v.concurrency), map: fc ? (u, n) => fc!.map(u, { limit: n }) : undefined });
+          sourceManifest = liveSourceManifest({ ...captureContext, location: url }, discovery);
+          writeFileSync(join(workspace, 'source-cache', 'discovery-result.json'), JSON.stringify(discovery), { mode: 0o600 });
           writeJson(join(workspace, 'inventory', 'discovery-failures.json'), discovery.failures);
           writeJson(join(workspace, 'inventory', 'sitemaps.json'), discovery.sitemaps);
           writeJson(join(workspace, 'inventory', 'llms.json'), discovery.llms ?? null);
@@ -491,7 +622,7 @@ async function main() {
               continue;
             }
             const children = mapNavigation(node.children);
-            if (children.length) out.push({ type: 'group', label: node.label, children });
+            if (children.length || node.href) out.push({ ...node, children });
             }
             return out;
           };
@@ -517,7 +648,19 @@ async function main() {
           ok(`${pages.length} unique URLs from ${discovery.llms ? `${discovery.llms.entries.length} llms.txt entries, ` : ''}recursive links, sidebars, ${discovery.sitemaps.sources.length} sitemap file(s) and configured map sources${discovery.canonicalHosts.length ? ` (canonical hosts: ${discovery.canonicalHosts.join(', ')})` : ''}; ${discovery.failures.length} fetch failures${discovery.truncated ? '; limit reached' : ''}`);
         }
       }
+      if (frozen && !sourceManifest) sourceManifest = nativeSourceManifest({ ...captureContext, platform: tree.platform, kind: s.source.kind === 'export' ? 'export' : 'repo', root: frozenRootPath(workspace), freeze: frozen });
+      if (!sourceManifest) fail('discovery produced no independent source manifest');
+      const manifestHash = writeSourceManifest(workspace, sourceManifest);
+      const discoveredSession = readSession(workspace);
+      discoveredSession.hashes.sourceManifest = manifestHash;
+      if (sourceManifest.source.kind === 'api') discoveredSession.hashes.acquisition = pinAcquisition(workspace, sourceManifest, tree.pages.filter((page) => page.migrate), false);
+      writeSession(workspace, discoveredSession);
+      ensureScopeDecisionsFile(workspace);
       writeTree(workspace, tree);
+      if (sourceManifest.issues?.length && (s.fidelityMode ?? 'exact') === 'exact') {
+        markStage(workspace, 'discover', 'failed', 'source universe unproven');
+        fail(`source discovery cannot be certified: ${sourceManifest.issues.slice(0, 8).join('; ')}. See ${sourceManifestPath(workspace)}; fix the source or adapter and discover in a new workspace`);
+      }
       markStage(workspace, 'discover', 'done');
       humanGate(1, 'scope and structure', `review ${join(workspace, 'plan', 'tree.yaml')} plus source-specific inventory; confirm pages, groups, order, versions and locales before acquisition/inventory`);
       break;
@@ -525,8 +668,16 @@ async function main() {
     case 'acquire': {
       const workspace = ws(); const s = readSession(workspace); const tree = readTree(workspace);
       requireStages(s, 'discover');
-      if (s.source.kind === 'repo' || s.source.kind === 'export') { markStage(workspace, 'acquire', 'done', 'native source; no network acquisition'); ok('native source is already local; no network acquisition needed'); break; }
+      const sourceManifest = requireSourceManifest(workspace, s.hashes.sourceManifest);
+      if (s.source.kind === 'repo' || s.source.kind === 'export') { s.hashes.openapi = await captureOpenapi(workspace, s, tree); writeSession(workspace, s); markStage(workspace, 'acquire', 'done', 'native source and OpenAPI graph frozen'); ok('native source and OpenAPI graph acquired'); break; }
+      if (s.hashes.acquisition) {
+        if (v.refresh) fail('acquisition is pinned; use a new workspace for refreshed source bytes');
+        requireAcquisition(workspace, sourceManifest, s.hashes.acquisition, tree.pages);
+        ok('completed acquisition matches its session pin; no requests needed'); break;
+      }
       const profile = getProfile(v.profile ?? tree.platform);
+      s.hashes.openapi = await captureOpenapi(workspace, s, tree);
+      writeSession(workspace, s);
       let pages = tree.pages.filter((p) => p.migrate && /^https?:\/\//.test(p.source));
       if (v.urls) {
         const selectedRaw = readJson<unknown>(resolve(v.urls));
@@ -538,18 +689,19 @@ async function main() {
         if (!process.env.FIRECRAWL_API_KEY) fail('FIRECRAWL_API_KEY is required for --fetcher firecrawl');
         const fc = new Firecrawl(await firecrawlOptions(workspace, s, s.source.location));
         const got = await fc.batchScrape(pages.map((p) => p.source));
-        const byUrl = new Map(got.map((p) => [p.url.replace(/\/$/, ''), p]));
-        for (const page of pages) {
-          const result = byUrl.get(page.source.replace(/\/$/, ''));
-          if (!result) fail(`acquisition result missing for ${page.source}`);
-          writeJson(acquiredPath(workspace, page.id), result);
-        }
+        const host = new URL(s.source.location).hostname;
+        const publishedFetcher = new Fetcher({ ...networkOptions(workspace, s, [host]), canonicalHosts: sourceCanonicalHosts(workspace, s.source.location, profile) });
+        // Firecrawl's generated Markdown is not the publisher's Markdown. Send every page
+        // through the same acquisition checks and fetch the declared Markdown separately.
+        await acquireFirecrawlPages({ workspace, pages, profile, fidelityMode: s.fidelityMode ?? 'exact', concurrency: Number(v.concurrency), resume: !v.refresh, fetcher: publishedFetcher, responses: got, loadResponse: (url) => readFirecrawlPage(workspace, url) });
       } else {
         const host = new URL(s.source.location).hostname;
         const fetcher = new Fetcher({ ...networkOptions(workspace, s, [host]), canonicalHosts: sourceCanonicalHosts(workspace, s.source.location, profile) });
-        const acquisition = await acquirePages({ workspace, pages, fetcher, profile, fidelityMode: s.fidelityMode ?? 'exact' });
+        const acquisition = await acquirePages({ workspace, pages, fetcher, profile, fidelityMode: s.fidelityMode ?? 'exact', concurrency: Number(v.concurrency), resume: !v.refresh });
         for (const fallback of acquisition.markdownUnavailable) console.log(`· ${fallback.url}: published Markdown not acquired (${fallback.reason}); permissive mode keeps the rendered HTML`);
       }
+      s.hashes.acquisition = pinAcquisition(workspace, sourceManifest, pages, (s.fidelityMode ?? 'exact') === 'exact' && !!profile.mdSuffix);
+      writeSession(workspace, s);
       markStage(workspace, 'acquire', 'done', `${pages.length} pages frozen`);
       ok(`${pages.length} pages acquired into source-cache/acquired`);
       break;
@@ -557,14 +709,14 @@ async function main() {
     case 'inventory': {
       const workspace = ws(); const s = readSession(workspace);
       requireStages(s, 'discover');
+      const sourceManifest = requireFrozenInputs(workspace, s);
       if (s.source.kind === 'url') requireStages(s, 'acquire');
       const tree = readTree(workspace);
       const inScope = tree.pages.filter((p) => p.migrate);
       const docs: DocIR[] = [];
-      let root = resolve(s.source.location);
+      let root = sourceManifest.frozenRoot ? frozenRootPath(workspace) : resolve(s.source.location);
       if (tree.platform === 'document360' && s.source.kind === 'export') {
-        const cachedRoot = join(workspace, 'source-cache', 'export');
-        const exp = readD360Export(existsSync(cachedRoot) ? cachedRoot : root);
+        const exp = readD360Export(root);
         root = exp.root;
         const byId = new Map(exp.articles.map((a) => [pageIdFromPlatform('document360', a.platformId), a]));
         for (const p of inScope) { const article = byId.get(p.id); if (article) docs.push(d360ArticleToIr(article, exp.root)); }
@@ -702,25 +854,22 @@ async function main() {
       const fetcher = new Fetcher(networkOptions(workspace, s));
       let localResolver: ((url: string) => string | undefined) | undefined;
       if (s.source.kind === 'export' && (s.source.platform === 'document360' || readTree(workspace).platform === 'document360')) {
-        const root = join(workspace, 'source-cache', 'export');
-        const exp = readD360Export(existsSync(root) ? root : s.source.location);
+        requireSourceManifest(workspace, s.hashes.sourceManifest);
+        const exp = readD360Export(frozenRootPath(workspace));
         localResolver = d360MediaResolver(exp.mediaDir);
       }
       const providerOptions: AssetProviderOptions = {
         workspace,
         provider: provider as AssetProviderOptions['provider'],
-        s3: provider === 's3' ? {
-          bucket: process.env.MIGRATION_S3_BUCKET ?? process.env.MIGRATION_R2_BUCKET ?? '',
-          region: process.env.MIGRATION_S3_REGION ?? 'auto',
-          prefix: process.env.MIGRATION_S3_PREFIX,
-          publicBase: process.env.MIGRATION_ASSET_PUBLIC_BASE ?? '',
-          endpoint: process.env.MIGRATION_S3_ENDPOINT ?? process.env.MIGRATION_R2_ENDPOINT,
-          accessKeyId: process.env.MIGRATION_S3_ACCESS_KEY_ID ?? process.env.MIGRATION_R2_ACCESS_KEY_ID,
-          secretAccessKey: process.env.MIGRATION_S3_SECRET_ACCESS_KEY ?? process.env.MIGRATION_R2_SECRET_ACCESS_KEY,
-        } : undefined,
+        s3: provider === 's3' ? s3StorageFromEnv(process.env, s.target) : undefined,
         dai: provider === 'dai-api' ? { baseUrl: process.env.DAI_API_BASE ?? '', token: process.env.DAI_API_KEY ?? '' } : undefined,
       };
-      if (provider === 's3' && (!providerOptions.s3!.bucket || !providerOptions.s3!.publicBase)) fail('s3 provider requires MIGRATION_S3_BUCKET and MIGRATION_ASSET_PUBLIC_BASE');
+      if (provider === 's3') {
+        const problems = s3StorageProblems(providerOptions.s3!);
+        if (problems.length) fail(`s3 provider cannot write Documentation.AI media storage: ${problems.join('; ')}`);
+        const unset = (['video', 'files'] as const).filter((kind) => !providerOptions.s3!.buckets[kind]?.bucket);
+        if (unset.length) console.log(`· no ${unset.join(' or ')} bucket configured: those assets fail instead of landing in the image bucket`);
+      }
       if (provider === 'dai-api' && Object.values(providerOptions.dai!).some((x) => !x)) fail('dai-api provider requires DAI_API_BASE and DAI_API_KEY (the key is bound to one documentation)');
       let result: AssetsStageResult;
       try {
@@ -742,6 +891,7 @@ async function main() {
       const blockExclusions = readBlockExclusions(workspace);
       // exact mode carries every authored block; an operator exclusion is refused before anything is read or written
       if ((s.fidelityMode ?? 'exact') === 'exact' && blockExclusions.length) fail(`block exclusions are not permitted in exact mode: plan/block-exclusions.yaml lists ${blockExclusions.length} (${blockExclusions.map((e) => `${e.pageId}:${e.nodeId}`).join(', ')}); remove them, or re-run init with --fidelity permissive`);
+      requireFrozenInputs(workspace, s);
       const tree = applyUrlPlan(readTree(workspace), readUrlPlan(workspace) ?? defaultUrlPlan(readTree(workspace)));
       const docs = loadSnapshot(workspace);
       const manifest = readManifest(workspace);
@@ -753,6 +903,12 @@ async function main() {
       for (const f of ['ledger/dispositions.jsonl', 'logging/decisions.jsonl']) { const p = join(workspace, f); if (existsSync(p)) writeFileSync(p, ''); }
       const ledger = new Ledger(workspace); const log = new DecisionLog(workspace, !!v['log-originals']);
       const engine = new RulesEngine({ platform: tree.platform, mappings: loadMappings(mappingPaths(tree.platform)), plan, ledger, log, iframeHosts: assetsPlan.iframeHosts });
+      // a link to another page follows it to its new route; one to a page this migration does not write is kept, or sent to
+      // the source site when the URL plan says so, and listed in report/unmigrated-links.json
+      const siteLinks = siteLinksForWorkspace(workspace, tree);
+      const siteLink = siteLinkTarget(siteLinks);
+      const resolveSiteLink = siteLinkResolver(siteLinks);
+      const unmigratedLinks: Array<{ pageId: string; route: string; url: string; target: string; action: 'kept' | 'source'; knownSourcePage: boolean }> = [];
       const byId = new Map(tree.pages.map((p) => [p.id, p]));
       const snippets = existsSync(join(workspace, 'inventory', 'snippets.json')) ? readJson<Array<{ token: string; body: string | null; resolution: string }>>(join(workspace, 'inventory', 'snippets.json')) : [];
       const blockedTokens = new Set(snippets.filter((x) => x.resolution === 'blocked' && !x.body).map((x) => x.token));
@@ -777,9 +933,14 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest);
+        const sourcePrepared = retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
-        const resolved = engine.resolveDoc(rewriteAssetRefs(withSnippets, manifest));
+        const recordSiteLink = (url: string, source?: string): string => {
+          const outcome = resolveSiteLink(url, source);
+          if (outcome && outcome.kind !== 'route') unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
+          return outcome?.target ?? url;
+        };
+        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(withSnippets, manifest), recordSiteLink));
         const sourceSnapshot = authoredContentSnapshot(sourcePrepared);
         const resolvedSnapshot = authoredContentSnapshot(resolved);
         const pass = fidelityEqual(sourceSnapshot, resolvedSnapshot);
@@ -797,15 +958,22 @@ async function main() {
         converted++;
       }
       writeFidelityRecords(workspace, fidelityRecords);
+      writeJson(join(workspace, 'report', 'unmigrated-links.json'), unmigratedLinks);
+      if (s.hashes.openapi) {
+        const specs = join(workspace, 'inventory', 'openapi.json');
+        if (fileHash(specs) !== s.hashes.openapi) fail('OpenAPI manifest changed after acquisition');
+        writeSpecOutput(workspace, readJson<SpecManifest>(specs), outDir);
+      }
       s.hashes.componentPlan = fileHash(join(workspace, 'plan', 'component-plan.yaml'));
       s.hashes.urlPlan = fileHash(join(workspace, 'plan', 'urls.yaml'));
       s.hashes.assetPlan = fileHash(join(workspace, 'plan', 'assets.yaml'));
       s.hashes.blockExclusions = existsSync(blockExclusionsPath(workspace)) ? fileHash(blockExclusionsPath(workspace)) : undefined;
+      s.hashes.scopeDecisions = existsSync(scopeDecisionsPath(workspace)) ? fileHash(scopeDecisionsPath(workspace)) : undefined;
       s.hashes.canonicalOutput = undefined;
       writeSession(workspace, s);
       // determinism is proven by re-converting the same frozen inputs, not by re-reading the same files
       const outputHash = canonicalHash(outDir);
-      const inputsKey = sha256([s.hashes.snapshot ?? '', s.hashes.componentPlan ?? '', s.hashes.urlPlan ?? '', s.hashes.assetPlan ?? '', s.hashes.blockExclusions ?? '', existsSync(join(workspace, 'plan', 'assets.json')) ? fileHash(join(workspace, 'plan', 'assets.json')) : ''].join('|'));
+      const inputsKey = sha256([s.hashes.sourceManifest ?? '', s.hashes.acquisition ?? '', s.hashes.scopeDecisions ?? '', fileHash(join(workspace, 'plan', 'tree.yaml')), s.hashes.snapshot ?? '', s.hashes.componentPlan ?? '', s.hashes.urlPlan ?? '', s.hashes.assetPlan ?? '', s.hashes.blockExclusions ?? '', existsSync(join(workspace, 'plan', 'assets.json')) ? fileHash(join(workspace, 'plan', 'assets.json')) : ''].join('|'));
       s.hashes.previousConvertOutput = s.hashes.convertInputs === inputsKey ? s.hashes.convertOutput : undefined;
       s.hashes.convertInputs = inputsKey; s.hashes.convertOutput = outputHash; writeSession(workspace, s);
       markStage(workspace, 'convert', 'done', `${converted} converted, ${heldForSnippets} held (blocked snippet tokens), ${quarantinedForFidelity} quarantined (exact-fidelity)`);
@@ -814,15 +982,16 @@ async function main() {
     }
     case 'nav': {
       const workspace = ws(); const s = readSession(workspace); requireStages(s, 'convert');
+      requireFrozenInputs(workspace, s);
       const tree = applyUrlPlan(readTree(workspace), readUrlPlan(workspace) ?? defaultUrlPlan(readTree(workspace)));
       const docJsonPath = join(workspace, 'output', 'documentation.json');
       const existing = existsSync(docJsonPath) ? readJson<Record<string, unknown>>(docJsonPath) : { name: 'Documentation', initialRoute: tree.pages.find((p) => p.migrate && p.newPath)?.newPath ?? '' };
       const meta = readPlatformMeta(workspace);
       // the connected specs ship with the output; a reference the source repository cannot satisfy stops the stage instead of leaving the group without its API
-      for (const ref of meta.openapi ?? []) {
+      for (const ref of meta.openapiCaptured ? [] : meta.openapi ?? []) {
         const group = ref.groupPath.join(' / ');
         if (!meta.root) fail(`openapi spec ${ref.spec} for group ${group}: inventory/platform-meta.json records no source repository root to read it from`);
-        const root = resolve(meta.root); const src = resolve(root, ref.spec);
+        const root = frozenRootPath(workspace); const src = resolve(root, ref.spec);
         if (!src.startsWith(join(root, '/'))) fail(`openapi spec ${ref.spec} for group ${group} points outside the source repository`);
         if (!existsSync(src)) fail(`openapi spec ${ref.spec} for group ${group} is not in the source repository at ${root}; fix the reference in inventory/platform-meta.json or restore the file`);
         const dst = join(workspace, 'output', ref.spec); mkdirSync(dirname(dst), { recursive: true, mode: 0o700 }); writeFileSync(dst, readFileSync(src), { mode: 0o600 });
@@ -873,6 +1042,7 @@ async function main() {
       if (!v.repo) mkdirSync(repoDir, { recursive: true, mode: 0o700 }); // cloned by the writer on first use
       if (v['allow-lossy'] && !v.push) fail('--allow-lossy only changes what --push accepts; without --push no gate is consulted');
       if (v.push) {
+        requireFrozenInputs(workspace, s);
         const gateFile = join(workspace, 'report', 'gates.json');
         if (!existsSync(gateFile)) fail('--push requires a completed verify run');
         const currentOutputHash = canonicalHash(join(workspace, 'output'));
@@ -885,6 +1055,7 @@ async function main() {
         const stalePlans: string[] = pinnedPlans.filter(([file, expected]) => !expected || !existsSync(join(workspace, 'plan', file)) || fileHash(join(workspace, 'plan', file)) !== expected).map(([file]) => file);
         // block exclusions are optional, so pin presence as well as content
         if ((existsSync(blockExclusionsPath(workspace)) ? fileHash(blockExclusionsPath(workspace)) : undefined) !== s.hashes.blockExclusions) stalePlans.push('block-exclusions.yaml');
+        if ((existsSync(scopeDecisionsPath(workspace)) ? fileHash(scopeDecisionsPath(workspace)) : undefined) !== s.hashes.scopeDecisions) stalePlans.push('scope-decisions.yaml');
         if (stalePlans.length) fail(`--push refused: plan changed after conversion (${stalePlans.join(', ')}); rerun convert and verify`);
         const gateReport = readJson<{ pass: boolean; outputHash?: string; gates: GateResult[] }>(gateFile);
         if (gateReport.outputHash !== currentOutputHash) fail('--push refused: report/gates.json does not belong to the current output; rerun verify');
@@ -964,8 +1135,8 @@ async function main() {
       // this, never only against the snapshot the same run produced.
       const sourceEvidence = s.source.kind === 'url' ? buildSourceEvidence(workspace, tree) : undefined;
       const gates = runGates({
-        workspace, outputDir: join(workspace, 'output'), sourceEvidence,
-        pinnedPlans: { componentPlan: s.hashes.componentPlan, urlPlan: s.hashes.urlPlan, assetPlan: s.hashes.assetPlan, blockExclusions: s.hashes.blockExclusions },
+        workspace, outputDir: join(workspace, 'output'), sourceEvidence, pinnedSourceManifest: s.hashes.sourceManifest, pinnedAcquisition: s.hashes.acquisition, pinnedOpenapi: s.hashes.openapi,
+        pinnedPlans: { componentPlan: s.hashes.componentPlan, urlPlan: s.hashes.urlPlan, assetPlan: s.hashes.assetPlan, blockExclusions: s.hashes.blockExclusions, scopeDecisions: s.hashes.scopeDecisions },
         sourceDocs: docs.map((doc) => ({ doc, outputFile: byId.get(doc.pageId)?.newPath ? join(workspace, 'output', `${byId.get(doc.pageId)!.newPath}.mdx`) : undefined })),
         treePages: tree.pages, quarantinedPages: quarantined, excludedPages: new Set(), unreviewed,
         previousCanonicalHash: s.hashes.previousConvertOutput, convertOutputHash: s.hashes.convertOutput, previewUrl, pinnedContractVersion: s.versions.contentContract, previewContractVersion,
@@ -987,13 +1158,15 @@ async function main() {
         // The preview is compared against the raw source, not against the snapshot: the same
         // standard the local gates apply, on the deployed page.
         const rawByPageId = new Map((sourceEvidence?.pages ?? []).map((page) => [page.pageId, page]));
+        const previewSiteLink = siteLinkTarget(siteLinksForWorkspace(workspace, tree));
         const manifest = readManifest(workspace);
         const browserContent = await runBrowserContentGate(
           previewUrl,
           tree.pages.map((page) => {
             const raw = rawByPageId.get(page.id);
-            const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile) : undefined;
-            return { ...page, doc: fromSource ?? docs.find((doc) => doc.pageId === page.id) };
+            const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
+            const snapshot = docs.find((doc) => doc.pageId === page.id);
+            return { ...page, doc: fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink)) };
           }),
           {
             routes: writtenPagePaths(workspace, tree),

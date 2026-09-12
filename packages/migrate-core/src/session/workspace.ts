@@ -66,6 +66,10 @@ export interface Session {
     prompt?: string;
   };
   hashes: {
+    sourceManifest?: string;
+    acquisition?: string;
+    openapi?: string;
+    scopeDecisions?: string;
     snapshot?: string;
     componentPlan?: string;
     urlPlan?: string;

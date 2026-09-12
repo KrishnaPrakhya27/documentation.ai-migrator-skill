@@ -68,3 +68,13 @@ If the user asks to skip checks while the session is exact, do not work around t
 - Every source block has a ledger disposition before `verify` can pass.
 - Plans are YAML the operator edits; you do not hand-edit output MDX.
 - Do not paste secrets, cookies or tokens into any file or log.
+
+### Frozen source and scope review
+
+Discovery now writes a pinned `source-cache/source-manifest.json`. At human gate 1, compare the source identities and any recorded issues with `plan/tree.yaml`. To exclude published pages for a partial migration, record their `pageId`, `sourceId`, reason and actual approver in `plan/scope-decisions.yaml`; deleting a tree entry alone is insufficient. Review these exclusions with the conversion plan at gate 2.
+
+Native inputs are copied into `source-cache/frozen` before adapter processing. Subsequent stages use that copy; changing the original repository does not change this run. Evidence cannot be replaced by repeating discovery: use a new workspace for a new source capture. Credential filenames cause the freeze to stop and request a content-only source directory. Existing workspaces without a source manifest need a new discovery workspace.
+
+Completed live acquisition is separately pinned in `source-cache/acquisition-index.json`. Repeating acquisition checks and reuses that pin; `--refresh` after completion requires a new workspace. Interrupted acquisitions can still resume their successful page records. Firecrawl HTML follows the common acquisition checks, and published Markdown is fetched separately rather than trusting generated Markdown.
+
+Exact discovery stops on a truncated index, missing indexed files or an unsupported independent index reader. The tree and manifest remain available for diagnosis, but acquisition must not proceed past that failed stage. Document360 category enumeration and ReadMe API pagination completeness are currently such blockers.

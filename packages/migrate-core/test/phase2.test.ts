@@ -6,13 +6,13 @@ import { gzipSync } from 'node:zlib';
 import { Response as UndiciResponse } from 'undici';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { CanonicalHosts, Fetcher, discoverSitemaps, type FetchImpl } from '../src/scrape/fetcher.js';
-import { discoverLiveSite, extractMintlifyNavigation, normaliseDiscoveryUrl, sitemapStructureHint } from '../src/scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, sitemapStructureHint } from '../src/scrape/discovery.js';
 import { getProfile, profileHostAliases } from '../src/scrape/profiles.js';
 import { markdownAlternateUrl, parseLlmsTxt, publishedMarkdownProblem, unwrapPublishedMarkdown } from '../src/scrape/published-markdown.js';
 import { acquirePages, acquiredPath, type AcquiredPage } from '../src/scrape/acquire.js';
 import { sha256 } from '../src/session/ids.js';
 import { offlineFetcher, syntheticSiteFetcher } from './helpers/fixture-fetcher.js';
-import { ingestAssets } from '../src/assets/providers.js';
+import { ingestAssets, s3StorageFromEnv, s3StorageProblems, storageFilename, type S3StorageOptions } from '../src/assets/providers.js';
 import { sanitizeSvgBytes, writeManifest, readManifest, type AssetManifest } from '../src/assets/manifest.js';
 import { writeCutoverArtifacts, canonicalUrl, runSearchCanary, writeDefaultSeoPlan } from '../src/report/cutover.js';
 import { remoteOrg, assertRemoteAllowed } from '../src/write/migration-branch.js';
@@ -33,6 +33,28 @@ function fakeSite(pages: Record<string, string>): FetchImpl {
 }
 
 describe('discovery', () => {
+  it('keeps ReadMe account, edit and CDN routes out of page discovery and sidebar navigation', async () => {
+    const origin = 'http://8.8.8.8';
+    const html = '<html><body><aside class="rm-Sidebar"><div class="rm-Sidebar-heading">Docs</div><a class="rm-Sidebar-link" href="/docs/start">Start</a><a class="rm-Sidebar-link" href="/login?redirect_uri=/docs/start">Log in</a><a class="rm-Sidebar-link" href="/edit/start">Edit</a><a class="rm-Sidebar-link" href="/cdn-cgi/l/email-protection">Email</a></aside></body></html>';
+    expect(extractDomSidebarNavigation(html, `${origin}/docs/start`, origin, getProfile('readme'))).toEqual([
+      { type: 'group', label: 'Docs', children: [{ type: 'page', url: `${origin}/docs/start`, title: 'Start' }] },
+    ]);
+    const fetcher = new Fetcher({ workspace: ws(), rps: 1000, fetchImpl: fakeSite({ '/docs/start': html }) });
+    const found = await discoverLiveSite({ seedUrl: `${origin}/docs/start`, fetcher, profile: getProfile('readme') });
+    expect(found.pages.map((page) => page.url)).toEqual([`${origin}/docs/start`]);
+    expect(found.failures.every((failure) => !/\/(?:login|edit|cdn-cgi)\b/.test(failure.url))).toBe(true);
+  });
+
+  it('folds a successful HTML alias into its explicit same-site canonical page', async () => {
+    const origin = 'http://8.8.8.8';
+    const html = '<html><head><link rel="canonical" href="/"></head><body><main><h1>Home</h1><a href="/index">Alias again</a><a href="/home.md">Markdown</a></main></body></html>';
+    const fetcher = new Fetcher({ workspace: ws(), rps: 1000, fetchImpl: fakeSite({ '/': html, '/index': html, '/home.md': '# Home' }) });
+    const found = await discoverLiveSite({ seedUrl: `${origin}/index`, fetcher, profile: getProfile('generic') });
+    expect(found.pages).toHaveLength(1);
+    expect(found.pages[0]).toMatchObject({ url: `${origin}/`, aliases: [`${origin}/index`] });
+    expect(found.pages[0].reasons).toContain('seed');
+  });
+
   it('recovers exact Mintlify groups, sidebar labels, descriptions, and repeated page placements from Flight metadata', () => {
     const pages = [
       { group: 'Welcome', pages: [{ title: 'Long Home Title', sidebarTitle: 'Home', description: 'Exact home description.', href: '/index' }] },
@@ -75,9 +97,9 @@ describe('discovery', () => {
     const html = `<html><script>self.__next_f.push([1,${JSON.stringify(payload)}])</script></html>`;
     const found = extractMintlifyNavigation(html, 'https://docs.example/');
     expect(found?.navigation).toEqual([
-      { type: 'group', label: 'v2', children: [
-        { type: 'group', label: 'Guides', children: [{ type: 'group', label: 'Basics', children: [{ type: 'page', url: 'https://docs.example/guides/setup', title: 'Setup' }] }] },
-        { type: 'group', label: 'API', children: [{ type: 'group', label: 'REST', children: [{ type: 'page', url: 'https://docs.example/api/tokens', title: 'Tokens' }] }] },
+      { type: 'group', kind: 'version', label: 'v2', children: [
+        { type: 'group', kind: 'tab', label: 'Guides', children: [{ type: 'group', label: 'Basics', children: [{ type: 'page', url: 'https://docs.example/guides/setup', title: 'Setup' }] }] },
+        { type: 'group', kind: 'tab', label: 'API', children: [{ type: 'group', kind: 'menu', label: 'REST', children: [{ type: 'page', url: 'https://docs.example/api/tokens', title: 'Tokens' }] }] },
       ] },
     ]);
     expect(found?.pages.map((page) => page.groups)).toEqual([['v2', 'Guides', 'Basics'], ['v2', 'API', 'REST']]);
@@ -96,6 +118,16 @@ describe('discovery', () => {
     expect(unwrapPublishedMarkdown(source, 'mintlify', { expectedDescription: 'Exact description.' })).toEqual({ body: 'First paragraph.\n\n<Tip>Second paragraph.</Tip>\n', title: 'Quickstart', description: 'Exact description.', wrapper: 'mintlify-documentation-index' });
     expect(unwrapPublishedMarkdown('# Authored\n\n> Keep this.\n', 'mintlify').body).toContain('> Keep this.');
     expect(unwrapPublishedMarkdown(source, 'readme')).toEqual({ body: source, wrapper: 'none' });
+  });
+  it('removes only ReadMe’s generated llms.txt notice, keeps its frontmatter and lifts the title', () => {
+    const notice = 'Fetch the complete documentation index at: https://docs.example/llms.txt. Use this file to discover all available pages before exploring further. Append .md to any documentation page URL to get its markdown version.';
+    const source = `---\nupdatedAt: 2026-03-04T06:03:59.000Z\n---\n\n${notice}\n\n# Manage feedback\n\nExact excerpt.\n\n## Introduction\n\nBody.\n`;
+    expect(unwrapPublishedMarkdown(source, 'readme', { expectedDescription: 'Exact excerpt.' })).toEqual({ body: '---\nupdatedAt: 2026-03-04T06:03:59.000Z\n---\n\n## Introduction\n\nBody.\n', title: 'Manage feedback', description: 'Exact excerpt.', wrapper: 'readme-documentation-index' });
+    // an authored paragraph that mentions llms.txt is content
+    expect(unwrapPublishedMarkdown('# T\n\nSee https://docs.example/llms.txt for the index.\n', 'readme')).toEqual({ body: 'See https://docs.example/llms.txt for the index.\n', title: 'T', wrapper: 'none' });
+    // nested frontmatter is still frontmatter, so the notice and title after it are still found
+    const nested = `---\nmetadata:\n  image: []\n  robots: index\nupdatedAt: 2026-03-04\n---\n\n${notice}\n\n# Nested\n\nBody.\n`;
+    expect(unwrapPublishedMarkdown(nested, 'readme')).toEqual({ body: '---\nmetadata:\n  image: []\n  robots: index\nupdatedAt: 2026-03-04\n---\n\nBody.\n', title: 'Nested', wrapper: 'readme-documentation-index' });
   });
   it('lifts the description blockquote only when it equals the declared description, and never a second or an authored blockquote', () => {
     const source = '# T\n\n> Exact.\n\n> Authored.\n\nBody.';
@@ -251,6 +283,35 @@ describe('discovery', () => {
       ] },
     ]);
   });
+  it('recovers ReadMe sidebar categories and nests parent pages with their subpages', async () => {
+    // Current ReadMe markup: a collapsible category button per section, and a parent page's link followed by its subpage list.
+    const link = (href: string, text: string, parent = false) => `<a class="${parent ? 'Sidebar-link_parent' : 'childless'} rm-Sidebar-link" href="${href}"><span><span>${text}</span></span>${parent ? '<button aria-expanded="false" type="button"><i aria-hidden="true"></i></button>' : ''}</a>`;
+    const sidebar = '<nav id="hub-sidebar" class="rm-Sidebar_guides"><div class="rm-Sidebar">'
+      + `<section class="rm-Sidebar-section"><button class="rm-Sidebar-category" type="button">GETTING STARTED</button><ul class="rm-Sidebar-list"><li>${link('/docs/introduction', 'Introduction')}</li></ul></section>`
+      + '<section class="rm-Sidebar-section"><button class="rm-Sidebar-category" type="button">DATA PLATFORM</button><ul class="rm-Sidebar-list">'
+      + `<li>${link('/docs/connect-overview', 'Dataflows', true)}<ul class="rm-Sidebar-list"><li>${link('/docs/connect-overview', 'Overview')}</li>`
+      + `<li>${link('/docs/blocks', 'Blocks', true)}<ul class="rm-Sidebar-list"><li>${link('/docs/source-block', 'Source block')}</li><li>${link('/docs/blocks', 'Blocks overview')}</li></ul></li></ul></li>`
+      + `<li>${link('/docs/imports', 'Imports')}</li></ul></section></div></nav>`;
+    const shell = (title: string) => `<html><title>${title}</title>${sidebar}<div class="rm-Markdown markdown-body"><h1>${title}</h1></div></html>`;
+    const site = fakeSite({ '/docs/introduction': shell('Introduction'), '/docs/connect-overview': shell('Overview'), '/docs/blocks': shell('Blocks'), '/docs/source-block': shell('Source block'), '/docs/imports': shell('Imports') });
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/docs/introduction', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('readme') });
+    expect(found.navigationSource).toBe('dom-sidebar');
+    // A parent link that repeats one of its subpages is not a second placement, whether that subpage comes first or later.
+    expect(found.navigation).toEqual([
+      { type: 'group', label: 'GETTING STARTED', children: [{ type: 'page', url: 'http://8.8.8.8/docs/introduction', title: 'Introduction' }] },
+      { type: 'group', label: 'DATA PLATFORM', children: [
+        { type: 'group', label: 'Dataflows', children: [
+          { type: 'page', url: 'http://8.8.8.8/docs/connect-overview', title: 'Overview' },
+          { type: 'group', label: 'Blocks', children: [
+            { type: 'page', url: 'http://8.8.8.8/docs/source-block', title: 'Source block' },
+            { type: 'page', url: 'http://8.8.8.8/docs/blocks', title: 'Blocks overview' },
+          ] },
+        ] },
+        { type: 'page', url: 'http://8.8.8.8/docs/imports', title: 'Imports' },
+      ] },
+    ]);
+    expect(found.pages.map((page) => new URL(page.url).pathname).sort()).toEqual(['/docs/blocks', '/docs/connect-overview', '/docs/imports', '/docs/introduction', '/docs/source-block']);
+  });
   it('reads gzip-compressed sitemap URL sets', async () => {
     const xml = '<urlset><url><loc>http://8.8.8.8/docs/compressed</loc></url></urlset>';
     const site = (async (input: any) => {
@@ -393,15 +454,73 @@ describe('asset providers', () => {
     const m: AssetManifest = { provider: 'local', entries: { abc: { hash: 'abc', sourceUrls: ['https://cdn.example/x.png'], references: [], localPath: p, bytes: 3, contentType: 'image/png', status, altMissing: 0 } }, byUrl: { 'https://cdn.example/x.png': 'abc' } };
     writeManifest(w, m); return m;
   };
-  it('s3: uploads with an injected client, records the public URL, and checkpoints the manifest', async () => {
+  const storage = (buckets: S3StorageOptions['buckets'] = { image: { bucket: 'images', publicBase: 'https://img.example' } }): S3StorageOptions => ({ region: 'auto', organizationId: 'o1', documentationId: 'd1', buckets });
+  it('s3: stores in the media library layout (org-/doc- path, image headers, optimised URL) and checkpoints the manifest', async () => {
     const w = ws(); const sent: any[] = [];
     const client = { send: async (cmd: any) => { sent.push(cmd.input); return {}; } };
-    const m = await ingestAssets(manifestWith(w), { workspace: w, provider: 's3', s3Client: client, s3: { bucket: 'b', region: 'auto', prefix: 'migrations/assets', publicBase: 'https://assets.example' } });
-    expect(sent[0].Key).toBe('migrations/assets/abc.png');
-    expect(sent[0].Metadata).toEqual({ sha256: 'abc' });
-    expect(m.entries.abc.status).toBe('ingested');
-    expect(m.entries.abc.finalUrl).toBe('https://assets.example/migrations/assets/abc.png');
-    expect(readManifest(w).entries.abc.finalUrl).toBe('https://assets.example/migrations/assets/abc.png');
+    const m = await ingestAssets(manifestWith(w), { workspace: w, provider: 's3', s3Client: client, s3: storage() });
+    expect(sent).toEqual([expect.objectContaining({ Bucket: 'images', Key: 'org-o1/doc-d1/abc-x.png', ContentType: 'image/png', CacheControl: undefined, Metadata: { sha256: 'abc' } })]);
+    expect(m.entries.abc).toMatchObject({ status: 'ingested', storagePath: 'org-o1/doc-d1/abc-x.png', finalUrl: 'https://img.example/org-o1/doc-d1/abc-x.png?fm=auto&auto=compress%2Cformat' });
+    expect(readManifest(w).entries.abc.finalUrl).toBe('https://img.example/org-o1/doc-d1/abc-x.png?fm=auto&auto=compress%2Cformat');
+  });
+  it('s3 env: reads the backend R2 variables, a bucket and CDN base per kind', () => {
+    const r2 = { DAI_ORGANIZATION_ID: 'o1', DAI_DOCUMENTATION_ID: 'd1', CLOUDFLARE_ACCOUNT_ID: 'acct', R2_ACCESS_KEY_ID: 'k', R2_SECRET_ACCESS_KEY: 's' };
+    const storage = s3StorageFromEnv({
+      ...r2, R2_IMAGES_BUCKET_NAME: 'test-documentation-images', MEDIA_IMAGE_CDN_BASE: 'https://test-dai.imgix.net',
+      R2_VIDEOS_BUCKET_NAME: 'test-documentation-videos', MEDIA_VIDEO_CDN_BASE: 'https://test-video-cdn.documentation.ai', R2_FILES_BUCKET_NAME: '',
+    });
+    expect(storage).toMatchObject({ region: 'auto', endpoint: 'https://acct.r2.cloudflarestorage.com', accessKeyId: 'k', secretAccessKey: 's', organizationId: 'o1', documentationId: 'd1' });
+    expect(storage.buckets).toEqual({
+      image: { bucket: 'test-documentation-images', publicBase: 'https://test-dai.imgix.net' },
+      video: { bucket: 'test-documentation-videos', publicBase: 'https://test-video-cdn.documentation.ai' },
+      files: { bucket: '', publicBase: '' },
+    });
+    expect(s3StorageProblems(storage)).toEqual([]);
+    // an explicit endpoint wins over the one derived from the account id
+    expect(s3StorageFromEnv({ ...r2, CLOUDFLARE_ENDPOINT: 'https://r2.example' }).endpoint).toBe('https://r2.example');
+    // the session's ids win over the environment's
+    expect(s3StorageFromEnv(r2, { organizationId: 'o2', documentationId: 'd2' })).toMatchObject({ organizationId: 'o2', documentationId: 'd2' });
+    expect(s3StorageProblems(s3StorageFromEnv({ R2_IMAGES_BUCKET_NAME: 'images', R2_VIDEOS_BUCKET_NAME: 'videos' }))).toEqual([
+      expect.stringMatching(/DAI_ORGANIZATION_ID/), expect.stringMatching(/CLOUDFLARE_ENDPOINT or CLOUDFLARE_ACCOUNT_ID/), expect.stringMatching(/R2_ACCESS_KEY_ID/),
+      'R2_IMAGES_BUCKET_NAME and MEDIA_IMAGE_CDN_BASE are required', 'R2_VIDEOS_BUCKET_NAME and MEDIA_VIDEO_CDN_BASE must be set together',
+    ]);
+  });
+  it('s3: routes images, videos and audio to their own buckets by the platform media type, never falling back to the image bucket', async () => {
+    const w = ws(); const sent: any[] = [];
+    const client = { send: async (cmd: any) => { sent.push(cmd.input); return {}; } };
+    const file = (name: string) => { const p = join(w, 'assets-ready', name); writeFileSync(p, Buffer.from(name)); return p; };
+    const entry = (hash: string, source: string, local: string, contentType: string) => ({ hash, sourceUrls: [source], references: [], localPath: file(local), contentType, status: 'downloaded' as const, altMissing: 0 });
+    const m: AssetManifest = { provider: 'local', byUrl: {}, entries: {
+      img: entry('img', 'https://cdn.example/My%20Screenshot%20(1).PNG?v=2', 'img.png', 'image/png'),
+      logo: entry('logo', 'https://cdn.example/logo.svg', 'logo.svg', 'image/svg+xml'),
+      photo: entry('photo', 'https://cdn.example/photo.jpeg', 'photo.jpeg', 'image/jpg'),
+      clip: entry('clip', 'https://cdn.example/a.mp4', 'clip.mp4', 'video/mp4'),
+      // served as a generic binary: the extension decides, as it does on the platform
+      reel: entry('reel', 'https://cdn.example/reel.mov', 'reel.mov', 'application/octet-stream'),
+      song: entry('song', 'https://cdn.example/intro.mp3', 'song.mp3', 'audio/mp3'),
+      // a type the media library does not store
+      theora: entry('theora', 'https://cdn.example/old.ogv', 'theora.ogv', 'video/ogg'),
+    } };
+    const out = await ingestAssets(m, { workspace: w, provider: 's3', s3Client: client, s3: storage({ image: { bucket: 'images', publicBase: 'https://img.example' }, video: { bucket: 'videos', publicBase: 'https://video.example/' }, files: { bucket: 'files', publicBase: 'https://files.example' } }) });
+    expect(sent.map((input) => [input.Bucket, input.Key, input.ContentType, input.CacheControl])).toEqual([
+      ['images', 'org-o1/doc-d1/img-My-Screenshot--1-.png', 'image/png', undefined],
+      ['images', 'org-o1/doc-d1/logo-logo.svg', 'image/svg+xml', undefined],
+      ['images', 'org-o1/doc-d1/photo-photo.jpg', 'image/jpeg', undefined],
+      ['videos', 'org-o1/doc-d1/clip-a.mp4', 'video/mp4', 'public, max-age=300'],
+      ['videos', 'org-o1/doc-d1/reel-reel.mov', 'video/quicktime', 'public, max-age=300'],
+      ['files', 'org-o1/doc-d1/song-intro.mp3', 'audio/mpeg', 'public, max-age=300'],
+    ]);
+    expect(out.entries.logo.finalUrl).toBe('https://img.example/org-o1/doc-d1/logo-logo.svg?rasterize-bypass=true');
+    expect(out.entries.clip.finalUrl).toBe('https://video.example/org-o1/doc-d1/clip-a.mp4');
+    expect(out.entries.song.finalUrl).toBe('https://files.example/org-o1/doc-d1/song-intro.mp3');
+    expect(out.entries.theora).toMatchObject({ status: 'failed', error: expect.stringMatching(/does not accept video\/ogg/) });
+    // no video bucket: the video fails and nothing is written to the image bucket
+    sent.length = 0;
+    const single: AssetManifest = JSON.parse(JSON.stringify({ ...m, entries: { clip: { ...m.entries.clip, status: 'downloaded', finalUrl: undefined, storagePath: undefined } } }));
+    const failed = await ingestAssets(single, { workspace: w, provider: 's3', s3Client: client, s3: storage() });
+    expect(sent).toEqual([]);
+    expect(failed.entries.clip).toMatchObject({ status: 'failed', error: expect.stringMatching(/set R2_VIDEOS_BUCKET_NAME/) });
+    expect(storageFilename({ hash: 'f'.repeat(64), sourceUrls: ['https://cdn.example/'] }, 'png')).toBe(`${'f'.repeat(16)}-asset.png`);
   });
   it('dai-api: presign → PUT → confirm, and reuses an existing upload on 409', async () => {
     const w = ws(); const calls: string[] = [];
@@ -441,7 +560,7 @@ describe('asset providers', () => {
     const w = ws();
     let attempts = 0;
     const client = { send: async () => { attempts++; if (attempts === 1) throw new Error('transient'); return {}; } };
-    const opts = { workspace: w, provider: 's3' as const, s3Client: client, s3: { bucket: 'b', region: 'auto', publicBase: 'https://assets.example' } };
+    const opts = { workspace: w, provider: 's3' as const, s3Client: client, s3: storage() };
     let m = await ingestAssets(manifestWith(w), opts);
     expect(m.entries.abc.status).toBe('failed');
     expect(m.entries.abc.error).toBe('transient');

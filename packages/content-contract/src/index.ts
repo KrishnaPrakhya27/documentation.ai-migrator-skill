@@ -83,7 +83,8 @@ const RESIDUAL_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /\{\{\s*snippet\./m, label: 'Document360 snippet token' },
   { re: /@embed\[/m, label: 'ReadMe embed' },
   { re: /<<\s*glossary:/m, label: 'ReadMe glossary variable' },
-  { re: /^>\s*(📘|👍|🚧|❗)/m, label: 'ReadMe emoji callout' },
+  // a ReadMe callout is a quote that opens with the emoji; the same emoji on a later line of a quote is its text
+  { re: /(?<!(?:^|\n)[ \t]*>[^\n]*\n)^[ \t]*>\s*(📘|👍|🚧|❗)/m, label: 'ReadMe emoji callout' },
   { re: /<(Note|Tip|Warning|Info|Check|Accordion|AccordionGroup|Frame|Tooltip|Badge|Icon|Panel|Tiles|Tree|Banner|RequestExample|ResponseExample)\b/m, label: 'Mintlify component' },
 ];
 
@@ -171,15 +172,16 @@ export function validateMdx(mdx: string, contract = loadContract()): ValidationI
 /** Navigation: exactly one semantic root key; recurse; every page path resolves. */
 /** Child collections each navigation container may hold, per the platform schema (dashboard.documentation.ai/documentation.json). */
 const NAV_CHILDREN: Record<string, string[]> = {
-  navigation: ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'groups', 'pages'],
-  product: ['versions', 'languages', 'tabs', 'dropdowns', 'groups', 'pages'],
-  version: ['languages', 'tabs', 'dropdowns', 'groups', 'pages'],
-  language: ['tabs', 'dropdowns', 'groups', 'pages'],
-  tab: ['dropdowns', 'groups', 'pages'],
-  dropdown: ['tabs', 'dropdowns', 'groups', 'pages'],
+  navigation: ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'],
+  product: ['versions', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'],
+  version: ['tabs', 'dropdowns', 'menus', 'groups', 'pages'],
+  language: ['versions', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'],
+  tab: ['menus', 'groups', 'pages'],
+  dropdown: ['tabs', 'menus', 'groups', 'pages'],
+  menu: ['groups', 'pages'],
   group: ['pages'],
 };
-const NAV_ITEM: Record<string, string> = { products: 'product', versions: 'version', languages: 'language', tabs: 'tab', dropdowns: 'dropdown', groups: 'group' };
+const NAV_ITEM: Record<string, string> = { products: 'product', versions: 'version', languages: 'language', tabs: 'tab', dropdowns: 'dropdown', menus: 'menu', groups: 'group' };
 
 /**
  * documentation.json structure. Pages are objects ({ title, path | href }) or nested

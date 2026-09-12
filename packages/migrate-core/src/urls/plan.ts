@@ -17,6 +17,13 @@ export interface UrlPlan {
   scope: 'full' | 'partial';
   preserve: { strip_prefix?: string; case: 'preserve' | 'lower' };
   restructure: { strategy: 'from-nav' };
+  /**
+   * A link to a page this migration does not write (outside its scope, or excluded): `keep` leaves it as authored,
+   * and the unmigrated-links gate fails while the output still points at the source site; `source` points links to
+   * pages the source is known to publish at the source site, which must then stay up. Convert lists every such link
+   * in report/unmigrated-links.json either way.
+   */
+  unmigratedLinks?: 'keep' | 'source';
   pages: UrlPlanPage[];
 }
 
@@ -24,6 +31,7 @@ export function defaultUrlPlan(tree: Tree, opts: { mode?: UrlPlan['mode']; strip
   const mode = opts.mode ?? 'preserve';
   const pages: UrlPlanPage[] = [];
   const used = new Set<string>();
+  const planned: Array<{ id: string; old?: string; candidate: string; reason: string }> = [];
   for (const p of tree.pages.filter((x) => x.migrate)) {
     let candidate: string; let reason: string;
     const old = p.oldPath;
@@ -43,13 +51,22 @@ export function defaultUrlPlan(tree: Tree, opts: { mode?: UrlPlan['mode']; strip
     const prefix = [p.locale && p.locale !== tree.defaultLocale ? slugify(p.locale) : '', p.version && p.version !== tree.defaultVersion ? slugify(p.version) : ''].filter(Boolean).join('/');
     if (prefix && !candidate.startsWith(prefix + '/')) { candidate = `${prefix}/${candidate}`; reason += `; ${prefix} prefix`; }
     if (!candidate) { candidate = 'index'; reason += '; root page → index'; }
-    let final = candidate; let n = 2;
-    while (used.has(final)) final = `${candidate}-${n++}`;
-    if (final !== candidate) reason += `; collision → ${final}`;
-    used.add(final);
-    pages.push({ id: p.id, old, new: final, reason });
+    planned.push({ id: p.id, old, candidate, reason });
   }
-  return { mode, scope: tree.scope, preserve: { strip_prefix: opts.stripPrefix, case: opts.case ?? 'preserve' }, restructure: { strategy: 'from-nav' }, pages };
+  // A page already at a legal path keeps it; a page whose path had to be adjusted gives way on a collision, so its
+  // redirect never runs through another page's old path (/a_b → /a-b while /a-b moved on is a chain).
+  const finals = new Map<string, { final: string; reason: string }>();
+  for (const settled of [true, false]) {
+    for (const entry of planned) {
+      if ((entry.reason === 'preserve') !== settled) continue;
+      let final = entry.candidate; let n = 2;
+      while (used.has(final)) final = `${entry.candidate}-${n++}`;
+      used.add(final);
+      finals.set(entry.id, { final, reason: final !== entry.candidate ? `${entry.reason}; collision → ${final}` : entry.reason });
+    }
+  }
+  for (const entry of planned) pages.push({ id: entry.id, old: entry.old, new: finals.get(entry.id)!.final, reason: finals.get(entry.id)!.reason });
+  return { mode, scope: tree.scope, preserve: { strip_prefix: opts.stripPrefix, case: opts.case ?? 'preserve' }, restructure: { strategy: 'from-nav' }, unmigratedLinks: 'keep', pages };
 }
 
 export function writeUrlPlan(workspace: string, plan: UrlPlan): void { writeFileSync(join(workspace, 'plan', 'urls.yaml'), toYaml(plan), { mode: 0o600 }); }

@@ -30,6 +30,12 @@ export function writeReviewQueue(workspace: string, gates: GateResult[], cluster
   const needs = clusters.filter((c) => (planStatus[c.signature.hash] ?? 'needs-review') === 'needs-review');
   if (!needs.length) lines.push('_none_');
   for (const c of needs) lines.push(`- \`${c.cluster}\` × ${c.count} — props ${JSON.stringify(c.signature.props)}; samples: ${c.samples.map((s) => `${s.pageId}:${s.nodeId}`).join(', ')}`);
+  // links to pages this migration does not write: convert lists each one; the unmigrated-links gate counts what the output still points at
+  const unmigratedFile = join(workspace, 'report', 'unmigrated-links.json');
+  const unmigrated = existsSync(unmigratedFile) ? JSON.parse(readFileSync(unmigratedFile, 'utf8')) as Array<{ route: string; url: string; target: string; knownSourcePage: boolean }> : [];
+  lines.push('', `## Links to pages this migration does not write (${unmigrated.length})`, '');
+  if (!unmigrated.length) lines.push('_none_');
+  for (const link of unmigrated) lines.push(`- \`${link.route}\` → ${link.url}${link.target !== link.url ? ` (now ${link.target})` : ''}${link.knownSourcePage ? '' : ' — not a page the source is known to publish'}`);
   writeFileSync(join(workspace, 'report', 'review-queue.md'), lines.join('\n') + '\n', { mode: 0o600 });
 }
 

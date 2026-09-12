@@ -15,6 +15,8 @@ import { nodeId } from '../session/ids.js';
 import { sanitizeHtmlToJsx } from '../components/sanitize.js';
 import type { Block, ComponentNode, DaiComponentNode, DocIR, Frontmatter, ImageNode, Inline, ListItemNode, TableCellNode, TableRowNode } from './types.js';
 import { readPixelDimension } from './dimensions.js';
+import { htmlToIr } from './from-html.js';
+import { mapBlocks } from './types.js';
 import { gitbookHtmlBlockToIr, isGitbookHtmlBlock, isGitbookHtmlInline, TRANSPARENT_HTML } from './gitbook-html.js';
 import { gitbookOpenApiBlocks } from './gitbook-openapi.js';
 
@@ -32,6 +34,8 @@ export interface MarkdownAdapterOptions {
    * reject as an expression, and preserved on the node as `sourceMeta`. Declared by the scrape profile.
    */
   codeMetaStrip?: string[];
+  /** Import ancestry prevents recursive snippets from exhausting the process. */
+  snippetStack?: string[];
 }
 
 /** Removes the platform's theming directives from a fence info string, returning undefined when nothing authored remains. */
@@ -76,7 +80,7 @@ function snippetImports(tree: any): Map<string, string> {
   return out;
 }
 
-function splitFrontmatter(source: string, file: string): { data: Record<string, unknown>; body: string } {
+export function splitFrontmatter(source: string, file: string): { data: Record<string, unknown>; body: string } {
   const m = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (!m) return { data: {}, body: source };
   try {
@@ -138,6 +142,7 @@ function preprocessSegment(source: string, platform: string): string {
   let out = source.replace(/^(#{1,6}\s+.*?)\s*\{#([A-Za-z][\w:.-]*)\}\s*$/gm, (_, heading, id) => `${heading} ${ANCHOR_OPEN}${id}${ANCHOR_CLOSE}`);
   out = out.replace(/\{\{\s*snippet\.([^}]+?)\s*\}\}/g, (_, token) => `<snippetRef token="${quoteAttr(String(token).trim())}" />`);
   if (platform === 'gitbook') out = gitbookMdxCompatible(gitbookLiquidBlocks(out));
+  if (platform === 'readme') out = readmeMdxCompatible(out);
   if (platform === 'docusaurus') {
     out = out.replace(/^:::(note|tip|info|warning|danger|caution)(?:\s+([^\n]+))?\s*$/gm, (_, kind, title) => `<admonition kind="${kind}"${title ? ` title="${quoteAttr(String(title).trim())}"` : ''}>`);
     out = out.replace(/^::: \s*$/gm, '</admonition>');
@@ -177,9 +182,21 @@ function gitbookLiquidBlocks(segment: string): string {
 }
 
 const HTML_VOID_ELEMENT = /<(img|br|hr|input|source|col|wbr|area|track)\b((?:[^<>"']|"[^"]*"|'[^']*')*)>/gi;
-const ANGLE_AUTOLINK = /(?<!\]\()<((?:https?|mailto|ftp):[^\s<>]*)>/g;
+// an escaped `\<` is a literal less-than, never the start of an autolink
+const ANGLE_AUTOLINK = /(?<!\]\(|\\)<((?:https?|mailto|ftp):[^\s<>]*)>/g;
+const EMAIL_AUTOLINK = /(?<!\]\(|\\)<([\w.+-]+@[\w-]+(?:\.[\w-]+)+)>/g;
 /** GitBook's export of an OpenAPI description escapes the Markdown link around an autolink: `\[label]\(<https://…>)`. */
 const ESCAPED_AUTOLINK_LINK = /\\\[([^\]\n]*?)\\?\]\\\(<((?:https?|mailto):[^\s<>]*)>\)/g;
+function voidElementsMdxCompatible(segment: string): string {
+  return segment.replace(HTML_VOID_ELEMENT, (tag, name, attrs) => (/\/\s*$/.test(attrs) ? tag : `<${name}${attrs.replace(/\s+$/, '')} />`));
+}
+
+/** `<https://…>` and `<name@host>` autolinks become the links they render as; a `](<url>)` destination is valid MDX and stays. */
+function autolinksMdxCompatible(segment: string): string {
+  return segment
+    .replace(ANGLE_AUTOLINK, (_, url) => `[${url}](${url})`)
+    .replace(EMAIL_AUTOLINK, (_, email) => `[${email}](mailto:${email})`);
+}
 
 /**
  * CommonMark that GitBook publishes and MDX rejects: HTML void elements written without `/>`
@@ -188,10 +205,125 @@ const ESCAPED_AUTOLINK_LINK = /\\\[([^\]\n]*?)\\?\]\\\(<((?:https?|mailto):[^\s<
  * around an autolink is the link it stands for.
  */
 function gitbookMdxCompatible(segment: string): string {
-  return segment
-    .replace(HTML_VOID_ELEMENT, (tag, name, attrs) => (/\/\s*$/.test(attrs) ? tag : `<${name}${attrs.replace(/\s+$/, '')} />`))
-    .replace(ESCAPED_AUTOLINK_LINK, (_, label, url) => `[${label}](${url})`)
-    .replace(ANGLE_AUTOLINK, (_, url) => `[${url}](${url})`);
+  return autolinksMdxCompatible(voidElementsMdxCompatible(segment).replace(ESCAPED_AUTOLINK_LINK, (_, label, url) => `[${label}](${url})`));
+}
+
+/** CommonMark that ReadMe publishes and MDX rejects by its shape alone: void elements without `/>` and angle autolinks. */
+function readmeMdxCompatible(segment: string): string {
+  return autolinksMdxCompatible(voidElementsMdxCompatible(segment));
+}
+
+const README_LINK_SCHEMES: Record<string, string> = { doc: 'docs', ref: 'reference', page: 'page', changelog: 'changelog' };
+
+/** ReadMe's own link forms: `doc:slug` and `ref:slug` name a guide or API page, and a trailing `#/` is its client router's empty route, not an anchor. */
+function readmeLinkTarget(url: string): string {
+  const scheme = url.match(/^([a-z]+):([^\s/#?][^\s#?]*)(.*)$/);
+  const target = scheme && README_LINK_SCHEMES[scheme[1]] ? `/${README_LINK_SCHEMES[scheme[1]]}/${scheme[2]}${scheme[3]}` : url;
+  return target.replace(/#\/$/, '');
+}
+
+function isEscaped(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let i = index - 1; i >= 0 && text[i] === '\\'; i--) backslashes++;
+  return backslashes % 2 === 1;
+}
+
+/** The `<` MDX rejected with `error` because it starts no tag, so is text the source meant literally; undefined for any other failure. */
+function strayLessThan(text: string, error: any): number | undefined {
+  const offset = error?.place?.offset ?? error?.place?.start?.offset;
+  if (typeof offset !== 'number' || error.source !== 'micromark-extension-mdx-jsx' || error.ruleId !== 'unexpected-character') return undefined;
+  const open = text.lastIndexOf('<', offset - 1);
+  return open >= 0 && !isEscaped(text, open) && /^[\w.:-]*$/.test(text.slice(open + 1, offset)) ? open : undefined;
+}
+
+/** Index of the quote closing the string opened at `open`, the newline that cuts it short, or -1 when the text ends inside it. */
+function closingQuote(value: string, open: number): number {
+  for (let i = open + 1; i < value.length; i++) {
+    if (value[i] === '\\') i++;
+    else if (value[i] === value[open] || value[i] === '\n') return i;
+  }
+  return -1;
+}
+
+/**
+ * Whether `value` stops inside a string, template literal, block comment or open bracket. MDX asks acorn at each `}`
+ * whether the expression is over, and reads on to the next `}` when acorn runs out of input
+ * (micromark-util-events-to-acorn `swallow`), which is how `style={{ a: 1 }}` and a template holding `{` stay whole.
+ */
+function endsInsideJavaScript(value: string): boolean {
+  const open: string[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (open[open.length - 1] === '`') {
+      if (c === '\\') i++;
+      else if (c === '`') open.pop();
+      else if (c === '$' && value[i + 1] === '{') { open.push('}'); i++; }
+      continue;
+    }
+    if (c === '"' || c === "'") { const end = closingQuote(value, i); if (end < 0) return true; i = end; }
+    else if (c === '`') open.push('`');
+    else if (c === '/' && value[i + 1] === '*') { const end = value.indexOf('*/', i + 2); if (end < 0) return true; i = end + 1; }
+    else if (c === '/' && value[i + 1] === '/') { const end = value.indexOf('\n', i); i = end < 0 ? value.length : end; }
+    else if (c === '(' || c === '[' || c === '{') open.push(c === '(' ? ')' : c === '[' ? ']' : '}');
+    else if ((c === ')' || c === ']' || c === '}') && open[open.length - 1] === c) open.pop();
+  }
+  return open.length > 0;
+}
+
+/**
+ * An acorn stand-in that locates every `{…}` in one parse without judging its JavaScript: an expression that is
+ * lexically over is accepted whatever it says, and one that runs out of input asks MDX to read on, as acorn would.
+ */
+const LOCATING_ACORN = {
+  parse: (value: string) => ({ type: 'Program', start: 0, end: value.length, body: [], sourceType: 'module', comments: [] }),
+  parseExpressionAt: (value: string, pos: number) => {
+    if (endsInsideJavaScript(value.slice(pos))) throw Object.assign(new SyntaxError('Unexpected end of input'), { pos: value.length, raisedAt: value.length });
+    return { type: 'Identifier', name: 'expression', start: pos, end: value.length };
+  },
+};
+
+/** The opening brace of every expression in prose. ReadMe renders prose braces (`{userId}`) as text; only a component's children and attributes hold expressions. MDX comments stay. */
+function proseExpressionBraces(tree: any, text: string): number[] {
+  const found: number[] = [];
+  const visit = (node: any, inComponent: boolean): void => {
+    if (node.type === 'mdxTextExpression' || node.type === 'mdxFlowExpression') {
+      const offset = node.position?.start?.offset;
+      if (!inComponent && !/^\s*\/\*[\s\S]*\*\/\s*$/.test(String(node.value)) && typeof offset === 'number' && text[offset] === '{' && !isEscaped(text, offset)) found.push(offset);
+      return;
+    }
+    const component = inComponent || node.type === 'mdxJsxFlowElement' || node.type === 'mdxJsxTextElement';
+    for (const child of node.children ?? []) visit(child, component);
+  };
+  visit(tree, false);
+  return found;
+}
+
+/**
+ * ReadMe's CommonMark treats a `<` that starts no tag (`>, <, >=`) and braces around prose
+ * (`{host URL}`, `{userId}`) as text; MDX reads them as JSX and JavaScript.
+ * - A stray `<` stops the parser, so each is found by one parse; there are never more retries than `<` characters.
+ * - Every brace in prose is found by one locating parse and escaped from the last to the first, so no offset moves.
+ * - The final parse judges the rest with real JavaScript: a component's expressions (an `<HTMLBlock>` template,
+ *   `border={true}`) must be valid, and a tree that still reads prose as code is an error, never a result.
+ */
+function parseEscapingRejectedText(source: string, parse: (text: string, locating: boolean) => any): { tree: any; text: string } {
+  let text = source;
+  const retries = (source.match(/</g) ?? []).length;
+  let located: any;
+  for (let attempt = 0; located === undefined; attempt++) {
+    try {
+      located = parse(text, true);
+    } catch (error) {
+      const at = strayLessThan(text, error);
+      if (at === undefined || attempt >= retries) throw error;
+      text = `${text.slice(0, at)}\\${text.slice(at)}`;
+    }
+  }
+  for (const at of proseExpressionBraces(located, text).sort((a, b) => b - a)) text = `${text.slice(0, at)}\\${text.slice(at)}`;
+  const tree = parse(text, false);
+  const remaining = proseExpressionBraces(tree, text);
+  if (remaining.length) throw new Error(`MDX still reads ${remaining.length} brace(s) in prose as code after escaping, the first at offset ${remaining[0]}`);
+  return { tree, text };
 }
 
 function literalExpression(value: string): string | number | boolean | null | undefined {
@@ -263,11 +395,13 @@ function liftSummary(node: any): any {
 
 export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocIR {
   const { data, body } = splitFrontmatter(source, opts.file);
-  const prepared = preprocessPlatformMarkdown(body, opts.platform);
-  const tree = fromMarkdown(prepared, {
-    extensions: [gfm(), mdxjs()],
+  // `locating` parses with an acorn that accepts any expression; see parseEscapingRejectedText
+  const parse = (text: string, locating = false): any => fromMarkdown(text, {
+    extensions: [gfm(), locating ? mdxjs({ acorn: LOCATING_ACORN as any }) : mdxjs()],
     mdastExtensions: [gfmFromMarkdown(), mdxFromMarkdown()],
-  }) as any;
+  });
+  const preprocessed = preprocessPlatformMarkdown(body, opts.platform);
+  const { tree, text: prepared } = opts.platform === 'readme' ? parseEscapingRejectedText(preprocessed, parse) : { tree: parse(preprocessed), text: preprocessed };
 
   const sourceSlice = (node: any): string => {
     const start = node.position?.start?.offset;
@@ -276,6 +410,17 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
   };
   const idOf = (node: any, path: number[]) => nodeId(opts.file, path, sourceSlice(node));
   const imports = snippetImports(tree);
+  const definitions = new Map<string, { url: string; title?: string }>();
+  const collectDefinitions = (nodes: ReadonlyArray<{ type: string; identifier?: string; url?: string; title?: string | null; children?: typeof nodes }>): void => {
+    for (const node of nodes) {
+      if (node.type === 'definition' && node.identifier && node.url !== undefined && !definitions.has(node.identifier)) definitions.set(node.identifier, { url: node.url, title: node.title ?? undefined });
+      if (node.children) collectDefinitions(node.children);
+    }
+  };
+  collectDefinitions(tree.children);
+  const unsupported = (node: { type: string; position?: { start?: { line?: number } } }): never => {
+    throw new Error(`${opts.file}:${node.position?.start?.line ?? '?'}: unsupported Markdown node ${node.type}; add a lossless mapping before migrating this page`);
+  };
   const srcOf = (node: any) => ({ file: opts.file, line: node.position?.start?.line, col: node.position?.start?.column });
 
   const imageFromMarkdown = (node: any, path: number[]): ImageNode => ({ id: idOf(node, path), src: srcOf(node), type: 'image', url: node.url ?? '', alt: node.alt ?? '', title: node.title ?? undefined });
@@ -311,7 +456,17 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       case 'strong': return [{ ...base, type: 'strong', children: inline(node.children ?? [], p) }];
       case 'emphasis': return [{ ...base, type: 'emphasis', children: inline(node.children ?? [], p) }];
       case 'delete': return [{ ...base, type: 'delete', children: inline(node.children ?? [], p) }];
-      case 'link': return [{ ...base, type: 'link', url: node.url ?? '', title: node.title ?? undefined, children: inline(node.children ?? [], p) }];
+      case 'link': return [{ ...base, type: 'link', url: opts.platform === 'readme' ? readmeLinkTarget(node.url ?? '') : node.url ?? '', title: node.title ?? undefined, children: inline(node.children ?? [], p) }];
+      case 'linkReference': {
+        const definition = definitions.get(node.identifier);
+        if (!definition) return unsupported(node);
+        return [{ ...base, type: 'link', ...definition, ...(opts.platform === 'readme' ? { url: readmeLinkTarget(definition.url) } : {}), children: inline(node.children ?? [], p) }];
+      }
+      case 'imageReference': {
+        const definition = definitions.get(node.identifier);
+        if (!definition) return unsupported(node);
+        return [imageFromMarkdown({ ...node, ...definition }, p)];
+      }
       case 'image': return [imageFromMarkdown(node, p)];
       case 'break': return [{ ...base, type: 'break' }];
       case 'html': {
@@ -327,6 +482,19 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         if (isImageElement(node)) return [imageFromMdx(node, p)];
         if (name === 'br') return [{ ...base, type: 'break' }];
         if (name === 'kbd') return [{ ...base, type: 'kbd', children: inline(node.children ?? [], p) }];
+        if (opts.platform === 'readme' && node.name === 'Anchor') {
+          // ReadMe's link component: its children are the visible text (label repeats it); target only opens a new tab
+          const value = (key: string) => (node.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && a.name === key)?.value;
+          const href = value('href');
+          const label = value('label');
+          const children = inline(node.children ?? [], p);
+          if (typeof href === 'string') return [{ ...base, type: 'link', url: readmeLinkTarget(href), children: children.length || typeof label !== 'string' ? children : [{ ...base, type: 'text', value: label }] }];
+        }
+        // ReadMe's glossary term renders as the term, with a definition from the project's glossary on hover; the page holds only the term
+        if (opts.platform === 'readme' && node.name === 'Glossary') return inline(node.children ?? [], p);
+        // ReadMe's editor writes some inline formatting as HTML elements
+        if (opts.platform === 'readme' && (name === 'strong' || name === 'b')) return [{ ...base, type: 'strong', children: inline(node.children ?? [], p) }];
+        if (opts.platform === 'readme' && (name === 'em' || name === 'i')) return [{ ...base, type: 'emphasis', children: inline(node.children ?? [], p) }];
         if (opts.platform === 'gitbook' && isGitbookHtmlInline(name)) return htmlInline(node, p);
         const text = inline(node.children ?? [], p);
         // Inline source components need a human decision; preserve their visible
@@ -334,7 +502,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         return [{ ...base, type: 'inlineHtml', value: `{/* UNSUPPORTED INLINE COMPONENT ${node.name ?? 'fragment'} */}` }, ...text];
       }
       default:
-        return node.children ? inline(node.children, p) : [];
+        return unsupported(node);
     }
   });
 
@@ -409,15 +577,102 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     return TRANSPARENT_HTML.has(name) ? blocks(node.children ?? [], [...path, 0]) : undefined;
   };
 
+  /**
+   * A table cell's content as one inline run: Markdown formatting stays, each further block (a second
+   * paragraph, a list item) follows a line break, and a list item keeps its marker (`• `, or its number) as
+   * text, since a Markdown table cell cannot hold a list. Undefined when a block has no faithful inline form.
+   */
+  const flowInlines = (nodes: any[], path: number[]): Inline[] | undefined => {
+    const content = nodes.filter((c: any) => !(c.type === 'text' && !String(c.value).trim()));
+    if (content.every((c: any) => INLINE_TYPES.has(c.type))) return inline(content, path);
+    const out: Inline[] = [];
+    const flatten = (block: Block, marker = ''): boolean => {
+      switch (block.type) {
+        case 'paragraph': case 'heading':
+          if (out.length) out.push({ id: `${block.id}::break`, type: 'break' });
+          if (marker) out.push({ id: `${block.id}::marker`, type: 'text', value: marker });
+          out.push(...block.children);
+          return true;
+        case 'list':
+          return block.children.every((item, index) => item.children.every((child, position) => flatten(child, position ? '' : block.ordered ? `${(block.start ?? 1) + index}. ` : '• ')));
+        default: return false;
+      }
+    };
+    return blocks(content, path).every((block) => flatten(block)) ? out : undefined;
+  };
+
+  /**
+   * ReadMe's <Table align={[…]}> of thead/tbody rows of th/td cells is a table. Column alignment comes from the
+   * literal `align` array, else from the header cells' literal `textAlign`. Any other attribute, element or cell
+   * content without an inline form leaves the element a source component.
+   */
+  const readmeTable = (node: any, path: number[]): Block[] | undefined => {
+    const content = (n: any): any[] => (n.children ?? []).filter((c: any) => !(c.type === 'text' && !String(c.value).trim()));
+    const isElement = (c: any, names: string[]) => (c.type === 'mdxJsxFlowElement' || c.type === 'mdxJsxTextElement') && names.includes(c.name);
+    const expression = (element: any, key: string) => (element.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && a.name === key)?.value?.data?.estree?.body?.[0]?.expression;
+    const alignOf = (value: unknown): 'left' | 'center' | 'right' | null => (value === 'left' || value === 'center' || value === 'right' ? value : null);
+    if ((node.attributes ?? []).some((a: any) => a.type !== 'mdxJsxAttribute' || a.name !== 'align')) return undefined;
+    const sections = content(node);
+    if (!sections.length || !sections.every((s) => isElement(s, ['thead', 'tbody']))) return undefined;
+    const rows: TableRowNode[] = [];
+    let headerCells: any[] | undefined;
+    for (const [si, section] of sections.entries()) {
+      for (const [ri, tr] of content(section).entries()) {
+        if (!isElement(tr, ['tr'])) return undefined;
+        const sourceCells = content(tr);
+        if (!sourceCells.every((c) => isElement(c, ['th', 'td']) && (c.attributes ?? []).every((a: any) => a.type === 'mdxJsxAttribute' && a.name === 'style'))) return undefined;
+        const rowPath = [...path, si, ri];
+        const cells: TableCellNode[] = [];
+        for (const [ci, cell] of sourceCells.entries()) {
+          const children = flowInlines(cell.children ?? [], [...rowPath, ci]);
+          if (!children) return undefined;
+          cells.push({ id: idOf(cell, [...rowPath, ci]), src: srcOf(cell), type: 'tableCell', children });
+        }
+        const isHeader = section.name === 'thead' && sourceCells.length > 0 && sourceCells.every((c) => c.name === 'th');
+        if (isHeader) headerCells ??= sourceCells;
+        rows.push({ id: idOf(tr, rowPath), src: srcOf(tr), type: 'tableRow', isHeader, children: cells });
+      }
+    }
+    if (!rows.length) return undefined;
+    const declared = expression(node, 'align');
+    const align = declared?.type === 'ArrayExpression' && declared.elements.every((e: any) => e?.type === 'Literal')
+      ? declared.elements.map((e: any) => alignOf(e.value))
+      : headerCells?.map((cell) => alignOf(expression(cell, 'style')?.properties?.find((p: any) => (p.key?.name ?? p.key?.value) === 'textAlign')?.value?.value));
+    return [{ id: idOf(node, path), src: srcOf(node), type: 'table', ...(align?.some((a: unknown) => a) ? { align } : {}), children: rows }];
+  };
+
+  /**
+   * ReadMe's <HTMLBlock>{`…`}</HTMLBlock> holds a static HTML document as a template literal. It is page content
+   * (link menus, tiles), read by the HTML adapter without its <title>. Its scripts and styles, wherever they sit,
+   * stay components so the rules engine records what dropping them loses (often the widget itself). An
+   * interpolated template, or one with no content, stays an expression.
+   */
+  const readmeFlow = (node: any, path: number[]): Block[] | undefined => {
+    if (node.name === 'Table') return readmeTable(node, path);
+    // a <br /> alone between blocks is editor spacing with nothing to render
+    if (node.name === 'br' && (node.children ?? []).every((c: any) => c.type === 'text' && !String(c.value).trim())) return [];
+    if (node.name === 'Anchor') { const link = inline([{ ...node, type: 'mdxJsxTextElement' }], path); return link[0]?.type === 'link' ? [{ id: idOf(node, path), src: srcOf(node), type: 'paragraph', children: link }] : undefined; }
+    if (node.name !== 'HTMLBlock') return undefined;
+    const inner = (node.children ?? []).filter((c: any) => !(c.type === 'text' && !String(c.value).trim()));
+    const template = inner.length === 1 && inner[0].type === 'mdxFlowExpression' ? inner[0].data?.estree?.body?.[0]?.expression : undefined;
+    const html = template?.type === 'TemplateLiteral' && !template.expressions.length ? template.quasis[0]?.value?.cooked : undefined;
+    if (typeof html !== 'string') return undefined;
+    const converted = htmlToIr(html, { platform: opts.platform, file: `${opts.file}::${idOf(node, path)}`, removeSelectors: ['title'] }).children;
+    return converted.length ? mapBlocks(converted, { inline: (n) => (n.type === 'link' ? { ...n, url: readmeLinkTarget(n.url) } : n) }) : undefined;
+  };
+
   const jsxFlow = (node: any, path: number[]): Block[] => {
     if (isImageElement(node)) return [imageFromMdx(node, path)];
     if (opts.platform === 'gitbook') { const converted = gitbookFlow(node, path); if (converted) return converted; }
+    if (opts.platform === 'readme') { const converted = readmeFlow(node, path); if (converted) return converted; }
     const importPath = node.name ? imports.get(node.name) : undefined;
     if (importPath && /\.mdx?$/.test(importPath) && !(node.attributes ?? []).length && opts.resolveSnippet) {
       const body = opts.resolveSnippet(importPath);
       if (body !== undefined) {
-        // inline the snippet's blocks; ids are derived from the snippet file so they are stable and distinct
-        const sub = markdownToIr(body, { ...opts, file: `${opts.file}::${importPath}`, resolveSnippet: opts.resolveSnippet });
+        const stack = opts.snippetStack ?? [];
+        if (stack.includes(importPath)) throw new Error(`${opts.file}: recursive snippet import ${[...stack, importPath].join(' -> ')}`);
+        // Each occurrence needs distinct ledger identities, including reuse on one page.
+        const sub = markdownToIr(body, { ...opts, file: `${opts.file}::${idOf(node, path)}::${importPath}`, snippetStack: [...stack, importPath] });
         return sub.children;
       }
     }
@@ -426,7 +681,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     return [element];
   };
 
-  const INLINE_TYPES = new Set(['text', 'strong', 'emphasis', 'delete', 'inlineCode', 'link', 'image', 'break', 'html', 'mdxTextExpression', 'mdxJsxTextElement']);
+  const INLINE_TYPES = new Set(['text', 'strong', 'emphasis', 'delete', 'inlineCode', 'link', 'linkReference', 'image', 'imageReference', 'break', 'html', 'mdxTextExpression', 'mdxJsxTextElement']);
   /** JSX flow elements may hold inline nodes directly (<Note>text</Note>); wrap each run of them in a synthetic paragraph so no text is lost. */
   const groupInline = (nodes: any[]): any[] => {
     const out: any[] = []; let run: any[] = [];
@@ -449,6 +704,11 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         const only = meaningful.length === 1 ? meaningful[0] : undefined;
         // an image alone on its line is a block image whichever syntax wrote it, the normal form the HTML adapter also uses
         if (only?.type === 'image') return [imageFromMarkdown(only, p)];
+        if (only?.type === 'imageReference') {
+          const definition = definitions.get(only.identifier);
+          if (!definition) return unsupported(only);
+          return [imageFromMarkdown({ ...only, ...definition }, p)];
+        }
         return [{ ...base, type: 'paragraph', children: inline(node.children ?? [], p) }];
       }
       case 'heading': {
@@ -500,6 +760,8 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         return [{ ...base, type: 'table', align: node.align ?? undefined, children: rows }];
       }
       case 'thematicBreak': return [{ ...base, type: 'thematicBreak' }];
+      // Definition targets are consumed by reference nodes, never rendered independently.
+      case 'definition': return [];
       case 'html': return [{ ...base, type: 'html', value: node.value ?? '' }];
       case 'mdxJsxFlowElement': return jsxFlow(node, p);
       case 'mdxjsEsm': {
@@ -511,7 +773,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       case 'mdxFlowExpression':
         return [{ ...base, type: 'component', name: node.type === 'mdxjsEsm' ? 'esm' : 'expression', platform: opts.platform, props: { contentHash: idOf(node, p) }, children: [], styleDeps: ['expression:executable'] }];
       default:
-        return node.children ? blocks(node.children, p) : [];
+        return unsupported(node);
     }
   });
 

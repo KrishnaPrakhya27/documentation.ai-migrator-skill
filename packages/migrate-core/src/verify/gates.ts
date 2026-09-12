@@ -2,32 +2,43 @@
  * Release gates. Any failure blocks release. Gates that need a preview or a
  * browser report `not-run` and count as failed unless explicitly allowed.
  */
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, statSync, lstatSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { validateMdx, validateNavigation } from '@dai/content-contract';
 import { Ledger, effectiveExclusions, summarize, type LedgerSummary } from '../ledger/dispositions.js';
 import type { Block, DocIR } from '../ir/types.js';
 import { walkBlocks, inlineText } from '../ir/types.js';
 import { redirectMaps, readUrlPlan } from '../urls/plan.js';
+import type { SiteLinks } from '../urls/site-links.js';
 import { sha256 } from '../session/ids.js';
 import { isSafeUrl } from '../components/sanitize.js';
 import { readManifest } from '../assets/manifest.js';
 import { markdownToIr } from '../ir/from-markdown.js';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfmFromMarkdown } from 'mdast-util-gfm';
+import { gfm } from 'micromark-extension-gfm';
+import { mdxjs } from 'micromark-extension-mdxjs';
+import { mdxFromMarkdown } from 'mdast-util-mdx';
 import { fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from './fidelity.js';
 import { isConvertedFidelityRecord, readFidelityRecords } from './fidelity-records.js';
 import { describeMigrator, migratorDrift, type MigratorProvenance } from '../session/provenance.js';
-import { chromeAbsent, htmlReconciliation, sourceContentExact, sourceMetadataExact, type RawSourcePage, type SourceComparison } from './source-truth.js';
+import { chromeAbsent, documentLinks, htmlReconciliation, sourceContentExact, sourceMetadataExact, type RawSourcePage, type SourceComparison } from './source-truth.js';
 import type { ScrapeProfile } from '../scrape/profiles.js';
+import { requireSourceManifest, sourceUniverseProblems } from '../evidence/verify.js';
+import { requireAcquisition } from '../evidence/acquisition.js';
+import type { SpecManifest } from '../openapi/graph.js';
 
 export interface GateResult { id: string; status: 'pass' | 'fail' | 'not-run'; detail: string; count?: number; samples?: string[] }
 
 const PREVIEW_ONLY_GATES = new Set(['preview-contract-version', 'browser-fragments', 'browser-content']);
 export const REQUIRED_RELEASE_GATE_IDS = [
+  'openapi-preserved',
+  'source-manifest-pinned', 'source-universe-accounted',
   'plans-pinned', 'pages-accounted', 'block-dispositions', 'exclusions-attributed',
   'no-authored-exclusions', 'conversion-fidelity', 'serialized-output-exact',
   'no-unsafe-urls', 'assets-ready', 'prose-match', 'code-blocks-exact', 'tables-exact',
   'source-content-exact', 'source-metadata-exact', 'html-reconciliation', 'chrome-absent',
-  'contract-valid', 'navigation-valid', 'navigation-exact', 'source-navigation-proven', 'internal-links', 'no-unresolved-blocks',
+  'contract-valid', 'navigation-valid', 'navigation-exact', 'source-navigation-proven', 'internal-links', 'unmigrated-links', 'no-unresolved-blocks',
   'headings-sequence', 'redirects-clean', 'no-unreviewed-decisions', 'deterministic-rerun',
   'preview-contract-version', 'browser-fragments', 'browser-content',
   'migrator-pinned',
@@ -35,6 +46,8 @@ export const REQUIRED_RELEASE_GATE_IDS = [
 
 /** Gates that certify exactness against the source. A permissive session reports them `not-run`; it never passes them. */
 export const EXACT_FAMILY_GATE_IDS = [
+  'openapi-preserved',
+  'source-manifest-pinned', 'source-universe-accounted',
   'no-authored-exclusions', 'conversion-fidelity', 'serialized-output-exact', 'navigation-exact', 'source-navigation-proven',
   'source-content-exact', 'source-metadata-exact', 'html-reconciliation', 'chrome-absent',
 ] as const;
@@ -116,17 +129,24 @@ export function normaliseMdxText(mdx: string): string {
     .replace(/^---[\s\S]*?---\n/, '')
     .replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1\s*$/gm, ' ')
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, ' ')
-    .replace(/\{[^{}\n]*\}/g, ' ')
+    // the one expression the contract allows; any other brace is text, which the serializer writes as a character reference
+    .replace(/\{user\.[A-Za-z_]\w*\}/g, ' ')
+    // brace references read as the braces they stand for, so escaped output text compares with the source's text
+    .replace(/&quot;/g, '"').replace(/&#123;/g, '{').replace(/&#125;/g, '}')
     .replace(/<Image\b[^>]*\balt="([^"]*)"[^>]*\/?>/gi, ' $1 ')
     .replace(/<Step\b[^>]*\btitle="([^"]*)"[^>]*>/g, ' $1 ')
-    .replace(/<[^>]+>/g, ' ')
+    // a tag opens with a name; a literal `<` (`1 < 2`, `<<remove`) is text, and no tag reaches past the next `<`
+    .replace(/<\/?[A-Za-z][^<>]*>/g, ' ')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/[*_`\\]+/g, '')
     .replace(/[#>|-]+/g, ' ')
-    .replace(/&lt;/g, '<').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+    // a less-than written as a reference is text, so it is read only once tags are gone
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
     .replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
     .replace(/\s+/g, ' ')
+    // the space a code span is padded with before punctuation is not text
+    .replace(/ ([,.;:!?])/g, '$1')
     .toLowerCase();
 }
 
@@ -153,7 +173,7 @@ export function headingOutline(doc: DocIR): string[] {
 
 export function mdxHeadingOutline(mdx: string): string[] {
   const body = mdx.replace(/^---[\s\S]*?---\n/, '').replace(/^ {0,8}(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n {0,8}\1[ \t]*$/gm, '');
-  return [...body.matchAll(/^\s*(#{1,6})\s+(.+?)\s*$|<Step\b([^>]*)>/gm)].flatMap((m) => {
+  return [...body.matchAll(/^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]?)*(#{1,6})(?:[ \t]+|$)(.*?)[ \t]*$|<Step\b([^>]*)>/gm)].flatMap((m) => {
     if (m[1]) return [`${m[1].length}:${normaliseMdxText(m[2]).trim()}`];
     const title = m[3].match(/\btitle="([^"]*)"/)?.[1];
     return title !== undefined && /\btitleType="h[23]"/.test(m[3]) ? [`step:${normaliseMdxText(title).trim()}`] : [];
@@ -178,7 +198,11 @@ function tableCellText(value: string): string {
 export function tableSignatures(doc: DocIR): string[] {
   const out: string[] = [];
   walkBlocks(doc.children, (b) => {
-    if (b.type === 'table') out.push(JSON.stringify(b.children.map((row) => row.children.map((cell) => tableCellText(inlineText(cell.children))))));
+    if (b.type !== 'table') return;
+    const rows = b.children.map((row) => row.children.map((cell) => tableCellText(inlineText(cell.children))));
+    // an empty header row shows the reader nothing, and the MDX reader drops it the same way
+    if (rows.length && rows[0].every((cell) => !cell)) rows.shift();
+    out.push(JSON.stringify(rows));
   });
   return out;
 }
@@ -192,7 +216,8 @@ function splitTableRow(line: string): string[] {
 }
 
 export function mdxTableSignatures(mdx: string): string[] {
-  const lines = mdx.split(/\r?\n/);
+  // a table inside a quote is still a table; its `>` markers are not cell text
+  const lines = mdx.split(/\r?\n/).map((line) => line.replace(/^[ \t]*(?:>[ \t]?)+/, ''));
   const out: string[] = [];
   const separator = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)*\s*:?-{3,}:?\s*\|?\s*$/; // one or more columns
   for (let i = 0; i + 1 < lines.length; i++) {
@@ -224,6 +249,8 @@ export interface SourceEvidence {
   navigationSource?: string;
   /** Routes the source's own page index lists, so a page cannot silently vanish. */
   indexedRoutes?: string[];
+  /** Where the source's site-relative links land in the migrated site, so the source is compared as convert rewrote it. */
+  links?: SiteLinks;
 }
 
 export interface GateInput {
@@ -236,10 +263,13 @@ export interface GateInput {
    * output no longer follows the reviewed decisions, so the gate fails; omitting these
    * reports the gate `not-run`, never `pass`.
    */
-  pinnedPlans?: { componentPlan?: string; urlPlan?: string; assetPlan?: string; blockExclusions?: string };
+  pinnedPlans?: { componentPlan?: string; urlPlan?: string; assetPlan?: string; blockExclusions?: string; scopeDecisions?: string };
+  pinnedSourceManifest?: string;
+  pinnedAcquisition?: string;
+  pinnedOpenapi?: string;
   /** Source docs from the snapshot (IR JSON). */
   sourceDocs: Array<{ doc: DocIR; outputFile?: string }>;
-  treePages: Array<{ id: string; migrate: boolean; newPath?: string }>;
+  treePages: Array<{ id: string; source?: string; migrate: boolean; newPath?: string }>;
   quarantinedPages: Set<string>;
   excludedPages: Set<string>;
   unreviewed: number;
@@ -259,7 +289,16 @@ export interface GateInput {
 }
 
 export function canonicalHash(outputDir: string): string {
-  const files = listMdx(outputDir).concat(existsSync(join(outputDir, 'documentation.json')) ? [join(outputDir, 'documentation.json')] : []).sort();
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir).sort()) {
+      const file = join(dir, name); const stat = lstatSync(file);
+      if (stat.isSymbolicLink()) throw new Error(`output contains a symbolic link: ${file}`);
+      if (stat.isDirectory()) walk(file); else if (stat.isFile()) files.push(file);
+    }
+  };
+  walk(outputDir);
   const h = files.map((f) => `${relative(outputDir, f)}\n${sha256(readFileSync(f))}`).join('\n');
   return sha256(h);
 }
@@ -268,6 +307,42 @@ export function runGates(input: GateInput): GateResult[] {
   const gates: GateResult[] = [];
   const outMdx = listMdx(input.outputDir);
   const outByPath = new Map(outMdx.map((f) => [relative(input.outputDir, f).replace(/\.mdx?$/, ''), f]));
+  const specProblems: string[] = [];
+  const specFile = join(input.workspace, 'inventory', 'openapi.json');
+  if (existsSync(specFile) || input.pinnedOpenapi) {
+    if (!existsSync(specFile) || !input.pinnedOpenapi || sha256(readFileSync(specFile)) !== input.pinnedOpenapi) specProblems.push('OpenAPI manifest is missing, changed or unpinned');
+    else {
+      const specs = JSON.parse(readFileSync(specFile, 'utf8')) as SpecManifest;
+      for (const spec of specs.documents) {
+        if (spec.file !== `${sha256(spec.source)}.json`) { specProblems.push('OpenAPI manifest has an invalid file path'); continue; }
+        const source = join(input.workspace, 'source-cache', 'openapi', `${sha256(spec.source)}.source`);
+        const output = join(input.outputDir, 'openapi', spec.file);
+        if (!existsSync(source) || sha256(readFileSync(source)) !== spec.sourceHash) specProblems.push(`${spec.source}: frozen spec changed`);
+        if (!existsSync(output) || sha256(readFileSync(output)) !== spec.outputHash) specProblems.push(`${spec.source}: output spec missing or changed`);
+      }
+    }
+  }
+  const catalogFile = join(input.workspace, 'inventory', 'readme-api-catalog.json');
+  if (existsSync(catalogFile) && input.treePages.some((page) => page.migrate && /\/reference\//.test(page.source ?? ''))) {
+    const catalog = JSON.parse(readFileSync(catalogFile, 'utf8')) as { issue?: string };
+    if (catalog.issue && !input.pinnedOpenapi) specProblems.push(catalog.issue);
+  }
+  gates.push({ id: 'openapi-preserved', status: input.fidelityMode === 'permissive' ? 'not-run' : specProblems.length ? 'fail' : 'pass', detail: specProblems.length ? specProblems.join('; ') : input.pinnedOpenapi ? 'all captured OpenAPI source and output documents match their pins' : 'no captured OpenAPI documents declared by acquisition', samples: specProblems.slice(0, 8), count: specProblems.length });
+  if (input.fidelityMode === 'permissive') {
+    for (const id of ['source-manifest-pinned', 'source-universe-accounted']) gates.push({ id, status: 'not-run', detail: 'permissive mode; source universe is not certified' });
+  } else {
+    try {
+      const manifest = requireSourceManifest(input.workspace, input.pinnedSourceManifest);
+      requireAcquisition(input.workspace, manifest, input.pinnedAcquisition, input.treePages);
+      gates.push({ id: 'source-manifest-pinned', status: 'pass', detail: 'source manifest and frozen files match the discovery pin' });
+      const problems = sourceUniverseProblems({ workspace: input.workspace, manifest, treePages: input.treePages, written: new Set(outByPath.keys()), quarantined: input.quarantinedPages });
+      gates.push({ id: 'source-universe-accounted', status: problems.length ? 'fail' : 'pass', detail: problems.length ? `${problems.length} source universe problems` : `${manifest.pages.length} source identities accounted independently of the plan`, count: problems.length, samples: problems.slice(0, 8) });
+    } catch (error) {
+      const detail = (error as Error).message;
+      if (!gates.some((gate) => gate.id === 'source-manifest-pinned')) gates.push({ id: 'source-manifest-pinned', status: 'fail', detail });
+      gates.push({ id: 'source-universe-accounted', status: 'fail', detail });
+    }
+  }
 
   // 0. the reviewed plans still describe this output
   if (!input.pinnedPlans) {
@@ -283,6 +358,7 @@ export function runGates(input: GateInput): GateResult[] {
     ] as Array<[string, string | undefined]>).filter(([file, expected]) => !expected || hashOf(planFile(file)) !== expected).map(([file]) => file);
     // Block exclusions are pinned by absence too: a file that appears after convert is a change.
     if (hashOf(planFile('block-exclusions.yaml')) !== pinned.blockExclusions) changed.push('block-exclusions.yaml');
+    if (hashOf(planFile('scope-decisions.yaml')) !== pinned.scopeDecisions) changed.push('scope-decisions.yaml');
     gates.push({ id: 'plans-pinned', status: changed.length ? 'fail' : 'pass', detail: changed.length ? `plan changed after conversion: ${changed.join(', ')}; rerun convert` : 'component, URL and asset plans match the converted snapshot', count: changed.length, samples: changed });
   }
 
@@ -400,6 +476,15 @@ export function runGates(input: GateInput): GateResult[] {
   // 4. strict validator on every output file
   let errors = 0; const errSamples: string[] = [];
   for (const f of outMdx) for (const i of validateMdx(readFileSync(f, 'utf8'))) if (i.severity === 'error') { errors++; if (errSamples.length < 8) errSamples.push(`${relative(input.outputDir, f)}:${i.line ?? '-'} ${i.code}: ${i.message}`); }
+  // the platform compiles each file whole, frontmatter included, so each must parse that way too
+  for (const f of outMdx) {
+    try {
+      fromMarkdown(readFileSync(f, 'utf8'), { extensions: [gfm(), mdxjs()], mdastExtensions: [gfmFromMarkdown(), mdxFromMarkdown()] });
+    } catch (error) {
+      errors++;
+      if (errSamples.length < 8) errSamples.push(`${relative(input.outputDir, f)}: whole-file MDX parse: ${String((error as Error).message).split('\n')[0]}`);
+    }
+  }
   gates.push({ id: 'contract-valid', status: errors ? 'fail' : 'pass', detail: `${errors} strict-validator errors across ${outMdx.length} files`, count: errors, samples: errSamples });
 
   // 4b. the raw source, re-read: the only checks that can see a loss which happened before the snapshot
@@ -407,6 +492,11 @@ export function runGates(input: GateInput): GateResult[] {
   const sourceGate = (id: string, results: SourceComparison[], summary: (failures: SourceComparison[]) => string): void => {
     if (!exact) { gates.push({ id, status: 'not-run', detail: 'permissive mode; the source is not re-read' }); return; }
     if (!evidence) { gates.push({ id, status: 'fail', detail: 'no raw source evidence was supplied; exact mode certifies output only against the acquired source' }); return; }
+    const requiredIds = input.treePages.filter((page) => page.migrate).map((page) => page.id);
+    const resultIds = new Set(results.map((result) => result.pageId));
+    if (!results.length || resultIds.size !== results.length || requiredIds.some((id) => !resultIds.has(id))) {
+      gates.push({ id, status: 'fail', detail: 'raw source evidence is empty, duplicated, or missing migrated pages' }); return;
+    }
     const failures = results.filter((result) => !result.pass);
     gates.push({
       id,
@@ -417,7 +507,7 @@ export function runGates(input: GateInput): GateResult[] {
     });
   };
   const sourcePages = exact && evidence ? evidence.pages : [];
-  sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile)), (failures) => `${failures.length} page(s) differ from the published source`);
+  sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links)), (failures) => `${failures.length} page(s) differ from the published source`);
   sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page)), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);
   sourceGate('html-reconciliation', evidence?.profile ? sourcePages.map((page) => htmlReconciliation(page, evidence.platform, evidence.profile!)) : sourcePages.map((page) => ({ pageId: page.pageId, path: page.path, pass: false, detail: `profile ${evidence?.platform ?? 'unknown'} declares no rendered-page selectors to reconcile against` })), (failures) => `${failures.length} page(s) disagree with the rendered source`);
   sourceGate('chrome-absent', sourcePages.map((page) => chromeAbsent(page, evidence?.profile?.chromeStrings ?? [])), (failures) => `${failures.length} page(s) contain platform chrome`);
@@ -439,10 +529,11 @@ export function runGates(input: GateInput): GateResult[] {
     const expected = input.expectedNavigation;
     const matchesTree = !!expected && written === canonical(expected);
     const reExtracted = evidence?.navigation;
-    const matchesSource = !reExtracted || written === canonical(reExtracted);
+    const matchesSource = !!reExtracted && written === canonical(reExtracted);
     const same = matchesTree && matchesSource;
     const why = !expected ? 'expected navigation was not supplied'
       : !matchesTree ? 'output navigation differs from the reviewed source tree'
+      : !reExtracted ? 'no independently extracted source navigation was supplied'
       : !matchesSource ? `output navigation differs from the navigation re-extracted from the acquired source (${evidence?.navigationSource ?? 'source'})`
       : reExtracted ? `output navigation matches the reviewed tree and the navigation re-extracted from the acquired source (${evidence?.navigationSource ?? 'source'})`
       : 'output navigation exactly matches the reviewed source tree';
@@ -452,16 +543,62 @@ export function runGates(input: GateInput): GateResult[] {
   const navigationProven = input.sourceKind !== 'url' || ['platform-metadata', 'dom-sidebar', 'manual'].includes(input.navigationSource ?? '');
   gates.push({ id: 'source-navigation-proven', status: !exact ? 'not-run' : navigationProven ? 'pass' : 'fail', detail: !exact ? 'permissive mode; navigation provenance is not certified' : navigationProven ? (input.sourceKind === 'url' ? `navigation source: ${input.navigationSource}` : 'not required for this source') : `live navigation was inferred from ${input.navigationSource ?? 'unknown'}; exact mode requires platform metadata, a source repository/API, or a manually reviewed navigation tree`, count: exact && !navigationProven ? 1 : 0 });
 
+  // Parse the written documents once and inspect their semantic link nodes. Regexes miss
+  // component links and page-relative targets, exactly the links most likely to break after restructuring.
+  const outputLinks = new Map<string, string[]>();
+  for (const f of outMdx) {
+    try {
+      const route = relative(input.outputDir, f).replace(/\.mdx?$/, '');
+      outputLinks.set(f, documentLinks(markdownToIr(readFileSync(f, 'utf8'), { platform: 'dai', file: route, pageId: route })));
+    } catch {
+      // contract-valid already blocks a file that cannot be parsed; do not manufacture a second diagnosis here
+      outputLinks.set(f, []);
+    }
+  }
+  /** Deployed route a root- or page-relative output link resolves to; undefined for anchors, queries and external schemes. */
+  const outputRoute = (url: string, from: string): string | undefined => {
+    if (!url || url.startsWith('#') || url.startsWith('?') || url.startsWith('//') || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(url)) return undefined;
+    try {
+      const base = `https://target.invalid/${from.replace(/^\/+/, '')}`;
+      const path = decodeURI(new URL(url, base).pathname).replace(/\/+$/, '').replace(/^\/+/, '');
+      return path || 'index';
+    } catch { return '__invalid_url__'; }
+  };
+
   // 6. internal links resolve
   let broken = 0; const brokenSamples: string[] = [];
   for (const f of outMdx) {
-    const mdx = readFileSync(f, 'utf8');
-    for (const m of mdx.matchAll(/\]\((\/[^)#\s]*)(#[^)\s]*)?\)/g)) {
-      const target = m[1].replace(/\/$/, '').replace(/^\//, '');
-      if (target && !outByPath.has(target) && !existsSync(join(input.outputDir, target))) { broken++; if (brokenSamples.length < 5) brokenSamples.push(`${relative(input.outputDir, f)} → ${m[1]}`); }
+    const from = relative(input.outputDir, f).replace(/\.mdx?$/, '');
+    for (const url of outputLinks.get(f) ?? []) {
+      const target = outputRoute(url, from);
+      if (target && !outByPath.has(target)) { broken++; if (brokenSamples.length < 5) brokenSamples.push(`${relative(input.outputDir, f)} → ${url}`); }
     }
   }
   gates.push({ id: 'internal-links', status: broken ? 'fail' : 'pass', detail: `${broken} internal links do not resolve to an output page`, count: broken, samples: brokenSamples });
+
+  // 6b. links that leave the migrated site for the source site, which usually moves to Documentation.AI
+  const unmigratedMode = readUrlPlan(input.workspace)?.unmigratedLinks ?? 'keep';
+  const sourceHosts = new Set(input.sourceEvidence?.links?.hosts ?? []);
+  let unmigrated = 0; const unmigratedSamples: string[] = [];
+  if (sourceHosts.size) {
+    for (const f of outMdx) {
+      for (const url of outputLinks.get(f) ?? []) {
+        let host: string | undefined;
+        try { host = new URL(url).hostname; } catch { host = undefined; }
+        if (!host || !sourceHosts.has(host)) continue;
+        unmigrated++;
+        if (unmigratedSamples.length < 5) unmigratedSamples.push(`${relative(input.outputDir, f)} → ${url}`);
+      }
+    }
+  }
+  gates.push({
+    id: 'unmigrated-links',
+    status: unmigrated && unmigratedMode === 'keep' ? 'fail' : 'pass',
+    detail: !unmigrated ? 'no link points at the source site'
+      : unmigratedMode === 'source' ? `${unmigrated} links point at the source site, which plan/urls.yaml (unmigratedLinks: source) says stays up; listed in report/unmigrated-links.json`
+      : `${unmigrated} links point at the source site, which usually moves to Documentation.AI: migrate their pages, fix the links, or set unmigratedLinks: source in plan/urls.yaml if the source site stays up (listed in report/unmigrated-links.json)`,
+    count: unmigrated, samples: unmigratedSamples,
+  });
 
   // 7. unresolved snippets / quarantine placeholders in output
   let unresolved = 0; const unresolvedSamples: string[] = [];

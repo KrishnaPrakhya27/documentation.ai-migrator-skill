@@ -178,7 +178,7 @@ function main() {
     },
     navigation: {
       // hand-written from the published schema, not extracted from the renderer
-      rootKeys: ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'groups', 'pages'],
+      rootKeys: ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'],
       rule: 'exactly one child collection per container, nested in schema order products > versions > languages > tabs > dropdowns > groups > pages; pages are objects { title, path | href } or nested groups, never bare strings (schema: dashboard.documentation.ai/documentation.json)',
     },
     redirects: {
