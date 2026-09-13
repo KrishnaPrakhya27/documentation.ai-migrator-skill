@@ -11,7 +11,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import type { Tree, TreePage } from '../nav/tree.js';
+import type { Tree, TreePage, SourceNavigationNode } from '../nav/tree.js';
 import { pageIdFromPlatform } from '../session/ids.js';
 
 export interface ReadmeRepo { root: string; docsRoot: string; tree: Tree; hidden: string[] }
@@ -30,6 +30,8 @@ export function readReadmeRepo(rootIn: string): ReadmeRepo {
   const docsRoot = existsSync(join(root, 'docs')) ? join(root, 'docs') : root;
   const pages: TreePage[] = [];
   const hidden: string[] = [];
+  /** What each page states about where it sits, kept so the navigation is read from those statements. */
+  const placements: Array<{ page: TreePage; slug: string; category?: string; parent?: string }> = [];
   let order = 0;
   const walk = (dir: string, group: string[]) => {
     const entries = readdirSync(dir, { withFileTypes: true }).filter((e) => !e.isSymbolicLink()).sort((a, b) => a.name.localeCompare(b.name));
@@ -42,12 +44,50 @@ export function readReadmeRepo(rootIn: string): ReadmeRepo {
       const rel = p.slice(root.length + 1);
       const slug = fm.slug ?? e.name.replace(/\.mdx?$/i, '');
       if (fm.hidden) { hidden.push(rel); continue; }
-      pages.push({ id: pageIdFromPlatform('readme', slug), title: fm.title ?? slug.replace(/[-_]+/g, ' '), source: rel, group: [...group, ...(fm.parentDocSlug ? [fm.parentDocSlug] : [])], order: fm.order ?? order++, oldPath: `/docs/${slug}`, migrate: true, reason: 'sync-repo' });
+      const page: TreePage = { id: pageIdFromPlatform('readme', slug), title: fm.title ?? slug.replace(/[-_]+/g, ' '), source: rel, group: [...group, ...(fm.parentDocSlug ? [fm.parentDocSlug] : [])], order: fm.order ?? order++, oldPath: `/docs/${slug}`, migrate: true, reason: 'sync-repo' };
+      pages.push(page);
+      placements.push({ page, slug, category: fm.category ?? group[group.length - 1], parent: fm.parentDocSlug ?? fm.parentDoc });
     }
   };
   walk(docsRoot, []);
   pages.sort((a, b) => a.order - b.order).forEach((p, i) => { p.order = i; });
-  return { root, docsRoot, tree: { scope: 'full', platform: 'readme', pages }, hidden };
+
+  // ReadMe states a page's placement in its own frontmatter: the category it belongs to and, for a
+  // child page, the page it sits under. Reading the navigation from those statements is what lets
+  // exact mode certify it; inferring it from the directory layout would be a guess about the
+  // source, and `source-navigation-proven` exists to refuse exactly that.
+  const navigation: SourceNavigationNode[] = [];
+  const categories = new Map<string, SourceNavigationNode[]>();
+  const placedAt = new Map<string, { siblings: SourceNavigationNode[]; index: number; title: string }>();
+  const categoryChildren = (label: string): SourceNavigationNode[] => {
+    const existing = categories.get(label);
+    if (existing) return existing;
+    const group: SourceNavigationNode = { type: 'group', label, children: [] };
+    navigation.push(group);
+    categories.set(label, group.children);
+    return group.children;
+  };
+  /** A page that has children becomes the group its own title names, led by the page itself. */
+  const childrenOfPage = (slug: string): SourceNavigationNode[] | undefined => {
+    const at = placedAt.get(slug);
+    if (!at) return undefined;
+    const current = at.siblings[at.index];
+    if (current.type === 'group') return current.children;
+    const group: SourceNavigationNode = { type: 'group', label: at.title, children: [current] };
+    at.siblings[at.index] = group;
+    return group.children;
+  };
+  const ordered = [...placements].sort((a, b) => a.page.order - b.page.order);
+  // Parents first, so a child listed before its parent still finds it.
+  for (const pass of [ordered.filter((entry) => !entry.parent), ordered.filter((entry) => entry.parent)]) {
+    for (const entry of pass) {
+      const container = (entry.parent ? childrenOfPage(entry.parent) : undefined) ?? categoryChildren(entry.category ?? 'Documentation');
+      container.push({ type: 'page', pageId: entry.page.id, title: entry.page.title });
+      placedAt.set(entry.slug, { siblings: container, index: container.length - 1, title: entry.page.title });
+    }
+  }
+
+  return { root, docsRoot, tree: { scope: 'full', platform: 'readme', pages, navigation, navigationSource: 'source-config' }, hidden };
 }
 
 export interface ReadmeApiOptions { apiKey: string; baseUrl?: string; branch?: string; fetchImpl?: typeof fetch; version?: string }

@@ -14,11 +14,12 @@
  *   logging/              decisions.jsonl, run log
  *   report/               gates.json, verification.json, review-queue.md, customer report
  */
-import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, statSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, chmodSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir, platform as osPlatform } from 'node:os';
 import { sha256 } from './ids.js';
 import { migratorProvenanceProblem, type MigratorProvenance } from './provenance.js';
+import type { GateApproval } from './approvals.js';
 
 export const WORKSPACE_DIRS = ['source-cache', 'snapshot', 'inventory', 'plan', 'output', 'ledger', 'quarantine', 'logging', 'report', 'assets-original', 'assets-ready'] as const;
 
@@ -78,6 +79,8 @@ export interface Session {
   migrator: MigratorProvenance;
   /** Builds this workspace has been rebased onto, oldest first. Empty for a session that never was. */
   rebases?: RebaseRecord[];
+  /** The four human gates, by gate number, each pinning the state the approver saw. */
+  approvals?: Partial<Record<1 | 2 | 3 | 4, GateApproval>>;
   versions: {
     core: string;
     contentContract: string;
@@ -146,7 +149,12 @@ export function readSession(workspace: string): Session {
 }
 
 export function writeSession(workspace: string, session: Session): void {
-  writeFileSync(sessionPath(workspace), JSON.stringify(session, null, 2) + '\n', { mode: 0o600 });
+  // Written whole or not at all: every stage rewrites this file, and a process killed mid-write
+  // used to leave the truncated remains as the only record of what the run had pinned.
+  const path = sessionPath(workspace);
+  const temporary = `${path}.tmp`;
+  writeFileSync(temporary, JSON.stringify(session, null, 2) + '\n', { mode: 0o600 });
+  renameSync(temporary, path);
 }
 
 export function markStage(workspace: string, stage: string, status: 'pending' | 'done' | 'failed', note?: string): Session {

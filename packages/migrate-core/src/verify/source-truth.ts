@@ -12,9 +12,10 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { markdownToIr } from '../ir/from-markdown.js';
+import { markdownToIr, splitFrontmatter } from '../ir/from-markdown.js';
 import { htmlToIr } from '../ir/from-html.js';
 import { unwrapPublishedMarkdown } from '../scrape/published-markdown.js';
+import { extractSeo, seoFrontmatter } from '../scrape/seo.js';
 import { htmlAdapterOptions, type ScrapeProfile } from '../scrape/profiles.js';
 import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { authoredContentSnapshot, firstFidelityDifference } from './fidelity.js';
@@ -24,6 +25,8 @@ import { retargetDocLinks, siteLinkTarget, type SiteLinks } from '../urls/site-l
 /** One page as the source served it, paired with the file the migration wrote for it. */
 export interface RawSourcePage {
   pageId: string;
+  /** The address the source served this page from; the base for its own canonical and social image. */
+  url?: string;
   /** Source path, e.g. `/guides/setup`. */
   path: string;
   /** Output route (the new path without extension). */
@@ -45,6 +48,14 @@ export interface SourceComparison {
   /** First differing snapshot path, when the bodies differ. */
   difference?: string;
   detail?: string;
+}
+
+function unsupportedRobots(html: string | undefined, url: string | undefined): string | undefined {
+  if (!html || !url) return undefined;
+  const robots = extractSeo(html, url).robots;
+  if (!robots) return undefined;
+  const directives = robots.toLowerCase().split(',').map((value) => value.trim()).filter(Boolean);
+  return directives.every((value) => value === 'all' || value === 'index' || value === 'follow') ? undefined : robots;
 }
 
 /** Whitespace, non-breaking spaces and typographic quotes differ between a rendered page and its Markdown without any content changing. */
@@ -73,6 +84,7 @@ export function loadRawSourcePages(input: {
     const record = JSON.parse(readFileSync(cached, 'utf8')) as AcquiredPage;
     out.push({
       pageId: page.id,
+      url: page.source,
       path: pathOf(page.source),
       route: page.newPath,
       outputFile: join(input.outputDir, `${page.newPath}.mdx`),
@@ -97,11 +109,17 @@ function pathOf(source: string): string {
 export function rawSourceIr(page: RawSourcePage, platform: string, profile?: ScrapeProfile, links?: SiteLinks): DocIR | undefined {
   if (page.markdown === undefined) return undefined;
   const published = unwrapPublishedMarkdown(page.markdown, platform, { expectedDescription: page.description });
-  const title = page.title ?? published.title ?? page.route;
-  const description = page.description ?? published.description;
+  const stated = splitFrontmatter(published.body, page.path).data;
+  const statedTitle = typeof stated.title === 'string' ? stated.title : undefined;
+  const statedDescription = typeof stated.description === 'string' ? stated.description : undefined;
+  const title = statedTitle ?? published.title ?? page.title ?? page.route;
+  const description = statedDescription ?? published.description ?? page.description;
   // The frontmatter the output must carry, built from the source's own statements, so the
   // comparison covers metadata as well as body.
-  const doc = markdownToIr(published.body, { platform, file: page.path, pageId: page.pageId, title, frontmatter: { title, ...(description ? { description } : {}) }, codeMetaStrip: profile?.codeMetaStrip });
+  // What the page stated about itself for search engines is part of what the source published, so
+  // it is derived here from the same frozen bytes the output must have been built from.
+  const seo = page.html && page.url ? seoFrontmatter(extractSeo(page.html, page.url), { url: page.url, title, description }, () => undefined) : {};
+  const doc = markdownToIr(published.body, { platform, file: page.path, pageId: page.pageId, title, frontmatter: { title, ...(description ? { description } : {}), ...seo }, codeMetaStrip: profile?.codeMetaStrip });
   // convert points site-relative links at their migrated routes or the source site; the source is read the same way
   return links ? retargetDocLinks(doc, siteLinkTarget(links)) : doc;
 }
@@ -128,15 +146,19 @@ export function sourceContentExact(page: RawSourcePage, platform: string, profil
 }
 
 /** Frontmatter title and description must be byte-equal to what the source states, and absent where it states none. */
-export function sourceMetadataExact(page: RawSourcePage): SourceComparison {
+export function sourceMetadataExact(page: RawSourcePage, platform = 'generic'): SourceComparison {
   const output = outputIr(page);
   if (!output) return { pageId: page.pageId, path: page.path, pass: false, detail: `no output file at ${page.outputFile}` };
-  const declaredTitle = page.llms?.title ?? page.title;
-  const declaredDescription = page.llms?.description ?? page.description;
+  const published = page.markdown === undefined ? undefined : unwrapPublishedMarkdown(page.markdown, platform, { expectedDescription: page.description });
+  const stated = published ? splitFrontmatter(published.body, page.path).data : {};
+  const declaredTitle = page.llms?.title ?? (typeof stated.title === 'string' ? stated.title : undefined) ?? published?.title ?? page.title;
+  const declaredDescription = page.llms?.description ?? (typeof stated.description === 'string' ? stated.description : undefined) ?? published?.description ?? page.description;
   const problems: string[] = [];
   if (declaredTitle && output.frontmatter.title !== declaredTitle) problems.push(`title is ${JSON.stringify(output.frontmatter.title)}, source states ${JSON.stringify(declaredTitle)}`);
   if (declaredDescription && output.frontmatter.description !== declaredDescription) problems.push(`description is ${JSON.stringify(output.frontmatter.description)}, source states ${JSON.stringify(declaredDescription)}`);
   if (!declaredDescription && output.frontmatter.description) problems.push(`description is ${JSON.stringify(output.frontmatter.description)} but the source states none`);
+  const robots = unsupportedRobots(page.html, page.url);
+  if (robots) problems.push(`robots directive ${JSON.stringify(robots)} has no supported Documentation.AI page mapping; preserve it through a target contract change or an explicit publishing decision`);
   return { pageId: page.pageId, path: page.path, pass: !problems.length, detail: problems.join('; ') || undefined };
 }
 
@@ -222,6 +244,8 @@ export function htmlReconciliation(page: RawSourcePage, platform: string, profil
   const renderedDoc: DocIR = { pageId: page.pageId, platform, source: page.path, frontmatter: { title: page.title ?? page.route }, children: rendered.children };
 
   const problems: string[] = [];
+  const robots = unsupportedRobots(page.html, page.url);
+  if (robots) problems.push(`robots directive ${JSON.stringify(robots)} has no supported Documentation.AI page mapping`);
   const renderedHeadings = documentHeadings(renderedDoc).filter((heading) => heading.depth > 1);
   const outputHeadings = documentHeadings(output).filter((heading) => heading.depth > 1);
   if (!sameSequence(renderedHeadings.map(headingKey), outputHeadings.map(headingKey))) {

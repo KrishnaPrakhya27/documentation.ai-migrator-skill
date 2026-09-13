@@ -1,6 +1,6 @@
 {
   "name": "documentation-ai-migration",
-  "version": "0.1.0+codex.20260910054936",
+  "version": "0.1.0+codex.20260913033705",
   "description": "Migrate documentation sites onto Documentation.AI: generic crawl, ReadMe, Mintlify, GitBook and Document360 importers, scraping skills per platform, verification and reporting.",
   "author": {
     "name": "Documentation.AI"

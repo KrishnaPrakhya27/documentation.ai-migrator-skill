@@ -35,6 +35,8 @@ export interface AcquiredPage {
 }
 
 export interface AcquireInput {
+  /** Called as each page finishes, for the stage's progress line. */
+  onProgress?: (done: number, total: number) => void;
   workspace: string;
   pages: TreePage[];
   fetcher: Pick<Fetcher, 'get'>;
@@ -72,7 +74,8 @@ export function acquiredPath(workspace: string, pageId: string): string {
   return join(workspace, 'source-cache', 'acquired', `${pageId}.json`);
 }
 
-function writeAcquired(workspace: string, pageId: string, page: AcquiredPage): void {
+/** Atomic write of one acquisition record; shared by the network and frozen-source paths. */
+export function writeAcquired(workspace: string, pageId: string, page: AcquiredPage): void {
   const path = acquiredPath(workspace, pageId);
   writeFileSync(`${path}.tmp`, JSON.stringify(page, null, 2) + '\n', { mode: 0o600 });
   renameSync(`${path}.tmp`, path);
@@ -110,6 +113,7 @@ export async function acquirePages(input: AcquireInput): Promise<AcquireResult> 
   const result: AcquireResult = { pages: [], markdownUnavailable: [] };
   if (new Set(input.pages.map((page) => page.id)).size !== input.pages.length) throw new Error('acquisition page IDs must be unique');
   const summarize = (page: TreePage, record: AcquiredPage): { summary: AcquiredPageSummary; fallback?: string } => ({ summary: { id: page.id, url: page.source, htmlSha256: record.htmlSha256!, markdownUrl: record.markdownUrl, markdownSha256: record.markdownSha256 }, fallback: record.markdownUnavailable });
+  let finished = 0;
   const records = await mapConcurrent(input.pages, input.concurrency ?? 4, async (page): Promise<{ summary?: AcquiredPageSummary; fallback?: string; url?: string; problem?: string }> => {
     try {
     const cachedPath = acquiredPath(input.workspace, page.id);
@@ -144,6 +148,9 @@ export async function acquirePages(input: AcquireInput): Promise<AcquireResult> 
     } catch (error) {
       rmSync(acquiredPath(input.workspace, page.id), { force: true });
       return { url: page.source, problem: (error as Error).message };
+    } finally {
+      // reported whether the page landed or failed, so the count reflects work done, not work that worked
+      input.onProgress?.(++finished, input.pages.length);
     }
   });
   const failures: Array<{ url: string; reason: string }> = [];

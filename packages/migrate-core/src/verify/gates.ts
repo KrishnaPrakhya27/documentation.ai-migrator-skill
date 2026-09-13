@@ -9,6 +9,7 @@ import { Ledger, effectiveExclusions, summarize, type LedgerSummary } from '../l
 import type { Block, DocIR, Inline } from '../ir/types.js';
 import { walkBlocks, inlineText } from '../ir/types.js';
 import { redirectMaps, readUrlPlan } from '../urls/plan.js';
+import { redirectProblems } from '../urls/redirect-graph.js';
 import type { SiteLinks } from '../urls/site-links.js';
 import { sha256 } from '../session/ids.js';
 import { isSafeUrl } from '../components/sanitize.js';
@@ -23,14 +24,22 @@ import { fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from './f
 import { isConvertedFidelityRecord, readFidelityRecords } from './fidelity-records.js';
 import { describeMigrator, migratorDrift, type MigratorProvenance } from '../session/provenance.js';
 import { chromeAbsent, documentLinks, htmlReconciliation, sourceContentExact, sourceMetadataExact, type RawSourcePage, type SourceComparison } from './source-truth.js';
+import { documentAnchors, unresolvedFragments } from './fragments.js';
 import type { ScrapeProfile } from '../scrape/profiles.js';
 import { requireSourceManifest, sourceUniverseProblems } from '../evidence/verify.js';
 import { requireAcquisition } from '../evidence/acquisition.js';
+import { inapplicableProofs } from '../evidence/applicability.js';
 import type { SpecManifest } from '../openapi/graph.js';
 
-export interface GateResult { id: string; status: 'pass' | 'fail' | 'not-run'; detail: string; count?: number; samples?: string[] }
+export type GateStatus = 'pass' | 'fail' | 'not-run' | 'inapplicable';
+export interface GateResult { id: string; status: GateStatus; detail: string; count?: number; samples?: string[] }
 
-const PREVIEW_ONLY_GATES = new Set(['preview-contract-version', 'browser-fragments', 'browser-content']);
+/** A proof that cannot exist for this source kind is complete, not skipped. */
+export function gateSatisfied(gate: GateResult): boolean {
+  return gate.status === 'pass' || gate.status === 'inapplicable';
+}
+
+const PREVIEW_ONLY_GATES = new Set(['preview-contract-version', 'browser-fragments', 'browser-content', 'responsive-layout']);
 export const REQUIRED_RELEASE_GATE_IDS = [
   'openapi-preserved',
   'source-manifest-pinned', 'source-universe-accounted',
@@ -39,9 +48,9 @@ export const REQUIRED_RELEASE_GATE_IDS = [
   'no-unsafe-urls', 'assets-ready', 'prose-match', 'code-blocks-exact', 'tables-exact',
   'source-content-exact', 'source-metadata-exact', 'html-reconciliation', 'chrome-absent',
   'contract-valid', 'navigation-valid', 'navigation-exact', 'source-navigation-proven', 'internal-links', 'unmigrated-links', 'no-unresolved-blocks',
-  'headings-sequence', 'redirects-clean', 'no-unreviewed-decisions', 'deterministic-rerun',
-  'preview-contract-version', 'browser-fragments', 'browser-content',
-  'migrator-pinned',
+  'headings-sequence', 'fragments-resolve', 'redirects-clean', 'no-unreviewed-decisions', 'deterministic-rerun',
+  'preview-contract-version', 'browser-fragments', 'browser-content', 'responsive-layout',
+  'migrator-pinned', 'human-gates-approved',
 ] as const;
 
 /** Gates that certify exactness against the source. A permissive session reports them `not-run`; it never passes them. */
@@ -78,14 +87,21 @@ export interface PushBlockerOptions {
 }
 
 /** A migration branch may be pushed to create its preview only after every
- * non-preview gate passes. Final release still requires every gate to pass. */
+ * non-preview gate is satisfied. Final release requires every required gate to be satisfied. */
 export function previewPushBlockers(gates: GateResult[], options: PushBlockerOptions = {}): GateResult[] {
   const byId = new Map(gates.map((gate) => [gate.id, gate]));
   const missing = REQUIRED_RELEASE_GATE_IDS.filter((id) => !byId.has(id)).map((id): GateResult => ({ id, status: 'fail', detail: 'required gate result is missing' }));
   const waived = new Set<string>(options.allowUnprovenExactness ? EXACT_FAMILY_GATE_IDS : []);
-  return [...missing, ...gates.filter((gate) => gate.status !== 'pass'
+  return [...missing, ...gates.filter((gate) => !gateSatisfied(gate)
     && !(gate.status === 'not-run' && PREVIEW_ONLY_GATES.has(gate.id))
     && !(gate.status === 'not-run' && waived.has(gate.id)))];
+}
+
+/** A release certificate requires a result for every required gate and no unresolved result. */
+export function releaseBlockers(gates: GateResult[]): GateResult[] {
+  const byId = new Map(gates.map((gate) => [gate.id, gate]));
+  const missing = REQUIRED_RELEASE_GATE_IDS.filter((id) => !byId.has(id)).map((id): GateResult => ({ id, status: 'fail', detail: 'required gate result is missing' }));
+  return [...missing, ...gates.filter((gate) => !gateSatisfied(gate))];
 }
 
 /** The exact-fidelity gates a push waived, for the operator message and the run report. */
@@ -319,7 +335,12 @@ export interface GateInput {
   pinnedAcquisition?: string;
   pinnedOpenapi?: string;
   /** Source docs from the snapshot (IR JSON). */
-  sourceDocs: Array<{ doc: DocIR; outputFile?: string }>;
+  /**
+   * The frozen pages paired with what was written for them. An iterable rather than an array so a
+   * large migration can stream them from disk: the gates walk them several times, so whatever is
+   * passed must be iterable more than once — an array is.
+   */
+  sourceDocs: Iterable<{ doc: DocIR; outputFile?: string }>;
   treePages: Array<{ id: string; source?: string; migrate: boolean; newPath?: string }>;
   quarantinedPages: Set<string>;
   excludedPages: Set<string>;
@@ -332,6 +353,8 @@ export interface GateInput {
   previewContractVersion?: string;
   fidelityMode?: 'exact' | 'permissive';
   sourceKind?: 'url' | 'export' | 'repo' | 'api';
+  /** Why the human gates do not hold, or an empty list when they do; undefined when not consulted. */
+  approvalProblems?: string[];
   navigationSource?: string;
   expectedNavigation?: Record<string, unknown>;
   /** Provenance pinned at init and the build running verify; the gates certify output of the pinned build only. */
@@ -373,6 +396,18 @@ export function runGates(input: GateInput): GateResult[] {
       }
     }
   }
+  // The human gates are decisions, not prose: a release is refused while one is unapproved, or
+  // while the state an approval covered has changed since it was given.
+  gates.push(input.approvalProblems === undefined
+    ? { id: 'human-gates-approved', status: 'not-run', detail: 'human gate approvals were not consulted for this check' }
+    : {
+      id: 'human-gates-approved',
+      status: input.approvalProblems.length ? 'fail' : 'pass',
+      detail: input.approvalProblems.length ? input.approvalProblems.join('; ') : 'every human gate reached so far is approved for the state that exists now',
+      count: input.approvalProblems.length,
+      samples: input.approvalProblems.slice(0, 4),
+    });
+
   const catalogFile = join(input.workspace, 'inventory', 'readme-api-catalog.json');
   if (existsSync(catalogFile) && input.treePages.some((page) => page.migrate && /\/reference\//.test(page.source ?? ''))) {
     const catalog = JSON.parse(readFileSync(catalogFile, 'utf8')) as { issue?: string };
@@ -449,7 +484,9 @@ export function runGates(input: GateInput): GateResult[] {
   const convertedRecords = fidelity.filter(isConvertedFidelityRecord);
   const conversionFailures = exact ? convertedRecords.filter((record) => !record.pass) : [];
   // a held or out-of-scope page carries a pass:null record; only a page convert never recorded at all is missing
-  const missingFidelity = exact ? input.sourceDocs.filter(({ doc }) => !fidelity.some((record) => record.pageId === doc.pageId)) : [];
+  const recorded = new Set(fidelity.map((record) => record.pageId));
+  const missingFidelity: Array<{ doc: DocIR }> = [];
+  if (exact) for (const entry of input.sourceDocs) if (!recorded.has(entry.doc.pageId)) missingFidelity.push(entry);
   gates.push({
     id: 'conversion-fidelity',
     status: !exact ? 'not-run' : conversionFailures.length || missingFidelity.length ? 'fail' : 'pass',
@@ -548,9 +585,16 @@ export function runGates(input: GateInput): GateResult[] {
 
   // 4b. the raw source, re-read: the only checks that can see a loss which happened before the snapshot
   const evidence = input.sourceEvidence;
+  // What this source kind can be held to. A proof with no witness in this source is reported with
+  // the reason, never failed and never silently skipped; every kind keeps at least one witness.
+  const inapplicable = inapplicableProofs({ kind: input.sourceKind ?? 'url', publishesMarkdown: !!evidence?.profile?.mdSuffix });
   const sourceGate = (id: string, results: SourceComparison[], summary: (failures: SourceComparison[]) => string): void => {
     if (!exact) { gates.push({ id, status: 'not-run', detail: 'permissive mode; the source is not re-read' }); return; }
+    // Missing evidence always fails: a proof is excused only when this source kind could never
+    // have produced the witness, never because the witness is absent.
     if (!evidence) { gates.push({ id, status: 'fail', detail: 'no raw source evidence was supplied; exact mode certifies output only against the acquired source' }); return; }
+    const inapplicableReason = inapplicable.get(id);
+    if (inapplicableReason) { gates.push({ id, status: 'inapplicable', detail: inapplicableReason }); return; }
     const requiredIds = input.treePages.filter((page) => page.migrate).map((page) => page.id);
     const resultIds = new Set(results.map((result) => result.pageId));
     if (!results.length || resultIds.size !== results.length || requiredIds.some((id) => !resultIds.has(id))) {
@@ -567,7 +611,7 @@ export function runGates(input: GateInput): GateResult[] {
   };
   const sourcePages = exact && evidence ? evidence.pages : [];
   sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links)), (failures) => `${failures.length} page(s) differ from the published source`);
-  sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page)), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);
+  sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page, evidence?.platform ?? 'generic')), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);
   sourceGate('html-reconciliation', evidence?.profile ? sourcePages.map((page) => htmlReconciliation(page, evidence.platform, evidence.profile!)) : sourcePages.map((page) => ({ pageId: page.pageId, path: page.path, pass: false, detail: `profile ${evidence?.platform ?? 'unknown'} declares no rendered-page selectors to reconcile against` })), (failures) => `${failures.length} page(s) disagree with the rendered source`);
   sourceGate('chrome-absent', sourcePages.map((page) => chromeAbsent(page, evidence?.profile?.chromeStrings ?? [])), (failures) => `${failures.length} page(s) contain platform chrome`);
 
@@ -589,9 +633,14 @@ export function runGates(input: GateInput): GateResult[] {
     const matchesTree = !!expected && written === canonical(expected);
     const reExtracted = evidence?.navigation;
     const matchesSource = !!reExtracted && written === canonical(reExtracted);
-    const same = matchesTree && matchesSource;
+    // A manual tree is itself an explicit source-structure decision pinned by human gate 1. It
+    // exists precisely when executable source configuration cannot be re-read safely, so requiring
+    // a second machine witness here would make the documented manual recovery path impossible.
+    const manual = input.navigationSource === 'manual';
+    const same = matchesTree && (manual || matchesSource);
     const why = !expected ? 'expected navigation was not supplied'
       : !matchesTree ? 'output navigation differs from the reviewed source tree'
+      : manual ? 'output navigation matches the human-reviewed tree pinned by gate 1'
       : !reExtracted ? 'no independently extracted source navigation was supplied'
       : !matchesSource ? `output navigation differs from the navigation re-extracted from the acquired source (${evidence?.navigationSource ?? 'source'})`
       : reExtracted ? `output navigation matches the reviewed tree and the navigation re-extracted from the acquired source (${evidence?.navigationSource ?? 'source'})`
@@ -599,16 +648,24 @@ export function runGates(input: GateInput): GateResult[] {
     gates.push({ id: 'navigation-exact', status: !exact ? 'not-run' : same ? 'pass' : 'fail', detail: exact ? why : 'permissive mode; exact navigation comparison is disabled', count: exact && !same ? 1 : 0 });
   } else gates.push({ id: 'navigation-valid', status: 'fail', detail: 'documentation.json missing' });
   if (!existsSync(navFile)) gates.push({ id: 'navigation-exact', status: exact ? 'fail' : 'not-run', detail: exact ? 'documentation.json missing' : 'permissive mode; exact navigation comparison is disabled' });
-  const navigationProven = input.sourceKind !== 'url' || ['platform-metadata', 'dom-sidebar', 'manual'].includes(input.navigationSource ?? '');
-  gates.push({ id: 'source-navigation-proven', status: !exact ? 'not-run' : navigationProven ? 'pass' : 'fail', detail: !exact ? 'permissive mode; navigation provenance is not certified' : navigationProven ? (input.sourceKind === 'url' ? `navigation source: ${input.navigationSource}` : 'not required for this source') : `live navigation was inferred from ${input.navigationSource ?? 'unknown'}; exact mode requires platform metadata, a source repository/API, or a manually reviewed navigation tree`, count: exact && !navigationProven ? 1 : 0 });
+  // Every source kind must state its navigation, not have it inferred. A generic repository's
+  // groups come from directory names, which is the same inference as a URL path and was previously
+  // exempted wholesale for any non-URL source.
+  const navigationProven = ['source-config', 'platform-metadata', 'dom-sidebar', 'manual'].includes(input.navigationSource ?? '');
+  gates.push({ id: 'source-navigation-proven', status: !exact ? 'not-run' : navigationProven ? 'pass' : 'fail', detail: !exact ? 'permissive mode; navigation provenance is not certified' : navigationProven ? `navigation source: ${input.navigationSource}` : `navigation was inferred from ${input.navigationSource ?? 'nothing the source states'}; exact mode requires the source's own configuration, platform metadata, a rendered sidebar, or a navigation tree an operator reviewed`, count: exact && !navigationProven ? 1 : 0 });
 
   // Parse the written documents once and inspect their semantic link nodes. Regexes miss
   // component links and page-relative targets, exactly the links most likely to break after restructuring.
   const outputLinks = new Map<string, string[]>();
+  /** What each written page offers a deep link, by route: its headings and any id written into it. */
+  const outputAnchors = new Map<string, Set<string>>();
   for (const f of outMdx) {
     try {
       const route = relative(input.outputDir, f).replace(/\.mdx?$/, '');
-      outputLinks.set(f, documentLinks(markdownToIr(readFileSync(f, 'utf8'), { platform: 'dai', file: route, pageId: route })));
+      const text = readFileSync(f, 'utf8');
+      const parsed = markdownToIr(text, { platform: 'dai', file: route, pageId: route });
+      outputLinks.set(f, documentLinks(parsed));
+      outputAnchors.set(route, documentAnchors(parsed, text));
     } catch {
       // contract-valid already blocks a file that cannot be parsed; do not manufacture a second diagnosis here
       outputLinks.set(f, []);
@@ -634,6 +691,21 @@ export function runGates(input: GateInput): GateResult[] {
     }
   }
   gates.push({ id: 'internal-links', status: broken ? 'fail' : 'pass', detail: `${broken} internal links do not resolve to an output page`, count: broken, samples: brokenSamples });
+
+  // 6a. a deep link must land where it says: a fragment naming an anchor the page does not have
+  // loads the page at the top and reports nothing, and until now that was only caught on a preview.
+  const fragmentLinks = new Map<string, string[]>();
+  for (const [file, urls] of outputLinks) fragmentLinks.set(relative(input.outputDir, file).replace(/\.mdx?$/, ''), urls);
+  const fragmentProblems = unresolvedFragments(fragmentLinks, outputAnchors, outputRoute);
+  gates.push({
+    id: 'fragments-resolve',
+    status: fragmentProblems.length ? 'fail' : 'pass',
+    detail: fragmentProblems.length
+      ? `${fragmentProblems.length} link(s) point at an anchor the target page does not have`
+      : 'every deep link lands on an anchor the target page has',
+    count: fragmentProblems.length,
+    samples: fragmentProblems.slice(0, 6).map((problem) => `${problem.from} → ${problem.link}: ${problem.reason}`),
+  });
 
   // 6b. links that leave the migrated site for the source site, which usually moves to Documentation.AI
   const unmigratedMode = readUrlPlan(input.workspace)?.unmigratedLinks ?? 'keep';
@@ -666,7 +738,14 @@ export function runGates(input: GateInput): GateResult[] {
 
   // 8. redirects
   const plan = readUrlPlan(input.workspace);
-  if (plan) { const r = redirectMaps(plan); gates.push({ id: 'redirects-clean', status: r.issues.length ? 'fail' : 'pass', detail: `${r.exact.length} exact rules, ${r.wildcard.length} wildcard candidates, ${r.issues.length} issues`, count: r.issues.length, samples: r.issues.slice(0, 5) }); }
+  if (plan) {
+    const r = redirectMaps(plan);
+    // The rules are also read as a graph: a set of individually valid rules can still loop, chain,
+    // claim one old path twice, or land on a page nobody wrote.
+    const graph = redirectProblems([...r.exact, ...r.wildcard], new Set(outByPath.keys()));
+    const issues = [...r.issues, ...graph.map((problem) => `${problem.kind}: ${problem.detail}`)];
+    gates.push({ id: 'redirects-clean', status: issues.length ? 'fail' : 'pass', detail: `${r.exact.length} exact rules, ${r.wildcard.length} wildcard candidates, ${issues.length} issues`, count: issues.length, samples: issues.slice(0, 6) });
+  }
   else gates.push({ id: 'redirects-clean', status: 'not-run', detail: 'no plan/urls.yaml' });
 
   // 9. unreviewed decisions
@@ -684,10 +763,12 @@ export function runGates(input: GateInput): GateResult[] {
     gates.push({ id: 'preview-contract-version', status: input.previewContractVersion === input.pinnedContractVersion ? 'pass' : 'fail', detail: `preview ${input.previewContractVersion ?? 'unknown'} vs pinned ${input.pinnedContractVersion}` });
     gates.push({ id: 'browser-fragments', status: 'not-run', detail: 'headless Chrome result is applied by the CLI after static gates' });
     gates.push({ id: 'browser-content', status: 'not-run', detail: 'headless Chrome result is applied by the CLI after static gates' });
+    gates.push({ id: 'responsive-layout', status: 'not-run', detail: 'headless Chrome result is applied by the CLI after static gates' });
   } else {
     gates.push({ id: 'preview-contract-version', status: 'not-run', detail: 'no preview URL' });
     gates.push({ id: 'browser-fragments', status: 'not-run', detail: 'no preview URL' });
     gates.push({ id: 'browser-content', status: 'not-run', detail: 'no preview URL' });
+    gates.push({ id: 'responsive-layout', status: 'not-run', detail: 'no preview URL' });
   }
 
   // 12. migrator provenance: the gates certify output of the build pinned at init, so verify must run from that same build

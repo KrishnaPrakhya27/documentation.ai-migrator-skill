@@ -7,12 +7,18 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Tree, TreePage } from '../nav/tree.js';
 import { pathFromTree } from '../nav/tree.js';
-import { legalisePath, headingSlug, slugify } from './slugger.js';
+import { legalisePath, headingSlug, slugify, slugifySegment } from './slugger.js';
 import { classifyRedirect } from '@dai/content-contract';
 import GithubSlugger from 'github-slugger';
 
 export interface UrlPlanPage { id: string; old?: string; new: string; reason: string }
 export interface UrlPlan {
+  /**
+   * Pages whose route the platform's slug rules erase: a title or path written in a script that
+   * has no ASCII transliteration comes out empty, and numbering those pages would silently destroy
+   * every URL the site had. Listed here so the stage can ask for a route instead of inventing one.
+   */
+  erased?: Array<{ id: string; source?: string; segments: string[] }>;
   mode: 'preserve' | 'restructure' | 'hybrid';
   scope: 'full' | 'partial';
   preserve: { strip_prefix?: string; case: 'preserve' | 'lower' };
@@ -32,6 +38,8 @@ export function defaultUrlPlan(tree: Tree, opts: { mode?: UrlPlan['mode']; strip
   const pages: UrlPlanPage[] = [];
   const used = new Set<string>();
   const planned: Array<{ id: string; old?: string; candidate: string; reason: string }> = [];
+  /** Pages whose route the slug rules erased rather than transliterated; a route cannot be invented for them. */
+  const erased: NonNullable<UrlPlan['erased']> = [];
   for (const p of tree.pages.filter((x) => x.migrate)) {
     let candidate: string; let reason: string;
     const old = p.oldPath;
@@ -47,10 +55,14 @@ export function defaultUrlPlan(tree: Tree, opts: { mode?: UrlPlan['mode']; strip
       stripped = withoutSuffix;
       const leg = legalisePath(stripped, { case: opts.case ?? 'preserve' });
       candidate = leg.path;
+      if (leg.erased?.length) erased.push({ id: p.id, source: p.source, segments: leg.erased });
       const adjustments = [droppedSuffix ? 'dropped the source file extension' : undefined, leg.reason].filter(Boolean).join('; ');
       reason = adjustments ? `preserve (adjusted: ${adjustments})` : 'preserve';
     } else {
       candidate = pathFromTree(p); reason = 'restructure:nav';
+      // The same erasure happens when a route is built from a title rather than a path.
+      const fromTitle = [...p.group.filter((group) => group && group !== '(uncategorised)'), p.title].filter((part) => slugifySegment(part).erased);
+      if (fromTitle.length) erased.push({ id: p.id, source: p.source, segments: fromTitle });
     }
     if (!candidate) {
       candidate = 'index';
@@ -75,7 +87,7 @@ export function defaultUrlPlan(tree: Tree, opts: { mode?: UrlPlan['mode']; strip
     }
   }
   for (const entry of planned) pages.push({ id: entry.id, old: entry.old, new: finals.get(entry.id)!.final, reason: finals.get(entry.id)!.reason });
-  return { mode, scope: tree.scope, preserve: { strip_prefix: opts.stripPrefix, case: opts.case ?? 'preserve' }, restructure: { strategy: 'from-nav' }, unmigratedLinks: 'keep', pages };
+  return { mode, scope: tree.scope, preserve: { strip_prefix: opts.stripPrefix, case: opts.case ?? 'preserve' }, restructure: { strategy: 'from-nav' }, unmigratedLinks: 'keep', pages, ...(erased.length ? { erased } : {}) };
 }
 
 export function writeUrlPlan(workspace: string, plan: UrlPlan): void { writeFileSync(join(workspace, 'plan', 'urls.yaml'), toYaml(plan), { mode: 0o600 }); }

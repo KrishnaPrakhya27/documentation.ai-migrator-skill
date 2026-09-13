@@ -1,0 +1,86 @@
+name: CI
+
+# Every gate this repository enforces on a migration is enforced here on the migrator itself: the
+# types compile, the suite passes, and the contract in contract.json still matches the platform it
+# was extracted from. A migration is only as trustworthy as the build that produced it, and the
+# session records which build that was, so a build that cannot pass this should never produce one.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # The scale tier takes minutes, so it runs nightly rather than on every push.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Types
+        run: npm run typecheck
+
+      # The rendered checks drive a real browser. ubuntu-latest ships Chrome, and the suite skips
+      # those tests when it is absent rather than reporting a pass it did not make.
+      - name: Tests
+        run: npm test
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+
+      # The proof capture is customer material, so it is fetched into the ephemeral runner rather
+      # than committed. The URL, checksum and read token are configured at repository level.
+      - name: Download checksum-pinned source proof capture
+        if: ${{ vars.DAI_SOURCE_TRUTH_ARCHIVE_URL != '' }}
+        env:
+          DAI_SOURCE_TRUTH_ARCHIVE_URL: ${{ vars.DAI_SOURCE_TRUTH_ARCHIVE_URL }}
+          DAI_SOURCE_TRUTH_SHA256: ${{ vars.DAI_SOURCE_TRUTH_SHA256 }}
+          DAI_SOURCE_TRUTH_TOKEN: ${{ secrets.DAI_SOURCE_TRUTH_TOKEN }}
+        run: |
+          test -n "$DAI_SOURCE_TRUTH_SHA256"
+          mkdir -p "$RUNNER_TEMP/source-truth"
+          curl --fail --silent --show-error --location --header "Authorization: Bearer $DAI_SOURCE_TRUTH_TOKEN" "$DAI_SOURCE_TRUTH_ARCHIVE_URL" --output "$RUNNER_TEMP/source-truth.zip"
+          echo "$DAI_SOURCE_TRUTH_SHA256  $RUNNER_TEMP/source-truth.zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/source-truth.zip" -d "$RUNNER_TEMP/source-truth"
+
+      - name: Proof tests against a saved source capture
+        if: ${{ vars.DAI_SOURCE_TRUTH_ARCHIVE_URL != '' }}
+        run: npm run test:proof
+        env:
+          DAI_SOURCE_TRUTH_DIR: ${{ runner.temp }}/source-truth
+
+      - name: Report when the proof tier had no capture to run against
+        if: ${{ vars.DAI_SOURCE_TRUTH_ARCHIVE_URL == '' }}
+        run: echo "::notice::Proof tests skipped - no checksum-pinned source capture URL configured for this repository"
+
+  scale:
+    # What a large migration costs, measured rather than assumed: 500 pages inside the two-minute
+    # budget, and 5,000 pages inside a capped heap, so a regression in either shows up as a failure
+    # rather than as a slow migration nobody notices.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: 500 pages
+        run: npm run test:scale
+      - name: 5,000 pages within a bounded heap
+        run: npm run test:scale
+        env:
+          DAI_SCALE_PAGES: 5000
+          DAI_SCALE_HEAP_MB: 512

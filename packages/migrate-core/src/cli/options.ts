@@ -1,0 +1,66 @@
+/**
+ * The command line: what each command is called, what it takes, and what the help says.
+ *
+ * Kept apart from the stages so the surface an operator sees is one readable file, and so a stage
+ * cannot grow a flag without it appearing here.
+ */
+import { parseArgs } from 'node:util';
+
+export const HELP = `dai-migrate <command> [options]
+
+Commands (run in order; the workflow has exactly four standard human gates):
+  init         --workspace <dir> --source <url|path> --target customer-org|demo-org --remote <git url> [--platform p] [--export <zip|dir>] [--fidelity exact|permissive] [--allowed-orgs a,b] [--customer-authorised]
+               verifies the remote, the API key, the connected repository, previews and the media API up front; records the asset provider
+  fingerprint  [--url <u>] [--export <zip|dir>] [--repo <dir>]     → plan/fingerprint.json
+  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] [--offline] → plan/tree.yaml [gate 1: scope]
+               --offline rebuilds the tree and navigation from the frozen source already in the workspace; it fetches nothing
+  approve      --gate <1-4> --by "<who>" [--note "<why>"]           records a human gate against the state it approves
+  rebase       --reason "<why>"                                     re-pins the migrator build after a fix, keeps the frozen source
+               and its acquisition pin, and stales every derivation; follow it with "discover --offline"
+  acquire      [--fetcher local|firecrawl] [--zero-data-retention] [--profile p] [--urls file] [--proxy url] [--headers-file json] [--cookies-file file] → source-cache/acquired/
+  inventory                                                         → snapshot/, inventory/*.json
+  plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml [gate 2: conversion plan]
+  assets       [--provider none|local|s3|dai-api]                   → plan/assets.json, assets-original/
+  convert                                                           → output/, ledger/, quarantine/
+  nav                                                               → output/documentation.json, report/redirects.*.json, report/anchors.json
+  write        [--repo <dir>] [--remote <url>] [--push] [--allow-lossy] [--no-wait] [--preview-timeout min] → refs/heads/migration/<session>; with --push waits for the preview deployment and records its URL
+               --allow-lossy (permissive sessions only) pushes an exploratory branch with unproven exactness gates waived; failed gates still block
+  verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
+  release                                                            validates all four approvals and writes an immutable release certificate
+  report                                                            → report/summary.md, report/platform-gaps.json
+
+Every command except init takes --workspace <dir> (or MIGRATION_WORKSPACE).`;
+
+/** The parsed command line. The return type is inferred so each flag keeps the type its definition gives it. */
+export function parseCommandLine() {
+  return parseArgs({
+  allowPositionals: true,
+  options: {
+    workspace: { type: 'string', default: process.env.MIGRATION_WORKSPACE },
+    source: { type: 'string' }, target: { type: 'string' }, platform: { type: 'string' }, export: { type: 'string' }, url: { type: 'string' }, repo: { type: 'string' },
+    'allowed-orgs': { type: 'string', default: process.env.MIGRATION_ALLOWED_ORGS ?? '' },
+    'customer-authorised': { type: 'boolean', default: false },
+    fidelity: { type: 'string', default: 'exact' },
+    mode: { type: 'string' }, 'strip-prefix': { type: 'string' }, case: { type: 'string' },
+    provider: { type: 'string', default: process.env.MIGRATION_ASSET_PROVIDER }, fetcher: { type: 'string', default: 'local' }, profile: { type: 'string' }, urls: { type: 'string' },
+    'discovery-limit': { type: 'string', default: process.env.MIGRATION_DISCOVERY_LIMIT ?? '5000' },
+    'firecrawl-proxy': { type: 'string', default: process.env.FIRECRAWL_PROXY_MODE ?? 'auto' },
+    'max-concurrency': { type: 'string', default: process.env.FIRECRAWL_MAX_CONCURRENCY },
+    'firecrawl-timeout-min': { type: 'string', default: process.env.FIRECRAWL_TIMEOUT_MIN ?? '360' },
+    openapi: { type: 'string', multiple: true },
+    concurrency: { type: 'string', default: process.env.MIGRATION_CONCURRENCY ?? '4' },
+    rps: { type: 'string', default: process.env.MIGRATION_RPS ?? '2' },
+    refresh: { type: 'boolean', default: false },
+    offline: { type: 'boolean', default: false }, reason: { type: 'string' },
+    gate: { type: 'string' }, by: { type: 'string' }, note: { type: 'string' },
+    'zero-data-retention': { type: 'boolean', default: process.env.FIRECRAWL_ZERO_DATA_RETENTION === '1' },
+    proxy: { type: 'string', default: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY },
+    'headers-file': { type: 'string', default: process.env.MIGRATION_HEADERS_FILE }, 'cookies-file': { type: 'string', default: process.env.MIGRATION_COOKIES_FILE }, 'auth-origin': { type: 'string', default: process.env.MIGRATION_AUTH_ORIGINS },
+    remote: { type: 'string' }, push: { type: 'boolean', default: false }, 'allow-lossy': { type: 'boolean', default: false },
+    'no-wait': { type: 'boolean', default: false }, 'preview-timeout': { type: 'string', default: process.env.MIGRATION_PREVIEW_TIMEOUT_MIN ?? '15' },
+    preview: { type: 'boolean', default: false }, 'preview-url': { type: 'string' }, 'preview-contract-version': { type: 'string' },
+    'log-originals': { type: 'boolean', default: false },
+    help: { type: 'boolean', default: false },
+  },
+});
+}

@@ -33,7 +33,7 @@ export function readBlockExclusions(workspace: string): BlockExclusion[] {
 }
 
 /** Exclusions whose node is not in the snapshot: a typo must fail, not silently keep the block. */
-export function unmatchedBlockExclusions(docs: DocIR[], exclusions: BlockExclusion[]): BlockExclusion[] {
+export function unmatchedBlockExclusions(docs: Iterable<DocIR>, exclusions: BlockExclusion[]): BlockExclusion[] {
   const present = new Set<string>();
   for (const d of docs) walkBlocks(d.children, (n) => { present.add(`${d.pageId}::${n.id}`); });
   return exclusions.filter((e) => !present.has(`${e.pageId}::${e.nodeId}`));

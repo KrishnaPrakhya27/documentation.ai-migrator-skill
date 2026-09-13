@@ -10,6 +10,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import sanitizeHtml from 'sanitize-html';
 import type { DocIR, Block, Inline } from '../ir/types.js';
+import { htmlMediaReferences, rewriteHtmlMedia } from './html-media.js';
 import { mapBlocks, walkBlocks } from '../ir/types.js';
 import { sha256 } from '../session/ids.js';
 import type { Fetcher } from '../scrape/fetcher.js';
@@ -83,8 +84,20 @@ function documentAssetReferences(doc: DocIR): AssetReference[] {
   const page = { id: doc.pageId, source: doc.source };
   const out: AssetReference[] = [];
   const locate = (url: string): string => resolveAssetUrl(url, doc.source);
-  const image = (node: { url: string; alt: string }) => { if (node.url) out.push({ kind: 'image', url: locate(node.url), page, alt: node.alt }); };
-  const inl = (nodes: Inline[]) => { for (const n of nodes) { if (n.type === 'image') image(n); else if ('children' in n) inl(n.children); } };
+  // The social image is served to every link preview of this page; leaving it on the old platform
+  // breaks those previews the day it is switched off.
+  if (typeof doc.frontmatter?.ogImage === 'string' && doc.frontmatter.ogImage) out.push({ kind: 'image', url: locate(doc.frontmatter.ogImage), page });
+  const image = (node: { url: string; alt: string; sources?: string[] }) => {
+    if (node.url) out.push({ kind: 'image', url: locate(node.url), page, alt: node.alt });
+    for (const variant of node.sources ?? []) out.push({ kind: 'image', url: locate(variant), page, alt: node.alt });
+  };
+  const inl = (nodes: Inline[]) => {
+    for (const n of nodes) {
+      if (n.type === 'image') image(n);
+      else if (n.type === 'inlineHtml') { for (const media of htmlMediaReferences(n.value)) out.push({ kind: media.kind, url: locate(media.url), page }); }
+      else if ('children' in n) inl(n.children);
+    }
+  };
   walkBlocks(doc.children, (b) => {
     if (b.type === 'image') image(b);
     else if (b.type === 'figure') image(b.image);
@@ -96,6 +109,9 @@ function documentAssetReferences(doc: DocIR): AssetReference[] {
     }
     else if (b.type === 'paragraph' || b.type === 'heading') inl(b.children);
     else if (b.type === 'table') for (const r of b.children) for (const c of r.children) inl(c.children);
+    // A fragment the rules engine preserved verbatim still addresses the customer's files; they
+    // die with the platform being left unless they are hosted like any other asset.
+    else if (b.type === 'rawHtml') for (const media of htmlMediaReferences(b.value)) out.push({ kind: media.kind, url: locate(media.url), page });
   });
   return out;
 }
@@ -249,18 +265,31 @@ export function finalUrlFor(m: AssetManifest, url: string): string {
   return e?.finalUrl ?? url;
 }
 
+/** An image and every variant it offers, each pointed at wherever the manifest put it. */
+function withVariants<T extends { url: string; sources?: string[] }>(node: T, final: (url: string) => string): T {
+  const sources = node.sources?.map(final);
+  return { ...node, url: final(node.url), ...(sources ? { sources } : {}) };
+}
+
 export function rewriteAssetRefs(doc: DocIR, m: AssetManifest): DocIR {
+  const ogImage = typeof doc.frontmatter?.ogImage === 'string' && doc.frontmatter.ogImage
+    ? finalUrlFor(m, resolveAssetUrl(doc.frontmatter.ogImage, doc.source))
+    : undefined;
   // The same resolution the manifest recorded, so a reference finds its entry and an asset that
   // kept its source URL is emitted as that URL rather than as a path into the migrated site.
   const final = (url: string): string => finalUrlFor(m, resolveAssetUrl(url, doc.source));
   return {
     ...doc,
+    ...(ogImage ? { frontmatter: { ...doc.frontmatter, ogImage } } : {}),
     children: mapBlocks(doc.children, {
-      inline: (n) => (n.type === 'image' ? { ...n, url: final(n.url) } : n),
+      inline: (n) => n.type === 'image' ? withVariants(n, final)
+        : n.type === 'inlineHtml' ? { ...n, value: rewriteHtmlMedia(n.value, final) }
+        : n,
       block: (b): Block => {
         switch (b.type) {
-          case 'image': return { ...b, url: final(b.url) };
-          case 'figure': return { ...b, image: { ...b.image, url: final(b.image.url) } };
+          case 'image': return withVariants(b, final);
+          case 'figure': return { ...b, image: withVariants(b.image, final) };
+          case 'rawHtml': return { ...b, value: rewriteHtmlMedia(b.value, final) };
           case 'dai': case 'component': return { ...b, props: Object.fromEntries(Object.entries(b.props).map(([key, value]) => [key, componentAssetKind(b.name, key) && typeof value === 'string' ? final(value) : value])) };
           default: return b;
         }

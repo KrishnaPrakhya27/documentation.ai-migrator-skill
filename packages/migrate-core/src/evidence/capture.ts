@@ -88,6 +88,42 @@ export function nativeSourceManifest(context: CaptureContext & { kind: 'repo' | 
       if (pages.has(pageIdFromPlatform(platform, slug))) manifest.issues!.push(`duplicate ReadMe slug: ${slug}`);
       add(file.path, slug, 'filesystem', data.hidden !== true);
     }
+  } else if (platform === 'docusaurus') {
+    // Docusaurus does not publish a page marked draft or unlisted, so counting it as published
+    // would demand a scope decision for a page the source never served.
+    for (const file of freeze.files.filter((file) => /\.mdx?$/i.test(file.path) && !file.path.startsWith('node_modules/'))) {
+      const raw = readFileSync(join(root, file.path), 'utf8');
+      const frontmatter = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      const data = frontmatter ? object(parseYaml(frontmatter[1])) : {};
+      add(file.path, file.path, 'filesystem', data.draft !== true && data.unlisted !== true);
+    }
+  } else if (platform === 'nextra') {
+    const roots = ['content/', 'src/content/', 'pages/', 'src/pages/'];
+    const contentRoot = roots.find((candidate) => freeze.files.some((file) => file.path.startsWith(candidate)));
+    for (const file of freeze.files.filter((file) => /\.mdx?$/i.test(file.path) && (!contentRoot || file.path.startsWith(contentRoot)))) {
+      add(file.path, file.path, 'filesystem');
+    }
+  } else if (platform === 'fern') {
+    // Fern builds only what docs.yml references; anything else in the folder is not published.
+    const configPath = ['fern/docs.yml', 'fern/docs.yaml'].find((candidate) => files.has(candidate));
+    if (!configPath) manifest.issues!.push('no fern/docs.yml: the source universe cannot be read from the navigation it states');
+    const referenced = new Set<string>();
+    if (configPath) {
+      const collect = (value: unknown): void => {
+        if (Array.isArray(value)) { value.forEach(collect); return; }
+        const node = object(value);
+        if (typeof node.path === 'string') referenced.add(posix.normalize(posix.join('fern', node.path)));
+        if (typeof node.folder === 'string') {
+          const folder = posix.normalize(posix.join('fern', node.folder));
+          for (const file of freeze.files) if (file.path.startsWith(`${folder}/`) && /\.mdx?$/i.test(file.path)) referenced.add(file.path);
+        }
+        for (const child of Object.values(node)) if (child && typeof child === 'object') collect(child);
+      };
+      collect(object(parseYaml(index(configPath, 'navigation-config'))));
+    }
+    for (const file of freeze.files.filter((file) => /\.mdx?$/i.test(file.path) && file.path.startsWith('fern/'))) {
+      add(file.path, file.path, referenced.has(file.path) ? 'config' : 'filesystem', referenced.has(file.path));
+    }
   } else if (context.kind === 'export') {
     // An arbitrary category shape must not be certified by reusing the tolerant conversion adapter.
     manifest.issues!.push('independent export category enumeration is not implemented; source universe cannot be certified');
@@ -126,10 +162,18 @@ export function liveSourceManifest(context: CaptureContext, discovery: Discovery
   for (const nodes of Object.values(discovery.navigationCandidates ?? {})) navigation(nodes);
   navigation(discovery.navigation ?? []);
   for (const page of discovery.pages) add(page.url, 'crawl');
+  // What each page served at discovery, so acquisition can tell whether the source moved.
+  for (const page of discovery.pages) {
+    const entry = pages.get(page.url);
+    if (entry && page.contentSha256) entry.rawSha256 = page.contentSha256;
+  }
   return {
     schemaVersion: 1, capturedAt: context.capturedAt, source: { kind: 'url', platform: context.platform, location: context.location }, contentContractVersion: context.contentContractVersion,
     // This is explicitly a captured discovery index; raw HTTP witnesses remain in the crawl cache.
     indexes: [{ kind: 'rendered-navigation', location: 'discovery-result.json', sha256: sha256(JSON.stringify(discovery)), entries: pages.size }],
-    pages: [...pages.values()], issues: discovery.truncated ? ['discovery was truncated; the complete source universe is unproven'] : [],
+    pages: [...pages.values()], issues: [
+      ...(discovery.truncated ? ['discovery was truncated; the complete source universe is unproven'] : []),
+      ...(discovery.structuralIssues ?? []),
+    ],
   };
 }

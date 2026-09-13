@@ -14,7 +14,7 @@ import { RulesEngine, loadMappings, type MappingTable } from '../src/components/
 import { DecisionLog } from '../src/log/decisions.js';
 import { Fetcher, isPublicAddress, type FetchImpl } from '../src/scrape/fetcher.js';
 import { remoteOrg, assertRemoteAllowed } from '../src/write/migration-branch.js';
-import { EXACT_FAMILY_GATE_IDS, headingOutline, mdxHeadingOutline, mdxTableSignatures, normaliseMdxText, previewPushBlockers, proseSegments, REQUIRED_RELEASE_GATE_IDS, runGates, tableSignatures, waivedExactnessGates, type GateInput } from '../src/verify/gates.js';
+import { EXACT_FAMILY_GATE_IDS, headingOutline, mdxHeadingOutline, mdxTableSignatures, normaliseMdxText, previewPushBlockers, proseSegments, releaseBlockers, REQUIRED_RELEASE_GATE_IDS, runGates, tableSignatures, waivedExactnessGates, type GateInput } from '../src/verify/gates.js';
 import { unreadableImageDimensions } from '../src/ir/dimensions.js';
 import { chromeDump, pinnedResolverRules, runBrowserContentGate, runBrowserFragmentGate } from '../src/verify/browser.js';
 import { authoredContentSnapshot, fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from '../src/verify/fidelity.js';
@@ -452,6 +452,13 @@ describe('gates', () => {
     expect(previewPushBlockers(staticPass.map((g) => g.id === 'deterministic-rerun' ? { ...g, status: 'not-run' as const } : g)).map((g) => g.id)).toEqual(['deterministic-rerun']);
     expect(previewPushBlockers(staticPass.filter((g) => g.id !== 'contract-valid')).map((g) => g.id)).toContain('contract-valid');
   });
+
+  it('requires a complete satisfied gate set for release while accepting justified inapplicability', () => {
+    const complete = REQUIRED_RELEASE_GATE_IDS.map((id) => ({ id, status: id === 'html-reconciliation' ? 'inapplicable' as const : 'pass' as const, detail: '' }));
+    expect(releaseBlockers(complete)).toEqual([]);
+    expect(releaseBlockers(complete.filter((gate) => gate.id !== 'contract-valid')).map((gate) => gate.id)).toEqual(['contract-valid']);
+    expect(releaseBlockers(complete.map((gate) => gate.id === 'source-content-exact' ? { ...gate, status: 'not-run' as const } : gate)).map((gate) => gate.id)).toEqual(['source-content-exact']);
+  });
   it('compares complete table cell matrices, including short cells', () => {
     const doc: DocIR = { pageId: 'p', platform: 'x', source: 's', frontmatter: { title: 'T' }, children: [{ id: 'table', type: 'table', children: [
       { id: 'r1', type: 'tableRow', isHeader: true, children: [{ id: 'c1', type: 'tableCell', children: [{ id: 't1', type: 'text', value: 'A' }] }, { id: 'c2', type: 'tableCell', children: [{ id: 't2', type: 'text', value: 'B' }] }] },
@@ -659,6 +666,21 @@ describe('block exclusions', () => {
     await collectAssets([doc], ws, { provider: 'local' });
     expect(readManifest(ws)).toEqual({ provider: 'local', byUrl: {}, entries: {} });
   });
+
+  it('inventories each responsive image candidate once', async () => {
+    const ws = mkdtempSync(join(tmpdir(), 'dai-srcset-')); ensureWorkspace(ws);
+    const doc: DocIR = {
+      pageId: 'p', platform: 'x', source: 'https://docs.example/guide', frontmatter: { title: 'Guide' },
+      children: [{ id: 'hero', type: 'image', url: '/hero.png', sources: ['/hero@2x.png', '/hero@3x.png'], alt: 'Hero' }],
+    };
+    const manifest = await collectAssets([doc], ws, { provider: 'none' });
+    expect(Object.keys(manifest.byUrl).sort()).toEqual([
+      'https://docs.example/hero.png',
+      'https://docs.example/hero@2x.png',
+      'https://docs.example/hero@3x.png',
+    ]);
+    expect(Object.values(manifest.entries).flatMap((entry) => entry.references)).toHaveLength(3);
+  });
 });
 
 describe('gate semantics', () => {
@@ -702,6 +724,7 @@ describe('gate semantics', () => {
     expect(gate(gates, 'conversion-fidelity')).toMatchObject({ status: 'pass', count: 0, detail: '0 pages changed during component conversion; 0 pages lack a fidelity record; 1 pages held or not migrated' });
     expect(gate(gates, 'serialized-output-exact')).toMatchObject({ status: 'pass', count: 0 });
     expect(gate(gates, 'navigation-exact')).toMatchObject({ status: 'fail', detail: 'no independently extracted source navigation was supplied' });
+    expect(gate(runGates({ ...input, navigationSource: 'manual' }), 'navigation-exact')).toMatchObject({ status: 'pass', detail: 'output navigation matches the human-reviewed tree pinned by gate 1' });
     // a held page convert never recorded is still missing: every snapshot page must be accounted for
     writeFidelityRecords(ws, [convertedRecord]);
     expect(gate(runGates(input), 'conversion-fidelity')).toMatchObject({ status: 'fail', count: 1, samples: ['guides/faq.md: missing fidelity record'] });

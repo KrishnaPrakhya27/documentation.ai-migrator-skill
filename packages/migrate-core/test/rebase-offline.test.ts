@@ -67,7 +67,7 @@ function frozenWorkspace(): { workspace: string; manifestHash: string } {
     hashes: { sourceManifest: manifestHash },
     stages: { discover: { status: 'done' }, acquire: { status: 'done' }, inventory: { status: 'done' }, convert: { status: 'done' } },
   };
-  session.hashes.acquisition = pinAcquisition(workspace, manifest, pages, false);
+  session.hashes.acquisition = pinAcquisition(workspace, manifest, pages, false).hash;
   writeSession(workspace, session);
   return { workspace, manifestHash };
 }

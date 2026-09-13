@@ -11,6 +11,7 @@ import { isHtmlChromeNode, type GateResult } from './gates.js';
 import { assertPublicHost } from '../scrape/fetcher.js';
 import { find, findAll, parseHtml, type Dom } from '../ir/from-html.js';
 import { inlineText, walkBlocks, type Block, type DocIR } from '../ir/types.js';
+import { mapConcurrentOrdered } from './concurrency.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -69,7 +70,8 @@ export async function chromeDump(url: string): Promise<string> {
   }
 }
 
-function routeUrl(base: string, path: string): string {
+/** The preview URL of a written route; shared with the responsive check so both measure the same page. */
+export function routeUrl(base: string, path: string): string {
   const u = new URL(base);
   u.hash = '';
   u.search = '';
@@ -87,6 +89,7 @@ export async function runBrowserFragmentGate(
   pages: BrowserPage[],
   anchors: BrowserAnchor[],
   render: PageRenderer = chromeDump,
+  concurrency = 4,
 ): Promise<GateResult> {
   const byId = new Map(pages.filter((p) => p.migrate && p.newPath).map((p) => [p.id, p.newPath!]));
   const required = new Map<string, Set<string>>();
@@ -102,9 +105,9 @@ export async function runBrowserFragmentGate(
     required.set(first, new Set());
   }
 
-  let missing = 0;
-  const samples: string[] = [];
-  for (const [path, ids] of required) {
+  const checked = await mapConcurrentOrdered([...required], concurrency, async ([path, ids]) => {
+    let missing = 0;
+    const samples: string[] = [];
     const url = routeUrl(previewUrl, path);
     let html: string;
     try {
@@ -117,7 +120,7 @@ export async function runBrowserFragmentGate(
     } catch (error) {
       missing += Math.max(1, ids.size);
       if (samples.length < 8) samples.push(`${path || '/'}: browser load failed: ${(error as Error).message}`);
-      continue;
+      return { missing, samples };
     }
     for (const id of ids) {
       if (!hasAnchor(html, id)) {
@@ -125,7 +128,10 @@ export async function runBrowserFragmentGate(
         if (samples.length < 8) samples.push(`${path}#${id}`);
       }
     }
-  }
+    return { missing, samples };
+  });
+  const missing = checked.reduce((total, result) => total + result.missing, 0);
+  const samples = checked.flatMap((result) => result.samples).slice(0, 8);
   return {
     id: 'browser-fragments',
     status: missing ? 'fail' : 'pass',
@@ -184,6 +190,10 @@ export interface BrowserContentOptions {
   siteName?: string;
   /** Selectors of the rendered page's own content (title, description, body), in page order; the platform chrome around them is not read. Default: the whole article. */
   contentSelectors?: string[];
+  /** The renderer opened every accordion, expandable and tab before reading the DOM, so their content is verified rather than excused. */
+  interactive?: boolean;
+  /** Number of routes inspected concurrently; output ordering remains source ordering. */
+  concurrency?: number;
 }
 
 const DEFAULT_PREVIEW_CHROME = ['copy', 'copied', 'copy to clipboard', 'ask ai', 'on this page', 'edit this page', 'was this page helpful?', 'yes', 'no', 'previous', 'next'];
@@ -194,7 +204,10 @@ const INSIGNIFICANT_RESIDUAL = /^[\s\p{P}\p{S}\d]*$/u;
 const COLLAPSED_BY_DEFAULT = new Set(['details', 'expandable', 'accordion']);
 
 /** Blocks a static render cannot show: the content of a collapsed block, and platform chrome the migration dropped (a GitBook assistant prompt). */
-function unrenderedBlockIds(doc: DocIR): Set<string> {
+function unrenderedBlockIds(doc: DocIR, interactive = false): Set<string> {
+  // A run that opens what a reader can open has no excuse to offer: the content of a collapsed
+  // block is on the page, so it is compared like everything else.
+  if (interactive) return new Set<string>();
   const ids = new Set<string>();
   walkBlocks(doc.children, (block) => {
     if (block.type !== 'component' && block.type !== 'dai') return;
@@ -211,9 +224,9 @@ interface DocumentSegment { text: string; optional: boolean }
  * Text inside a collapsed block may be absent from a static render, so it is optional; a tab set renders
  * every tab label before its panels, so its titles come first; dropped platform chrome is not content.
  */
-function documentSegments(doc: DocIR): DocumentSegment[] {
+function documentSegments(doc: DocIR, interactive = false): DocumentSegment[] {
   const segments: DocumentSegment[] = [];
-  const unrendered = unrenderedBlockIds(doc);
+  const unrendered = unrenderedBlockIds(doc, interactive);
   const push = (value: string | undefined, optional: boolean) => { const text = normaliseVisible(value ?? ''); if (text) segments.push({ text, optional }); };
   const visit = (blocks: Block[]): void => {
     for (const block of blocks) {
@@ -262,9 +275,9 @@ function documentSegments(doc: DocIR): DocumentSegment[] {
 }
 
 /** Heading outline of a document, ignoring the H1 the target renders from the title. A step's leading heading renders as its Step title, at h2 or h3. */
-function sourceOutline(doc: DocIR): string[] {
+function sourceOutline(doc: DocIR, interactive = false): string[] {
   const out: string[] = [];
-  const unrendered = unrenderedBlockIds(doc);
+  const unrendered = unrenderedBlockIds(doc, interactive);
   const stepTitles = new Set<string>();
   walkBlocks(doc.children, (block) => {
     if (block.type === 'component' && block.name.toLowerCase() === 'step' && !block.props.title && block.children[0]?.type === 'heading') stepTitles.add(block.children[0].id);
@@ -287,9 +300,9 @@ function sourceLinkTargets(doc: DocIR): Set<string> {
   return urls;
 }
 
-function sourceImages(doc: DocIR): Array<{ src: string; alt?: string }> {
+function sourceImages(doc: DocIR, interactive = false): Array<{ src: string; alt?: string }> {
   const images: Array<{ src: string; alt?: string }> = [];
-  const unrendered = unrenderedBlockIds(doc);
+  const unrendered = unrenderedBlockIds(doc, interactive);
   walkBlocks(doc.children, (block) => {
     if (unrendered.has(block.id)) return;
     if (block.type === 'image') images.push({ src: block.url, alt: block.alt });
@@ -317,20 +330,19 @@ export async function runBrowserContentGate(
   const allowed = (opts.previewChrome ?? DEFAULT_PREVIEW_CHROME).map(normaliseVisible).filter(Boolean);
   const routes: PreviewRouteResult[] = [];
 
-  for (const page of pages.filter((entry) => entry.migrate)) {
+  const inspected = await mapConcurrentOrdered(pages.filter((entry) => entry.migrate), opts.concurrency ?? 4, async (page): Promise<PreviewRouteResult> => {
     const route = page.newPath ?? page.id;
     const problems: string[] = [];
     // A page with no source document cannot be judged, so it is a failure rather than a silent skip.
-    if (!page.newPath) { routes.push({ route, status: 'fail', problems: ['migrated page has no output route'] }); continue; }
-    if (!page.doc) { routes.push({ route, status: 'fail', problems: ['no source document to compare the rendered page against'] }); continue; }
+    if (!page.newPath) return { route, status: 'fail', problems: ['migrated page has no output route'] };
+    if (!page.doc) return { route, status: 'fail', problems: ['no source document to compare the rendered page against'] };
 
     let html: string;
     try {
       html = await render(routeUrl(previewUrl, page.newPath));
       if (!/<html\b/i.test(html) || /<body[^>]*\bclass=["'][^"']*\bneterror\b/i.test(html) || /\bid=["']main-frame-error["']/i.test(html)) throw new Error('preview did not render a valid page');
     } catch (error) {
-      routes.push({ route, status: 'fail', problems: [`browser load failed: ${(error as Error).message}`] });
-      continue;
+      return { route, status: 'fail', problems: [`browser load failed: ${(error as Error).message}`] };
     }
 
     const root = parseHtml(html);
@@ -345,7 +357,7 @@ export async function runBrowserContentGate(
 
     // Segments in order; the text between consecutive matches is residual and must be insignificant.
     // Optional text (inside a collapsed block) counts only where it sits before the next required segment.
-    const segments = documentSegments(page.doc);
+    const segments = documentSegments(page.doc, opts.interactive);
     let cursor = 0;
     const residual: string[] = [];
     segments.forEach((segment, position) => {
@@ -368,7 +380,7 @@ export async function runBrowserContentGate(
 
     // The outline the reader navigates by.
     const renderedOutline = content.flatMap((node) => findAll(node, 'h2, h3, h4, h5, h6')).map((heading) => `${Number(heading.name.slice(1))}:${normaliseVisible(visibleText(heading))}`);
-    const expectedOutline = sourceOutline(page.doc);
+    const expectedOutline = sourceOutline(page.doc, opts.interactive);
     if (renderedOutline.join('|') !== expectedOutline.join('|')) problems.push(`heading outline differs: rendered ${JSON.stringify(renderedOutline)}, source ${JSON.stringify(expectedOutline)}`);
 
     // Links: internal ones must land on a migrated route, external ones must be the source's own.
@@ -385,7 +397,7 @@ export async function runBrowserContentGate(
     }
 
     // Images: rehosted, and still carrying the alt text the source wrote.
-    const expectedImages = sourceImages(page.doc);
+    const expectedImages = sourceImages(page.doc, opts.interactive);
     const renderedImages = content.flatMap((node) => findAll(node, 'img'));
     if (renderedImages.length !== expectedImages.length) problems.push(`image count differs: rendered ${renderedImages.length}, source ${expectedImages.length}`);
     renderedImages.forEach((image, index) => {
@@ -400,8 +412,9 @@ export async function runBrowserContentGate(
       }
     });
 
-    routes.push({ route, status: problems.length ? 'fail' : 'pass', problems, ...(unexplained.length ? { residual: unexplained.join(' | ').slice(0, 500) } : {}) });
-  }
+    return { route, status: problems.length ? 'fail' : 'pass', problems, ...(unexplained.length ? { residual: unexplained.join(' | ').slice(0, 500) } : {}) };
+  });
+  routes.push(...inspected);
 
   // The sidebar and the site name are properties of the whole preview, checked once on the first route.
   const first = pages.find((entry) => entry.migrate && entry.newPath);

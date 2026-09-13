@@ -46,6 +46,7 @@ npm run dai-migrate -- nav         --workspace <path>
 npm run dai-migrate -- verify      --workspace <path>     # human gate 3
 npm run dai-migrate -- write       --workspace <path> --push
 npm run dai-migrate -- verify      --workspace <path> --preview   # human gate 4
+npm run dai-migrate -- release     --workspace <path>              # immutable four-gate certificate
 npm run dai-migrate -- report      --workspace <path>
 ```
 

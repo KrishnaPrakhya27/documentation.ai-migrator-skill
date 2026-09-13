@@ -345,6 +345,51 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     recognisers: [{ selector: '.fern-callout', name: 'Callout', props: { kind: '@attr:data-intent' } }, { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] }],
     assetHosts: [],
   },
+  /**
+   * MadCap Flare's published HTML5 output.
+   *
+   * Every selector here was taken from a 448-page capture of a real Flare site, not from Flare's
+   * documentation: `#mc-main-content` and `div[data-mc-content-body]` wrap the topic on all 448,
+   * and the skin puts everything else — the title bar, the off-canvas drawer, the search bar, the
+   * account menu, the footer — outside them.
+   *
+   * The sidebar is deliberately not recovered from the DOM. Flare serves `nav[data-mc-side-nav-menu]`
+   * empty and fills it in the browser, so the rendered HTML states no navigation at all; the real
+   * tree is read from the published data files by `scrape/madcap-toc.ts`.
+   */
+  madcap: {
+    platform: 'madcap',
+    signals: [
+      // The attribute Flare writes on <html> to point a page at its help system: the surest mark of
+      // published Flare output, and the same one the navigation reader keys on.
+      { kind: 'asset', pattern: 'data-mc-path-to-help-system', weight: 5 },
+      { kind: 'dom', pattern: '[data-mc-content-body]', weight: 3 },
+      { kind: 'dom', pattern: '#mc-main-content', weight: 3 },
+      { kind: 'dom', pattern: 'nav[data-mc-side-nav-menu]', weight: 2 },
+      { kind: 'path', pattern: 'Project/TOCs', weight: 5 },
+      { kind: 'archive', pattern: '.flprj', weight: 5 },
+    ],
+    articleSelector: '#mc-main-content, [data-mc-content-body]',
+    removeSelectors: ['.skip-to-content', '.title-bar-container', '.off-canvas', '.search-bar-container', '.central-account-wrapper', 'nav[data-mc-side-nav-menu]', 'footer'],
+    // Recorded as the independent witness verification cross-checks; it is empty on a live site,
+    // and `navigationData` carries the tree the site actually renders.
+    navSelector: 'nav[data-mc-side-nav-menu], .sidenav-wrapper',
+    navLinkSelector: 'a[href]',
+    // Only strings the skin renders as a block of their own. The dropdown icon's "Closed"/"Open"
+    // alt text is deliberately absent: it never reaches output (the head is stripped), and both are
+    // ordinary words a topic may put on a line by itself.
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'Skip To Main Content'],
+    recognisers: [
+      // A collapsible section: the head holds the clickable label, the body holds the content.
+      { selector: '.MCDropDown', name: 'MCDropDown', props: { title: '@text:.MCDropDownHead' }, strip: ['.MCDropDownHead'] },
+      { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] },
+      // `.MCExpanding` is left whole on purpose. Its hotspot label is authored text and its body is
+      // authored content, but the two are siblings of the topic content rather than a head and a
+      // body, so there is no summary/content split to make without discarding or re-parenting what
+      // the author wrote. Passing it through keeps every word; only the collapse is not reproduced.
+    ],
+    assetHosts: [],
+  },
   generic: {
     platform: 'generic',
     signals: [],
@@ -368,9 +413,9 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     recognisers: [
       { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] },
       { selector: '.admonition, .callout, .alert, .note, .warning, .tip, .info', name: 'admonition', props: { kind: '@class-suffix:' } },
-      // MadCap Flare publishes a collapsible section as a head holding the clickable label and a
-      // body holding the content. Flare has no adapter of its own and the router sends it here;
-      // a dedicated MadCap profile is the proper home if more of its markup needs recognising.
+      // Flare output reached through the generic profile (an unfingerprinted host, or an operator's
+      // explicit --platform generic) still renders its collapsible sections; the madcap profile
+      // above is where the rest of Flare's markup is recognised.
       { selector: '.MCDropDown', name: 'MCDropDown', props: { title: '@text:.MCDropDownHead' }, strip: ['.MCDropDownHead'] },
     ],
     assetHosts: [],

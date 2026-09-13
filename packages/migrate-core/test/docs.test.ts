@@ -23,6 +23,12 @@ describe('operator documentation', () => {
     expect(status, 'docs/STATUS.md states a gate count that is not the code’s').toContain(`${REQUIRED_RELEASE_GATE_IDS.length} release gates`);
   });
 
+  it('requires the immutable release certificate in every platform migration workflow', () => {
+    for (const platform of ['generic', 'mintlify', 'gitbook', 'readme', 'document360']) {
+      expect(read(`skills/migrate-${platform}/SKILL.md`), `${platform} workflow omits the release certificate command`).toContain('`release`');
+    }
+  });
+
   it('keeps a README that explains the fidelity modes and the two test tiers', () => {
     const readme = read('README.md');
     expect(readme.length).toBeGreaterThan(1000);

@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "test:proof": "vitest run --config vitest.proof.config.ts",
     "contract:extract": "tsx packages/content-contract/scripts/extract.ts",
-    "dai-migrate": "tsx packages/migrate-core/src/cli.ts"
+    "dai-migrate": "tsx packages/migrate-core/src/cli.ts",
+    "test:scale": "vitest run --config vitest.scale.config.ts"
   },
   "bin": {
     "dai-migrate": "packages/migrate-core/bin/dai-migrate.mjs"

@@ -17,6 +17,6 @@ Implemented source preference: **Git Sync repository** → live URL acquisition 
 ## Procedure
 1. `dai-migrate init ... --repo <git-sync-repo> --platform gitbook`
 2. `dai-migrate discover` → **human gate 1/4**: review `plan/tree.yaml` and decide what to do with unlisted files (`inventory/platform-meta.json`).
-3. `inventory` → `plan` → **human gate 2/4** → `assets` → `convert` twice → `nav` → local `verify` → **human gate 3/4** → `write --push` (waits for the preview) → `verify --preview` → **human gate 4/4** → `report`.
+3. `inventory` → `plan` → **human gate 2/4** → `assets` → `convert` twice → `nav` → local `verify` → **human gate 3/4** → `write --push` (waits for the preview) → `verify --preview` → **human gate 4/4** → `release` (writes the immutable cutover certificate) → `report`.
 
 Not implemented: GitBook API export, variants and sections from `gitbook-docs.yaml` (map manually to versions and tabs in `plan/tree.yaml`), drawings, math, conditional content (T7 candidates).

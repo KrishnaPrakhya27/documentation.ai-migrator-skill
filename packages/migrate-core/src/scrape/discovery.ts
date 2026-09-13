@@ -9,6 +9,9 @@ import type { Fetcher, FetchedPage } from './fetcher.js';
 import { CanonicalHosts, discoverSitemaps, sitemapCandidatesFromRobots, type SitemapEntry } from './fetcher.js';
 import { parseLlmsTxt, type LlmsEntry } from './published-markdown.js';
 import { mapConcurrent } from './concurrency.js';
+import { sha256 } from '../session/ids.js';
+import { sourceFingerprint } from './drift.js';
+import { fetchFlareData, flareNavigationFromData, helpSystemRoot, type FlareData } from './madcap-toc.js';
 
 export interface DiscoveredUrl {
   url: string;
@@ -37,6 +40,8 @@ export interface DiscoveredUrl {
   aliases?: string[];
   /** Distinct pages listed by the sidebar this page rendered; 0 or 1 means the source showed the reader no navigation. */
   sidebarPages?: number;
+  /** sha256 of the bytes this page served during discovery. */
+  contentSha256?: string;
 }
 
 export type DiscoveredNavigationNode =
@@ -55,6 +60,8 @@ export interface SiteConfig {
 export interface DiscoveryResult {
   pages: DiscoveredUrl[];
   failures: Array<{ url: string; error: string }>;
+  /** Failures that make the page universe or source-stated structure impossible to certify. */
+  structuralIssues?: string[];
   truncated: boolean;
   sitemaps: { sources: string[]; entries: SitemapEntry[]; truncated: boolean };
   /** Exact navigation recovered from platform metadata, when available. */
@@ -69,7 +76,18 @@ export interface DiscoveryResult {
   llms?: { url: string; entries: LlmsEntry[] };
   /** Alias hosts treated as the seed origin: the profile's paired hosts plus those named by robots.txt Sitemap directives and llms.txt. */
   canonicalHosts: string[];
+  /** The crawl policy the site published, frozen as the rules this run obeyed. */
+  robots?: { url: string; body: string };
+  /**
+   * Data files a platform publishes its navigation in rather than rendering it into the HTML
+   * (MadCap Flare builds its sidebar in the browser from these). Frozen with the capture so
+   * verification re-derives the same tree offline.
+   */
+  navigationData?: Array<{ url: string; body: string }>;
 }
+
+/** How published MadCap Flare output declares the help system a page belongs to. */
+const MADCAP_HELP_SYSTEM = /<html[^>]*\sdata-mc-path-to-help-system=/i;
 
 // Every media extension the asset manifest recognises belongs here too: a sitemap that inventories
 // a site's images, fonts and downloads (MadCap Flare publishes one) must not turn them into pages.
@@ -430,10 +448,19 @@ export interface FrozenPage { url: string; html?: string }
  * site divided into sections renders one sidebar per section, so each section's sidebar is
  * taken from a page inside it.
  */
-export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform: string, seed: string, origin: string, profile: ScrapeProfile): { nodes: DiscoveredNavigationNode[]; source: 'platform-metadata' | 'dom-sidebar' } | undefined {
+export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform: string, seed: string, origin: string, profile: ScrapeProfile, navigationData: FlareData = new Map()): { nodes: DiscoveredNavigationNode[]; source: 'platform-metadata' | 'dom-sidebar' } | undefined {
   const path = (value: string): string => { try { return new URL(value).pathname.replace(/\/$/, ''); } catch { return ''; } };
   const home = pages.find((page) => page.html && path(page.url) === path(seed)) ?? pages.find((page) => page.html);
   if (!home?.html) return undefined;
+  if (navigationData.size) {
+    // The sidebar this site builds in the browser, rebuilt from the frozen data files. Read from
+    // the page that declared the help system those files belong to: one host can serve several.
+    for (const page of pages) {
+      if (!page.html) continue;
+      const read = flareNavigationFromData(page.url, page.html, navigationData);
+      if (read?.nodes.length) return { nodes: read.nodes, source: 'platform-metadata' };
+    }
+  }
   if (platform === 'mintlify') {
     const extracted = extractMintlifyNavigation(home.html, origin)?.navigation;
     if (extracted) return { nodes: extracted, source: 'platform-metadata' };
@@ -631,7 +658,7 @@ export async function discoverLiveSite(input: {
   const canonicalHosts = input.fetcher.canonicalHosts ?? new CanonicalHosts(origin);
   if (canonicalHosts.seedOrigin !== origin) throw new Error(`fetcher canonical hosts are bound to ${canonicalHosts.seedOrigin}, not the seed origin ${origin}`);
   const limit = Math.max(1, Math.min(input.limit ?? 5000, 50_000));
-  const records = new Map<string, { reasons: Set<string>; title?: string; description?: string; sidebarTitle?: string; htmlTitleTag?: string; domSidebarTitle?: string; llms?: LlmsEntry; discoveredOrder: number; sidebarOrder?: number; platformOrder?: number; sitemap?: SitemapEntry; groupHint?: string[]; locale?: string; version?: string; sidebarPages?: number }>();
+  const records = new Map<string, { reasons: Set<string>; title?: string; description?: string; sidebarTitle?: string; htmlTitleTag?: string; domSidebarTitle?: string; llms?: LlmsEntry; discoveredOrder: number; sidebarOrder?: number; platformOrder?: number; sitemap?: SitemapEntry; groupHint?: string[]; locale?: string; version?: string; sidebarPages?: number; contentSha256?: string }>();
   const queue: string[] = [];
   const crawled = new Set<string>();
   const failures: Array<{ url: string; error: string }> = [];
@@ -641,10 +668,14 @@ export async function discoverLiveSite(input: {
   let platformOrder = 0;
   let navigation: DiscoveredNavigationNode[] | undefined;
   const navigationCandidates: NonNullable<DiscoveryResult['navigationCandidates']> = {};
+  const structuralIssues: string[] = [];
   let sections: SiteSection[] | undefined;
   const sectionSidebars = new Map<string, DiscoveredNavigationNode[]>();
   let siteName: string | undefined;
   let siteConfig: SiteConfig | undefined;
+  const navigationData: NonNullable<DiscoveryResult['navigationData']> = [];
+  /** Help-system roots already read: one host can publish several, each with its own sidebar. */
+  const flareRoots = new Set<string>();
 
   /** URLs that redirect or canonically point to a discovered page, by the page they stand for. */
   const aliasesOf = new Map<string, string[]>();
@@ -653,6 +684,14 @@ export async function discoverLiveSite(input: {
     const seen = new Set<string>();
     while (targetOfAlias.has(url) && !seen.has(url)) { seen.add(url); url = targetOfAlias.get(url)!; }
     return url;
+  };
+
+  /** Pages a platform states in its navigation data: the tree's order, groups and exact labels. */
+  const registerNavigationPages = (nodes: readonly DiscoveredNavigationNode[], groups: string[], base: string): void => {
+    for (const node of nodes) {
+      if (node.type === 'page') { add(node.url, 'platform-navigation', base, { sidebarTitle: node.title, groupHint: groups }); continue; }
+      registerNavigationPages(node.children, [...groups, node.label], base);
+    }
   };
 
   const add = (candidate: string, reason: string, base = input.seedUrl, meta: { sitemap?: SitemapEntry; locale?: string; title?: string; description?: string; sidebarTitle?: string; domSidebarTitle?: string; llms?: LlmsEntry; groupHint?: string[] } = {}) => {
@@ -695,7 +734,21 @@ export async function discoverLiveSite(input: {
   add(input.seedUrl, 'seed');
   // The site's own statements of where it lives come first: a Sitemap directive may name another host the site
   // owns, and llms.txt links the published Markdown. Both must be known before any fetch the allowlist would refuse.
-  try { for (const candidate of sitemapCandidatesFromRobots(await input.fetcher.robotsDocument(origin), origin)) canonicalHosts.add(new URL(candidate).hostname); }
+  // The reader fetches through this run's own fetcher, so the crawl policy, rate limit and
+  // host checks that govern every other request govern these too.
+  const flareFetch = async (target: string): Promise<{ status: number; body: string }> => {
+    const fetched = await input.fetcher.get(target);
+    return { status: fetched.status, body: fetched.body };
+  };
+
+  let robots: DiscoveryResult['robots'];
+  try {
+    const document = await input.fetcher.robotsDocument(origin);
+    // The policy the site published is what the crawl was allowed under, so it is frozen with the
+    // pages rather than read and dropped: a later reviewer can see the rules this run obeyed.
+    robots = { url: new URL('/robots.txt', origin).toString(), body: document };
+    for (const candidate of sitemapCandidatesFromRobots(document, origin)) canonicalHosts.add(new URL(candidate).hostname);
+  }
   catch { /* discoverSitemaps and page acquisition report an unverifiable robots policy */ }
   const llms = await fetchLlmsIndex(input.fetcher, origin, failures);
   if (llms) {
@@ -786,6 +839,9 @@ export async function discoverLiveSite(input: {
       // What this page showed the reader: a sidebar listing only this page is no navigation at all,
       // which is how a landing page renders. Read per page, because a site varies it per page.
       records.get(url)!.sidebarPages ??= sidebarPageCount(sidebarNavigationFromRoot(root, response.finalUrl || url, origin, input.profile, canonicalHosts));
+      // The bytes this page served at discovery. Acquisition fetches it again, and comparing the
+      // two is how a source that changes mid-run is noticed instead of silently mixed.
+      records.get(url)!.contentSha256 ??= sha256(sourceFingerprint(response.body));
       siteName ??= metaContent(response.body, 'meta[property=og:site_name]');
       if (input.profile.platform === 'mintlify') {
         siteConfig ??= extractMintlifyDocsConfig(response.body);
@@ -795,6 +851,50 @@ export async function discoverLiveSite(input: {
             navigation = extracted.navigation;
             navigationCandidates['platform-metadata'] = extracted.navigation;
             for (const page of extracted.pages) add(page.url, 'platform-navigation', input.seedUrl, { title: page.title, description: page.description, sidebarTitle: page.sidebarTitle, groupHint: page.groups });
+          }
+        }
+      }
+      // MadCap Flare builds its sidebar in the browser from published data files, so a crawl of
+      // the served HTML finds no navigation at all. Those files are static: this reads them, and
+      // freezes them with the capture so verification re-derives the same tree with no network.
+      //
+      // The page's own declaration is the detection, not the profile: Flare output is recognised
+      // by the attribute wherever it is served, including under the generic profile, and a page
+      // that does not carry it costs one regex and no request.
+      if (MADCAP_HELP_SYSTEM.test(response.body)) {
+        const page = response.finalUrl || url;
+        // One host can serve several independent help systems, each with its own sidebar — the
+        // site this was written against serves 438 pages under one and 13 under another. Each is
+        // read once, and the seed's is the site's navigation; a second one is reported rather than
+        // merged, because concatenating two sidebars would state a structure the source does not.
+        const flareRoot = helpSystemRoot(response.body, page);
+        if (flareRoot && !flareRoots.has(flareRoot)) {
+          flareRoots.add(flareRoot);
+          try {
+            const data = await fetchFlareData(page, response.body, flareFetch);
+            const read = data && flareNavigationFromData(page, response.body, data);
+            if (data && read?.nodes.length) {
+              for (const [dataUrl, body] of data) if (!navigationData.some((file) => file.url === dataUrl)) navigationData.push({ url: dataUrl, body });
+              if (!navigation) {
+                navigation = read.nodes;
+                navigationCandidates['platform-metadata'] = read.nodes;
+              } else {
+                const error = `a second MadCap help system is published here, with its own ${placedPages(read.nodes).size}-page sidebar; the navigation this run states is the one at ${[...flareRoots][0]}, and the pages under this one are placed by neither`;
+                failures.push({ url: flareRoot, error });
+                structuralIssues.push(`${flareRoot}: ${error}`);
+              }
+              // Its pages are discovered either way: a page the first sidebar never names is still
+              // part of the site, and leaving it out of the crawl would hide it entirely.
+              registerNavigationPages(read.nodes, [], page);
+              // A node the chunks never supplied is a hole in the sidebar, not a page that moved.
+              if (read.unresolved) {
+                const error = `${read.unresolved} navigation entr(ies) name a node no chunk supplies; the sidebar read from this site is incomplete`;
+                failures.push({ url: read.toc, error });
+                structuralIssues.push(`${read.toc}: ${error}`);
+              }
+            }
+          } catch (error) {
+            failures.push({ url: page, error: (error as Error).message });
           }
         }
       }
@@ -845,11 +945,12 @@ export async function discoverLiveSite(input: {
       orderHint: value.platformOrder ?? value.sidebarOrder ?? value.sitemap?.order ?? value.discoveredOrder,
       orderSource: value.platformOrder !== undefined || value.sidebarOrder !== undefined ? 'sidebar' : value.sitemap ? 'sitemap' : 'crawl',
       groupHint: value.groupHint?.length ? value.groupHint : undefined,
-      locale: value.locale, version: value.version, sidebarPages: value.sidebarPages,
+      locale: value.locale, version: value.version, sidebarPages: value.sidebarPages, contentSha256: value.contentSha256,
       sitemap: value.sitemap ? { source: value.sitemap.sitemap, order: value.sitemap.order, lastmod: value.sitemap.lastmod, changefreq: value.sitemap.changefreq, priority: value.sitemap.priority } : undefined,
       ...(aliasesOf.get(url)?.length ? { aliases: aliasesOf.get(url) } : {}),
     })),
     failures,
+    ...(structuralIssues.length ? { structuralIssues: [...new Set(structuralIssues)].sort() } : {}),
     sitemaps: { sources: sitemaps.sources, entries: sitemaps.entries, truncated: sitemaps.truncated },
     navigation: navigation ?? (domSidebarIsNavigation ? domSidebar : undefined),
     navigationSource: navigation ? 'platform-metadata' : domSidebarIsNavigation ? 'dom-sidebar' : undefined,
@@ -858,6 +959,8 @@ export async function discoverLiveSite(input: {
     siteConfig,
     llms,
     canonicalHosts: canonicalHosts.list(),
+    robots,
+    ...(navigationData.length ? { navigationData } : {}),
     // true whenever a candidate was dropped because of the limit, even if the queue later drained
     truncated: sitemaps.truncated || refusedByLimit > 0 || (records.size >= limit && queue.length > 0),
   };

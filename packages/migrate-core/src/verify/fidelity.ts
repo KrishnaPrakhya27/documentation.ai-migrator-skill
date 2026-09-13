@@ -99,7 +99,7 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
 
 /** Author-visible meaning. Platform component names and visual-only props may change. */
 export function authoredContentSnapshot(doc: DocIR): FidelityValue {
-  const metadata = Object.fromEntries(Object.entries(doc.frontmatter).filter(([key]) => ['title', 'description', 'metaTitle', 'metaDescription', 'canonical'].includes(key)));
+  const metadata = Object.fromEntries(Object.entries(doc.frontmatter).filter(([key]) => ['title', 'description', 'metaTitle', 'metaDescription', 'canonical', 'ogImage'].includes(key)));
   return { metadata: ordered(metadata), blocks: blocksShape(doc.children, false) };
 }
 

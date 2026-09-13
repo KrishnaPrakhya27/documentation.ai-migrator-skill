@@ -107,13 +107,13 @@ describe('source universe certification', () => {
     const record = { url: 'https://example.test/a', html: '<main>Original</main>', htmlSha256: sha256('<main>Original</main>'), markdown: 'Original', markdownSha256: sha256('Original') };
     writeFileSync(acquiredPath(workspace, id), JSON.stringify(record));
     const pages = [{ id, source: record.url, migrate: true }];
-    const hash = pinAcquisition(workspace, manifest, pages, true);
+    const hash = pinAcquisition(workspace, manifest, pages, true).hash;
     expect(() => requireAcquisition(workspace, manifest, hash, pages)).not.toThrow();
     writeFileSync(acquiredPath(workspace, id), JSON.stringify({ ...record, markdown: 'Changed', markdownSha256: sha256('Changed') }));
     expect(() => requireAcquisition(workspace, manifest, hash, pages)).toThrow(/bytes changed/);
-    expect(() => pinAcquisition(workspace, manifest, pages, true)).toThrow(/already pinned/);
+    expect(() => pinAcquisition(workspace, manifest, pages, true).hash).toThrow(/already pinned/);
     writeFileSync(acquiredPath(workspace, id), JSON.stringify({ url: record.url, html: record.html, htmlSha256: record.htmlSha256 }));
-    expect(() => pinAcquisition(workspace, manifest, pages, true)).toThrow(/published Markdown is required/);
+    expect(() => pinAcquisition(workspace, manifest, pages, true).hash).toThrow(/published Markdown is required/);
   });
 
   it('detects removed pages, source substitutions, extra output and duplicate output claims', () => {

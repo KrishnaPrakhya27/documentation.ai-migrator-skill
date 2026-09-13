@@ -2,6 +2,21 @@
 
 Last updated 10 September 2026 after the exact-fidelity work. Verified by `npm run typecheck`, the unit tier (`npm test`), the exactness proof tier (`npm run test:proof` against a saved real Mintlify site) and end-to-end CLI runs over the synthetic Document360 export, Mintlify fixture repository, and generic smoke repository.
 
+## Measured performance
+
+Run with `npm run test:scale` (`DAI_SCALE_PAGES` sets the corpus size). Generated generic-repository
+corpora, one machine, exact mode:
+
+| Corpus | discover → nav | verify | heap needed |
+| --- | --- | --- | --- |
+| 500 pages | 8s | 5s | under 512 MB |
+| 5,000 pages | 18s | 48s | 384 MB; fails at 256 MB |
+
+Peak RSS on the 5,000-page run is about 1 GB unconstrained, which measures what the machine had
+free rather than what the run needed: with the heap capped at 384 MB the same run completes, and at
+256 MB it exhausts the heap while parsing a page. Verification streams the snapshot a page at a
+time for this reason; the stages that rewrite every page still hold the corpus.
+
 ## Implemented and verified
 
 - Portable Codex/Claude plugin manifests and 13 operator skills whose text matches the code.
@@ -17,7 +32,7 @@ Last updated 10 September 2026 after the exact-fidelity work. Verified by `npm r
 - Markdown/MDX parsing with GFM, literal-only props, no JavaScript evaluation; single-line JSX elements promoted to block components; inline runs under flow elements kept as paragraphs.
 - Component Conversion Engine: declarative mappings per platform, T0–T4 deterministic, T5 static only, T7 sanitised fragment or quarantine, `drop` rules with subtree ledger marks, per-cluster plan decisions honoured (approve, exclude, quarantine).
 - Assets: download, hash dedupe, SVG sanitisation, `s3` provider (tested with an injected client), `dai-api` provider (wired to the presign/confirm endpoints; blocked until the platform accepts API-key credentials there), failed entries retried.
-- Verification: 34 release gates including verification against the raw acquired source (`source-content-exact`, `source-metadata-exact`, `html-reconciliation`, `chrome-absent`), navigation compared against a fresh extraction from the frozen source, route-by-route preview comparison, migrator provenance pinning, and block-level ledger coverage, prose and code/table parity, contract validation, navigation, links, redirects, plan pinning, gates bound to the output hash, convert-level determinism, preview contract version, rendered anchors in headless Chrome with resolver pinning.
+- Verification: 37 release gates including verification against the raw acquired source (`source-content-exact`, `source-metadata-exact`, `html-reconciliation`, `chrome-absent`), navigation compared against a fresh extraction from the frozen source, route-by-route preview comparison, migrator provenance pinning, and block-level ledger coverage, prose and code/table parity, contract validation, navigation, links, redirects, plan pinning, gates bound to the output hash, convert-level determinism, preview contract version, rendered anchors in headless Chrome with resolver pinning.
 - Git writer: `refs/heads/migration/<session>`, isolated worktree, host-bound org allowlist (GitHub and GitLab, subgroups), no force-push, protected-branch refusal.
 - Reports: gates, review queue, summary, redirects, anchors, platform gaps, cutover runbook, sitemap list, search canary.
 - Human review is consolidated into exactly four standard gates: scope/structure, conversion plan, pre-push validation, and preview/release. Ambiguity and failed automated checks are exception states, not additional approvals.
@@ -38,7 +53,7 @@ Last updated 10 September 2026 after the exact-fidelity work. Verified by `npm r
 ```bash
 npm install && npm run typecheck && npm test
 
-# repository sources (Mintlify, GitBook, ReadMe sync repo, generic)
+# repository sources (Mintlify, GitBook, ReadMe sync repo, Fern, Docusaurus, Nextra, MadCap Flare, generic)
 npx tsx packages/migrate-core/src/cli.ts init --workspace /secure/ws --source /path/repo --repo /path/repo --target demo-org --platform mintlify --allowed-orgs your-github-org
 # ReadMe API: --source https://<subdomain>.readme.io --platform readme with README_API_KEY set
 npx tsx packages/migrate-core/src/cli.ts discover  --workspace /secure/ws   # human gate 1/4: scope and structure
@@ -51,6 +66,7 @@ npx tsx packages/migrate-core/src/cli.ts nav       --workspace /secure/ws
 npx tsx packages/migrate-core/src/cli.ts verify    --workspace /secure/ws   # human gate 3/4: pre-push validation
 npx tsx packages/migrate-core/src/cli.ts write     --workspace /secure/ws --repo /path/target --remote https://github.com/your-org/docs.git --push
 npx tsx packages/migrate-core/src/cli.ts verify    --workspace /secure/ws --preview-url https://preview... --preview-contract-version 0.1.0 # human gate 4/4: preview and release
+npx tsx packages/migrate-core/src/cli.ts release   --workspace /secure/ws # immutable certificate after gate 4 approval
 npx tsx packages/migrate-core/src/cli.ts report    --workspace /secure/ws
 ```
 

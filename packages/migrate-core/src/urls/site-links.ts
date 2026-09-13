@@ -159,8 +159,12 @@ export function siteLinkTarget(links: SiteLinks): (url: string, source?: string)
 
 /** The document with every link retargeted: prose, list items, quotes, table cells, captions and a component's link props. */
 export function retargetDocLinks(doc: DocIR, target: (url: string, source?: string) => string): DocIR {
+  // A canonical naming another page is a link between pages: it must follow that page to where it
+  // was migrated, exactly as a body link does, or it keeps pointing at the site being left.
+  const canonical = typeof doc.frontmatter?.canonical === 'string' ? target(doc.frontmatter.canonical, doc.source) : undefined;
   return {
     ...doc,
+    ...(canonical ? { frontmatter: { ...doc.frontmatter, canonical } } : {}),
     children: mapBlocks(doc.children, {
       inline: (node) => (node.type === 'link' ? { ...node, url: target(node.url, doc.source) } : node),
       block: (block): Block => (block.type === 'dai' || block.type === 'component'

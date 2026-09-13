@@ -2,7 +2,7 @@
 
 Agent skills plus a deterministic TypeScript core for migrating documentation sites onto Documentation.AI. It runs from Claude Code or Codex as a plugin and is designed for reviewable, fail-closed internal migrations.
 
-- `skills/` — the operator-facing procedures: `migrate` (router), `migrate-<platform>` and `scrape-<platform>` for ReadMe, Mintlify, GitBook and Document360, `migrate-generic`, `scrape-generic`, `verify`, `report`.
+- `skills/` — the operator-facing procedures: `migrate` (router), `migrate-<platform>` and `scrape-<platform>` for ReadMe, Mintlify, GitBook and Document360, `migrate-generic`, `scrape-generic`, `verify`, `report`. Repository sources also cover Fern, Docusaurus, Nextra and MadCap Flare through the adapter registry (`packages/migrate-core/src/adapters/registry.ts`); every adapter passes one shared conformance suite. Published MadCap Flare sites, whose sidebar is built in the browser, have their navigation read from the data files the site publishes (`packages/migrate-core/src/scrape/madcap-toc.ts`).
 - `packages/content-contract/` — the authoritative Documentation.AI content contract (components, props, navigation, redirects, anchors) with strict validators. Extracted from the product repos once, then reconciled by decision (`decisions.yaml`).
 - `packages/migrate-core/` — the engine: sessions and identity, HTML/MDX → IR, the Component Conversion Engine (tiers T0–T7, declarative mapping tables per platform), block-level ledger, sanitiser, assets, navigation, URL plans and redirects, validation, verification gates, Git writer, reports.
 
@@ -59,13 +59,16 @@ agreement. Without it, Firecrawl may retain the pages it scrapes.
 
 ## Verification
 
-Release gates (30) live in `packages/migrate-core/src/verify/gates.ts`. The
+Release gates (37) live in `packages/migrate-core/src/verify/gates.ts`. The
 family that certifies exactness against the source is
 `source-content-exact`, `source-metadata-exact`, `html-reconciliation`,
 `chrome-absent`, `navigation-exact`, `source-navigation-proven`,
 `conversion-fidelity`, `serialized-output-exact` and `no-authored-exclusions`.
 `verify --preview` adds route-by-route comparison of the deployed preview and
-writes one row per route to `report/preview-routes.json`.
+writes one row per route to `report/preview-routes.json`. After the fourth human
+approval, `release` validates all four immutable approval pins and writes
+`report/release-certificate.json`; a passing preview report alone does not
+authorise cutover.
 
 The session records which build of this migrator produced the output (commit,
 dirty flag, hash of the uncommitted diff). `verify` refuses to certify output

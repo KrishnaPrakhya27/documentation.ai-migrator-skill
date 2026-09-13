@@ -23,7 +23,8 @@ export interface BreakNode extends BaseNode { type: 'break' }
 export interface KbdNode extends BaseNode { type: 'kbd'; children: Inline[] }
 export interface InlineHtmlNode extends BaseNode { type: 'inlineHtml'; value: string }
 /** `unreadableWidth`/`unreadableHeight` hold a dimension the source states that the target's integer-pixel contract cannot carry (`100%`, `2rem`), so the loss stays visible instead of being guessed at or dropped. */
-export interface ImageNode extends BaseNode { type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number; unreadableWidth?: string; unreadableHeight?: string }
+/** `sources` holds the srcset candidates the source offered; the target renders one URL, so they are hosted and reported rather than dropped with the old platform. */
+export interface ImageNode extends BaseNode { type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number; unreadableWidth?: string; unreadableHeight?: string; sources?: string[] }
 
 export type Inline = TextNode | InlineCodeNode | StrongNode | EmphasisNode | DeleteNode | LinkNode | BreakNode | KbdNode | InlineHtmlNode | ImageNode;
 

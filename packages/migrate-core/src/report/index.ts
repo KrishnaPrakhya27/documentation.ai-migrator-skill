@@ -4,7 +4,7 @@
  */
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { GateResult } from '../verify/gates.js';
+import { gateSatisfied, releaseBlockers, type GateResult } from '../verify/gates.js';
 import type { ClusterEntry } from '../components/signature.js';
 import type { Decision } from '../log/decisions.js';
 import type { Session } from '../session/workspace.js';
@@ -12,8 +12,17 @@ import { describeMigrator, type MigratorProvenance } from '../session/provenance
 import type { QuarantineCounts } from '../session/quarantine.js';
 import type { Tree } from '../nav/tree.js';
 
-export function writeGates(workspace: string, gates: GateResult[], outputHash?: string): void {
-  writeFileSync(join(workspace, 'report', 'gates.json'), JSON.stringify({ at: new Date().toISOString(), outputHash, pass: gates.every((g) => g.status === 'pass'), gates }, null, 2), { mode: 0o600 });
+export interface GateReport { at: string; outputHash?: string; pass: boolean; gates: GateResult[] }
+
+export function gateReport(gates: GateResult[], outputHash?: string): GateReport {
+  return { at: new Date().toISOString(), outputHash, pass: releaseBlockers(gates).length === 0, gates };
+}
+
+export function writeGates(workspace: string, gates: GateResult[], outputHash?: string, files: string | string[] = 'gates.json'): GateReport {
+  const report = gateReport(gates, outputHash);
+  const body = JSON.stringify(report, null, 2);
+  for (const file of typeof files === 'string' ? [files] : files) writeFileSync(join(workspace, 'report', file), body, { mode: 0o600 });
+  return report;
 }
 
 export function readDecisions(workspace: string): Decision[] {
@@ -23,7 +32,7 @@ export function readDecisions(workspace: string): Decision[] {
 
 export function writeReviewQueue(workspace: string, gates: GateResult[], clusters: ClusterEntry[], planStatus: Record<string, string>): void {
   const lines: string[] = ['# Review queue', ''];
-  const failed = gates.filter((g) => g.status !== 'pass');
+  const failed = gates.filter((g) => !gateSatisfied(g));
   lines.push(`## Gates: ${failed.length ? `${failed.length} failing or not run` : 'all passing'}`, '');
   for (const g of gates) lines.push(`- **${g.id}** — ${g.status.toUpperCase()}: ${g.detail}${g.samples?.length ? `\n  - ${g.samples.join('\n  - ')}` : ''}`);
   lines.push('', '## Component clusters needing review', '');
@@ -68,6 +77,8 @@ function provenanceLines(p: RunProvenance): string[] {
 export function writeSummary(workspace: string, s: { pages: number; converted: number; clusters: number; assets: number; gates: GateResult[]; branch?: string; provenance: RunProvenance }): void {
   const failed = s.gates.filter((g) => g.status === 'fail').length;
   const notRun = s.gates.filter((g) => g.status === 'not-run').length;
+  const inapplicable = s.gates.filter((g) => g.status === 'inapplicable').length;
+  const blockers = releaseBlockers(s.gates).length;
   const md = `# Migration summary
 
 | | |
@@ -81,9 +92,11 @@ export function writeSummary(workspace: string, s: { pages: number; converted: n
 | Assets | ${s.assets} |
 | Gates failing | ${failed} |
 | Gates not run | ${notRun} |
+| Gates inapplicable (satisfied) | ${inapplicable} |
+| Required release blockers | ${blockers} |
 | Branch | ${s.branch ?? '-'} |
 
-Release is ${failed === 0 && notRun === 0 ? 'ALLOWED' : 'BLOCKED'} by the gates. See review-queue.md.
+Release is ${blockers === 0 ? 'ALLOWED' : 'BLOCKED'} by the complete required gate set. See review-queue.md.
 
 ## Provenance
 

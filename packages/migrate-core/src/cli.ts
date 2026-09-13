@@ -8,7 +8,6 @@
  *
  * Every stage reads and writes files in the workspace; re-runs are safe.
  */
-import { parseArgs } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -18,13 +17,22 @@ import { loadContract } from '@dai/content-contract';
 import { freezeDirectory, frozenRootPath, sourceManifestPath, writeSourceManifest, type SourceManifest, type FreezeResult } from './evidence/manifest.js';
 import { nativeSourceManifest, liveSourceManifest } from './evidence/capture.js';
 import { requireSourceManifest } from './evidence/verify.js';
+import { nativeNavigationWitness } from './evidence/native-navigation.js';
 import { pinAcquisition, requireAcquisition } from './evidence/acquisition.js';
 import { ensureScopeDecisionsFile, scopeDecisionsPath } from './evidence/scope.js';
 import { captureSpecGraph, writeSpecOutput, type SpecManifest } from './openapi/graph.js';
 import { readmeCatalogSpecs } from './openapi/readme.js';
+import { HELP, parseCommandLine } from './cli/options.js';
+import { progressReporter } from './cli/progress.js';
+import { canonicalHostsPath, loadSnapshot, readJson, readSnapshotPage, resetDir, snapshotPageCount, snapshotPages, sourceFiles, writeJson } from './cli/io.js';
+import { buildSourceEvidence, expectedSidebar, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
+import { captureOpenapi, type OpenapiCapture } from './cli/openapi-capture.js';
+import { acquiredHtml, readPlatformMeta, type PlatformMeta } from './cli/platform-meta.js';
 import { assertOutsidePlugin, ensureWorkspace, readSession, writeSession, markStage, type Session, fileHash } from './session/workspace.js';
+import { acquireWorkspaceLock, type WorkspaceLock } from './session/lock.js';
 import { newMigrationId, pageIdFromPlatform, sha256 } from './session/ids.js';
 import { captureMigratorProvenance, describeMigrator, migratorDrift } from './session/provenance.js';
+import { GATE_NAMES, gateSubjects, pinGateSubjects, releaseApprovalProblems } from './session/approvals.js';
 import { countQuarantine, writeQuarantine } from './session/quarantine.js';
 import { preflight, probePushAccess } from './session/preflight.js';
 import { DaiClient, noDeploymentDiagnosis } from './session/platform.js';
@@ -34,10 +42,13 @@ import { Firecrawl, readFirecrawlPage, type FirecrawlOptions } from './scrape/fi
 import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
 import { discoverLiveSite, extractMintlifyNavigation, navigationFromFrozenPages, sidebarObserved, type DiscoveredNavigationNode, type DiscoveryResult } from './scrape/discovery.js';
 import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
+import { extractSeo, seoFrontmatter } from './scrape/seo.js';
 import { acquirePages, acquireFirecrawlPages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
+import { acquireNativePages } from './scrape/native-acquire.js';
 import { htmlToIr } from './ir/from-html.js';
 import { markdownToIr } from './ir/from-markdown.js';
 import { extractIfZip, readD360Export, d360ArticleToIr, type D360Export } from './adapters/document360.js';
+import { adapterFor } from './adapters/registry.js';
 import { readMintlifyRepo, mintlifySnippetResolver } from './adapters/mintlify.js';
 import { readGitbookRepo } from './adapters/gitbook.js';
 import { readReadmeRepo, ReadmeApi, readmeApiTree } from './adapters/readme.js';
@@ -59,9 +70,11 @@ import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dim
 import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';
 import { s3StorageFromEnv, s3StorageProblems, type AssetProviderOptions } from './assets/providers.js';
 import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
-import { runGates, canonicalHash, previewPushBlockers, waivedExactnessGates, type GateResult, type SourceEvidence } from './verify/gates.js';
+import { runGates, canonicalHash, gateSatisfied, previewPushBlockers, releaseBlockers, waivedExactnessGates, type GateResult, type SourceEvidence } from './verify/gates.js';
 import { loadRawSourcePages, rawSourceIr, type RawSourcePage } from './verify/source-truth.js';
-import { runBrowserContentGate, runBrowserFragmentGate, type BrowserAnchor, type ExpectedNavigationEntry } from './verify/browser.js';
+import { routeUrl, runBrowserContentGate, runBrowserFragmentGate, type BrowserAnchor, type ExpectedNavigationEntry } from './verify/browser.js';
+import { cachedRenderer, openChromeSession, EXPAND_INTERACTIVE } from './verify/chrome-session.js';
+import { runResponsiveGate } from './verify/responsive.js';
 import { authoredContentSnapshot, fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from './verify/fidelity.js';
 import { unconvertedFidelityRecord, writeFidelityRecords, type FidelityRecord } from './verify/fidelity-records.js';
 import { writeMigrationBranch } from './write/migration-branch.js';
@@ -71,58 +84,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(here, '..', '..', '..');
 const CORE_VERSION = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'package.json'), 'utf8')).version as string;
 
-const HELP = `dai-migrate <command> [options]
 
-Commands (run in order; the workflow has exactly four standard human gates):
-  init         --workspace <dir> --source <url|path> --target customer-org|demo-org --remote <git url> [--platform p] [--export <zip|dir>] [--fidelity exact|permissive] [--allowed-orgs a,b] [--customer-authorised]
-               verifies the remote, the API key, the connected repository, previews and the media API up front; records the asset provider
-  fingerprint  [--url <u>] [--export <zip|dir>] [--repo <dir>]     → plan/fingerprint.json
-  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] [--offline] → plan/tree.yaml [gate 1: scope]
-               --offline rebuilds the tree and navigation from the frozen source already in the workspace; it fetches nothing
-  rebase       --reason "<why>"                                     re-pins the migrator build after a fix, keeps the frozen source
-               and its acquisition pin, and stales every derivation; follow it with "discover --offline"
-  acquire      [--fetcher local|firecrawl] [--zero-data-retention] [--profile p] [--urls file] [--proxy url] [--headers-file json] [--cookies-file file] → source-cache/acquired/
-  inventory                                                         → snapshot/, inventory/*.json
-  plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml [gate 2: conversion plan]
-  assets       [--provider none|local|s3|dai-api]                   → plan/assets.json, assets-original/
-  convert                                                           → output/, ledger/, quarantine/
-  nav                                                               → output/documentation.json, report/redirects.*.json, report/anchors.json
-  write        [--repo <dir>] [--remote <url>] [--push] [--allow-lossy] [--no-wait] [--preview-timeout min] → refs/heads/migration/<session>; with --push waits for the preview deployment and records its URL
-               --allow-lossy (permissive sessions only) pushes an exploratory branch with unproven exactness gates waived; failed gates still block
-  verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
-  report                                                            → report/summary.md, report/platform-gaps.json
-
-Every command except init takes --workspace <dir> (or MIGRATION_WORKSPACE).`;
-
-const { values: v, positionals } = parseArgs({
-  allowPositionals: true,
-  options: {
-    workspace: { type: 'string', default: process.env.MIGRATION_WORKSPACE },
-    source: { type: 'string' }, target: { type: 'string' }, platform: { type: 'string' }, export: { type: 'string' }, url: { type: 'string' }, repo: { type: 'string' },
-    'allowed-orgs': { type: 'string', default: process.env.MIGRATION_ALLOWED_ORGS ?? '' },
-    'customer-authorised': { type: 'boolean', default: false },
-    fidelity: { type: 'string', default: 'exact' },
-    mode: { type: 'string' }, 'strip-prefix': { type: 'string' }, case: { type: 'string' },
-    provider: { type: 'string', default: process.env.MIGRATION_ASSET_PROVIDER }, fetcher: { type: 'string', default: 'local' }, profile: { type: 'string' }, urls: { type: 'string' },
-    'discovery-limit': { type: 'string', default: process.env.MIGRATION_DISCOVERY_LIMIT ?? '5000' },
-    'firecrawl-proxy': { type: 'string', default: process.env.FIRECRAWL_PROXY_MODE ?? 'auto' },
-    'max-concurrency': { type: 'string', default: process.env.FIRECRAWL_MAX_CONCURRENCY },
-    'firecrawl-timeout-min': { type: 'string', default: process.env.FIRECRAWL_TIMEOUT_MIN ?? '360' },
-    openapi: { type: 'string', multiple: true },
-    concurrency: { type: 'string', default: process.env.MIGRATION_CONCURRENCY ?? '4' },
-    rps: { type: 'string', default: process.env.MIGRATION_RPS ?? '2' },
-    refresh: { type: 'boolean', default: false },
-    offline: { type: 'boolean', default: false }, reason: { type: 'string' },
-    'zero-data-retention': { type: 'boolean', default: process.env.FIRECRAWL_ZERO_DATA_RETENTION === '1' },
-    proxy: { type: 'string', default: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY },
-    'headers-file': { type: 'string', default: process.env.MIGRATION_HEADERS_FILE }, 'cookies-file': { type: 'string', default: process.env.MIGRATION_COOKIES_FILE }, 'auth-origin': { type: 'string', default: process.env.MIGRATION_AUTH_ORIGINS },
-    remote: { type: 'string' }, push: { type: 'boolean', default: false }, 'allow-lossy': { type: 'boolean', default: false },
-    'no-wait': { type: 'boolean', default: false }, 'preview-timeout': { type: 'string', default: process.env.MIGRATION_PREVIEW_TIMEOUT_MIN ?? '15' },
-    preview: { type: 'boolean', default: false }, 'preview-url': { type: 'string' }, 'preview-contract-version': { type: 'string' },
-    'log-originals': { type: 'boolean', default: false },
-    help: { type: 'boolean', default: false },
-  },
-});
+const { values: v, positionals } = parseCommandLine();
 
 const cmd = positionals[0];
 if (!cmd || v.help) { console.log(HELP); process.exit(0); }
@@ -135,9 +98,8 @@ function fail(msg: string): never { console.error(`✖ ${redact(msg)}`); process
 function ok(msg: string) { console.log(`✔ ${msg}`); }
 function humanGate(number: 1 | 2 | 3 | 4, name: string, review: string): void {
   console.log(`⏸ HUMAN GATE ${number}/4 — ${name}: ${review}`);
+  console.log(`   record the decision with: dai-migrate approve --gate ${number} --by "<who approved it>"`);
 }
-function readJson<T>(p: string): T { return JSON.parse(readFileSync(p, 'utf8')) as T; }
-function writeJson(p: string, o: unknown) { mkdirSync(dirname(p), { recursive: true, mode: 0o700 }); writeFileSync(p, JSON.stringify(o, null, 2) + '\n', { mode: 0o600 }); }
 function readSensitive(path: string): string {
   const resolved = resolve(path);
   const mode = statSync(resolved).mode & 0o777;
@@ -193,6 +155,13 @@ async function firecrawlOptions(workspace: string, session: Session, targetUrl: 
   if (maxConcurrency !== undefined && (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 100)) fail('--max-concurrency must be an integer from 1 to 100');
   return { apiKey: process.env.FIRECRAWL_API_KEY!, workspace, proxy: proxy as FirecrawlOptions['proxy'], maxConcurrency, timeoutMinutes: Number(v['firecrawl-timeout-min']), retainBodies: false, zeroDataRetention: !!v['zero-data-retention'], headers: Object.keys(headers).length ? headers : undefined };
 }
+/** The capture the operator asked for, reported as the stage's own progress line. */
+async function captureOpenapiFor(workspace: string, session: Session, tree: Tree): Promise<OpenapiCapture> {
+  const capture = await captureOpenapi({ workspace, session, tree, supplied: v.openapi ?? [], concurrency: Number(v.concurrency), fetcher: new Fetcher(networkOptions(workspace, session)) });
+  if (capture.documents) ok(`${capture.documents} OpenAPI documents captured without flattening; ${capture.operations} operations indexed`);
+  return capture;
+}
+
 function requireStages(session: Session, ...stages: string[]): void {
   const missing = stages.filter((stage) => session.stages[stage]?.status !== 'done');
   if (missing.length) fail(`required stage(s) not complete: ${missing.join(', ')}`);
@@ -201,10 +170,6 @@ function requireFrozenInputs(workspace: string, session: Session): SourceManifes
   const manifest = requireSourceManifest(workspace, session.hashes.sourceManifest);
   requireAcquisition(workspace, manifest, session.hashes.acquisition, readTree(workspace).pages);
   return manifest;
-}
-function resetDir(path: string): void {
-  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
-  mkdirSync(path, { recursive: true, mode: 0o700 });
 }
 
 /** Replace inline snippet placeholders with provided bodies (plain inline text) when the operator supplied them. */
@@ -222,11 +187,6 @@ function inlineSnippetBodies(doc: DocIR, snippets: Array<{ token: string; body: 
   return { ...doc, children: fix(doc.children) };
 }
 
-function loadSnapshot(workspace: string): DocIR[] {
-  const dir = join(workspace, 'snapshot', 'pages');
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((f) => f.endsWith('.json')).sort().map((f) => readJson<DocIR>(join(dir, f)));
-}
 
 function mappingPaths(platform: string): string[] {
   const out: string[] = [];
@@ -236,16 +196,6 @@ function mappingPaths(platform: string): string[] {
   return out;
 }
 
-const SKIP_REPO_DIRS = new Set(['.git', 'node_modules', '.next', 'dist', 'build', '.cache']);
-function sourceFiles(root: string, dir = root, out: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isSymbolicLink()) continue;
-    const p = join(dir, entry.name);
-    if (entry.isDirectory()) { if (!SKIP_REPO_DIRS.has(entry.name)) sourceFiles(root, p, out); }
-    else if (/\.(?:md|mdx|html?)$/i.test(entry.name)) out.push(p);
-  }
-  return out.sort();
-}
 
 function repoTree(root: string, platform: string): Tree {
   const pages = sourceFiles(root).map((file, order): TreePage => {
@@ -260,7 +210,6 @@ function repoTree(root: string, platform: string): Tree {
   return { scope: 'full', platform, pages };
 }
 
-function canonicalHostsPath(workspace: string): string { return join(workspace, 'inventory', 'canonical-hosts.json'); }
 /** The seed site's paired hosts from the profile plus the hosts discovery recorded from robots.txt and llms.txt. */
 function sourceCanonicalHosts(workspace: string, seedUrl: string, profile: ScrapeProfile): CanonicalHosts {
   const recorded = existsSync(canonicalHostsPath(workspace)) ? readJson<{ aliases: string[] }>(canonicalHostsPath(workspace)).aliases : [];
@@ -268,19 +217,6 @@ function sourceCanonicalHosts(workspace: string, seedUrl: string, profile: Scrap
 }
 
 /** How links resolve in this workspace's migrated site: the tree's routes, every path the frozen source is known to publish, the source's host aliases and the URL plan's choice for unmigrated links. */
-function siteLinksForWorkspace(workspace: string, tree: Tree): SiteLinks {
-  const manifest = existsSync(sourceManifestPath(workspace)) ? readJson<SourceManifest>(sourceManifestPath(workspace)) : undefined;
-  const llmsPath = join(workspace, 'inventory', 'llms.json');
-  const llms = existsSync(llmsPath) ? readJson<{ entries?: Array<{ path: string }> } | null>(llmsPath) : null;
-  const hosts = existsSync(canonicalHostsPath(workspace)) ? readJson<{ aliases?: string[] }>(canonicalHostsPath(workspace)).aliases ?? [] : [];
-  // The sitemap declares everything the source publishes, documents and media alongside pages. A link
-  // to a PDF the site serves is not a page this migration writes, but it is not an invented path
-  // either: without it the link stays relative and resolves to nothing inside the migrated site.
-  const sitemapPath = join(workspace, 'inventory', 'sitemaps.json');
-  const sitemap = existsSync(sitemapPath) ? readJson<{ entries?: Array<{ url: string }> }>(sitemapPath).entries ?? [] : [];
-  const sourcePages = [...(manifest?.pages ?? []).map((page) => page.location), ...(llms?.entries ?? []).map((entry) => entry.path), ...sitemap.map((entry) => entry.url)];
-  return siteLinksFor(tree, { unmigrated: readUrlPlan(workspace)?.unmigratedLinks ?? 'keep', sourcePages, hosts });
-}
 
 function readComponentPlan(workspace: string): Record<string, ComponentPlanEntry> {
   const p = join(workspace, 'plan', 'component-plan.yaml');
@@ -292,25 +228,6 @@ function readComponentPlan(workspace: string): Record<string, ComponentPlanEntry
   return out;
 }
 
-/** inventory/platform-meta.json: site metadata and connections the source adapter recorded at discovery. */
-interface PlatformMeta {
-  name?: string;
-  theme?: string;
-  colors?: Record<string, string>;
-  logo?: unknown;
-  favicon?: string;
-  redirects?: { exact: RedirectRule[]; wildcard: RedirectRule[] };
-  openapi?: GroupOpenapiRef[];
-  /** Source repository root the openapi specs are relative to. */
-  root?: string;
-  openapiCaptured?: boolean;
-}
-
-/** The HTML `acquire` froze for a page, if it has one. */
-function acquiredHtml(workspace: string, pageId: string): string | undefined {
-  const file = acquiredPath(workspace, pageId);
-  return existsSync(file) ? readJson<AcquiredPage>(file).html : undefined;
-}
 
 /**
  * The frozen crawl, with the navigation re-read from the acquired pages by the current
@@ -325,133 +242,21 @@ function frozenDiscovery(workspace: string, session: Session, profile: ScrapePro
   const discovery = readJson<DiscoveryResult>(path);
   const frozen = discovery.pages.map((page) => ({ url: page.url, html: acquiredHtml(workspace, pageIdFromPlatform(platform, page.url)) })).filter((page) => page.html);
   if (!frozen.length) fail('--offline found no acquired page bodies to re-read; run acquire before re-deriving');
-  const derived = navigationFromFrozenPages(frozen, platform, url, new URL(url).origin, profile);
+  const derived = navigationFromFrozenPages(frozen, platform, url, new URL(url).origin, profile, new Map((discovery.navigationData ?? []).map((file) => [file.url, file.body])));
   ok(`${frozen.length} frozen page(s) re-read with no network; navigation from ${derived?.source ?? 'the frozen capture, unchanged'}`);
   return { frozen: discovery, derived: derived ? { ...discovery, navigation: derived.nodes, navigationSource: derived.source } : discovery };
 }
 
-/** Captures full spec graphs before conversion; private catalogs need an explicitly supplied export. */
-async function captureOpenapi(workspace: string, session: Session, tree: Tree): Promise<string | undefined> {
-  const path = join(workspace, 'inventory', 'openapi.json');
-  if (session.hashes.openapi) {
-    if (!existsSync(path) || fileHash(path) !== session.hashes.openapi) fail('OpenAPI manifest changed after acquisition');
-    return session.hashes.openapi;
-  }
-  const meta = readPlatformMeta(workspace);
-  const supplied = (v.openapi ?? []).map((source) => /^https?:\/\//i.test(source) ? source : pathToFileURL(resolve(source)).toString());
-  const frozenRoot = frozenRootPath(workspace);
-  // Mintlify writes repository paths as "/api-reference/openapi.json"; they are relative to the repository, never the filesystem root
-  const native = (meta.openapi ?? []).map((entry) => {
-    if (/^https?:\/\//i.test(entry.spec)) return entry.spec;
-    const file = resolve(frozenRoot, entry.spec.replace(/^\/+/, ''));
-    if (!file.startsWith(frozenRoot + '/')) fail(`openapi spec ${entry.spec} for group ${entry.groupPath.join(' / ')} points outside the source repository`);
-    return pathToFileURL(file).toString();
-  });
-  const fetcher = new Fetcher(networkOptions(workspace, session));
-  let catalog: string[] = [];
-  if (tree.platform === 'readme' && session.source.kind === 'url' && !supplied.length) {
-    const catalogUrl = new URL('/.well-known/api-catalog', session.source.location).toString();
-    const response = await fetcher.get(catalogUrl);
-    if (response.status === 200) {
-      writeFileSync(join(workspace, 'source-cache', 'readme-api-catalog.json'), response.body, { mode: 0o600 });
-      catalog = readmeCatalogSpecs(response.body, catalogUrl);
-    } else if (![404, 401, 403].includes(response.status)) fail(`ReadMe API catalog returned HTTP ${response.status}`);
-    writeJson(join(workspace, 'inventory', 'readme-api-catalog.json'), { url: catalogUrl, status: response.status, specs: catalog, ...(catalog.length ? {} : { issue: 'No public specs available; supply authorized exports with acquire --openapi <file-or-url>. API-reference completeness remains unproven.' }) });
-  }
-  const roots = [...new Set([...native, ...supplied, ...catalog])];
-  if (!roots.length) return undefined;
-  // native specs may reference anything in the frozen repository; a supplied spec only its own directory
-  const localRoots = supplied.filter((url) => url.startsWith('file:')).map((url) => dirname(fileURLToPath(url)));
-  if (native.some((url) => url.startsWith('file:'))) localRoots.push(frozenRoot);
-  const manifest = await captureSpecGraph({ workspace, roots, concurrency: Number(v.concurrency), fetch: async (url) => {
-    if (url.startsWith('file:')) {
-      const file = resolve(fileURLToPath(url));
-      if (!localRoots.some((root) => file.startsWith(root + '/')) || !/\.(?:json|ya?ml)$/i.test(file)) throw new Error(`OpenAPI file reference is outside supplied spec directories or has an unsupported extension: ${file}`);
-      return { body: readFileSync(file, 'utf8'), status: 200, finalUrl: url };
-    }
-    if (!/^https?:\/\//i.test(url)) throw new Error(`unsupported OpenAPI source protocol: ${url}`);
-    return fetcher.get(url);
-  } });
-  writeJson(path, manifest);
-  if (meta.openapi?.length) {
-    const rewritten = meta.openapi.map((entry, i) => {
-      const url = new URL(native[i]); url.hash = '';
-      return { ...entry, spec: `openapi/${manifest.documents.find((document) => document.source === url.toString())!.file}` };
-    });
-    writeJson(join(workspace, 'inventory', 'platform-meta.json'), { ...meta, openapi: rewritten, openapiCaptured: true });
-  }
-  ok(`${manifest.documents.length} OpenAPI documents captured without flattening; ${manifest.operations.length} operations indexed`);
-  return fileHash(path);
-}
 
-function readPlatformMeta(workspace: string): PlatformMeta {
-  const p = join(workspace, 'inventory', 'platform-meta.json');
-  return existsSync(p) ? readJson<PlatformMeta>(p) : {};
-}
 
-/**
- * The acquisition, re-read for verification: the frozen pages, the profile that
- * describes the rendered source, and the navigation extracted afresh from the
- * frozen HTML so the written navigation is judged against the source rather than
- * against the tree this run built from it.
- */
-function buildSourceEvidence(workspace: string, tree: Tree): SourceEvidence | undefined {
-  const profile = getProfile(tree.platform);
-  let pages: RawSourcePage[];
-  try { pages = loadRawSourcePages({ workspace, outputDir: join(workspace, 'output'), pages: tree.pages }); }
-  catch (error) { fail((error as Error).message); }
-  if (!pages.length) return undefined;
-
-  const seed = tree.pages.find((page) => page.migrate && /^https?:\/\//.test(page.source))?.source;
-  const home = pages.find((page) => page.path === '/') ?? pages[0];
-  let navigation: Record<string, unknown> | undefined;
-  let navigationSource: string | undefined;
-  if (seed && home.html) {
-    const origin = new URL(seed).origin;
-    const sourceById = new Map(tree.pages.map((page) => [page.id, page.source]));
-    const derived = navigationFromFrozenPages(pages.map((page) => ({ url: sourceById.get(page.pageId) ?? '', html: page.html })).filter((page) => /^https?:\/\//.test(page.url)), tree.platform, seed, origin, profile);
-    if (derived) {
-      const nodes = derived.nodes;
-      navigationSource = derived.source;
-      const byUrl = new Map(tree.pages.map((page) => [page.source.replace(/\/$/, ''), page.id]));
-      const toSource = (items: DiscoveredNavigationNode[]): SourceNavigationNode[] => items.flatMap((node): SourceNavigationNode[] => {
-        if (node.type === 'page') { const id = byUrl.get(node.url.replace(/\/$/, '')); return id ? [{ type: 'page', pageId: id, title: node.title }] : []; }
-        const children = toSource(node.children);
-        return children.length || node.href ? [{ ...node, children }] : [];
-      });
-      navigation = buildDocumentationNavigation({ ...tree, navigation: toSource(nodes) }, writtenPagePaths(workspace, tree), readPlatformMeta(workspace)).navigation;
-    }
-  }
-  return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route), links: siteLinksForWorkspace(workspace, tree) };
-}
 
 /** The Documentation.AI renderer's sidebar container, used to check the deployed navigation. */
 const DAI_PREVIEW_NAV_SELECTOR = 'nav, aside, [role=navigation]';
 /** The rendered page's own content on a Documentation.AI preview: title, description and MDX body, without the breadcrumbs, feedback, prev/next and footer the theme puts around them. */
 const DAI_PREVIEW_CONTENT_SELECTORS = ['.page-title', '.page-description', '.mdx-container'];
 
-/**
- * The sidebar the source states, flattened in reading order. A page placed in two groups
- * appears twice, which is what the rendered sidebar must show.
- */
-function expectedSidebar(tree: Tree): ExpectedNavigationEntry[] {
-  const byId = new Map(tree.pages.map((page) => [page.id, page]));
-  const out: ExpectedNavigationEntry[] = [];
-  const walk = (nodes: SourceNavigationNode[], groupPath: string[]): void => {
-    for (const node of nodes) {
-      if (node.type === 'group') { walk(node.children, [...groupPath, node.label]); continue; }
-      const page = byId.get(node.pageId);
-      if (page?.migrate && page.newPath) out.push({ groupPath, label: node.title ?? page.sidebarTitle ?? page.title });
-    }
-  };
-  walk(tree.navigation ?? [], []);
-  return out;
-}
 
 /** New paths (without extension) of the pages whose converted file exists in output/. */
-function writtenPagePaths(workspace: string, tree: Tree): Set<string> {
-  return new Set(tree.pages.flatMap((page) => (page.newPath && existsSync(join(workspace, 'output', `${page.newPath}.mdx`)) ? [page.newPath] : [])));
-}
 
 async function main() {
   switch (cmd) {
@@ -533,24 +338,17 @@ async function main() {
           const root = frozenRootPath(workspace);
           frozen = freezeDirectory(resolve(url), root);
           const meta: Record<string, unknown> = { platform: platform ?? 'generic', root };
-          if ((platform === 'mintlify' || !platform) && (existsSync(join(root, 'docs.json')) || existsSync(join(root, 'mint.json')))) {
-            sourceManifest = nativeSourceManifest({ ...captureContext, platform: 'mintlify', kind: 'repo', root, freeze: frozen });
-            const r = readMintlifyRepo(root);
-            tree = r.tree;
-            Object.assign(meta, { platform: 'mintlify', configFile: r.configFile, name: r.name, colors: r.colors, logo: r.logo, favicon: r.favicon, redirects: r.redirects, openapi: r.openapi, missing: r.missing });
-            ok(`${tree.pages.length} pages from ${r.configFile} (${[...new Set(tree.pages.map((p) => p.version).filter(Boolean))].length || 1} version(s)); ${r.missing.length} listed pages missing; ${r.redirects.exact.length} exact + ${r.redirects.wildcard.length} wildcard redirects; ${r.openapi.length} openapi group(s)`);
-          } else if ((platform === 'gitbook' || !platform) && existsSync(join(root, 'SUMMARY.md')) || existsSync(join(root, '.gitbook.yaml'))) {
-            sourceManifest = nativeSourceManifest({ ...captureContext, platform: 'gitbook', kind: 'repo', root, freeze: frozen });
-            const r = readGitbookRepo(root);
-            tree = r.tree;
-            Object.assign(meta, { platform: 'gitbook', redirects: { exact: r.redirects, wildcard: [] }, missing: r.missing, unlisted: r.unlisted });
-            ok(`${tree.pages.length} pages from SUMMARY.md; ${r.missing.length} missing, ${r.unlisted.length} unlisted files (review plan/tree.yaml)`);
-          } else if (platform === 'readme' || (!platform && existsSync(join(root, 'docs')) && sourceFiles(join(root, 'docs')).some((f) => /^---[\s\S]*?^(slug|excerpt):/m.test(readFileSync(f, 'utf8'))))) {
-            sourceManifest = nativeSourceManifest({ ...captureContext, platform: 'readme', kind: 'repo', root, freeze: frozen });
-            const r = readReadmeRepo(root);
-            tree = r.tree;
-            Object.assign(meta, { platform: 'readme', hidden: r.hidden });
-            ok(`${tree.pages.length} pages from the ReadMe sync repository; ${r.hidden.length} hidden pages skipped`);
+          // One registry decides what a repository is, reads it, and states its navigation, so
+          // discovery and verification cannot disagree about the platform. A platform the operator
+          // named wins over what the files look like.
+          const adapter = adapterFor(root, platform);
+          if (adapter) {
+            sourceManifest = nativeSourceManifest({ ...captureContext, platform: adapter.platform, kind: 'repo', root, freeze: frozen });
+            const read = adapter.read(root);
+            tree = read.tree;
+            Object.assign(meta, read.meta);
+            for (const note of read.notes) console.log(`· ${note}`);
+            ok(read.summary);
           } else {
             sourceManifest = nativeSourceManifest({ ...captureContext, kind: 'repo', root, freeze: frozen });
             tree = repoTree(root, platform ?? 'generic');
@@ -598,7 +396,10 @@ async function main() {
           // manifest is a different capture, and writeSourceManifest refuses it.
           const capturedAt = reread ? requireSourceManifest(workspace, s.hashes.sourceManifest).capturedAt : captureContext.capturedAt;
           sourceManifest = liveSourceManifest({ ...captureContext, capturedAt, location: url }, reread ? reread.frozen : discovery);
-          if (!reread) writeFileSync(join(workspace, 'source-cache', 'discovery-result.json'), JSON.stringify(discovery), { mode: 0o600 });
+          if (!reread) {
+            writeFileSync(join(workspace, 'source-cache', 'discovery-result.json'), JSON.stringify(discovery), { mode: 0o600 });
+            if (discovery.robots) writeFileSync(join(workspace, 'source-cache', 'robots.txt'), discovery.robots.body, { mode: 0o600 });
+          }
           writeJson(join(workspace, 'inventory', 'discovery-failures.json'), discovery.failures);
           writeJson(join(workspace, 'inventory', 'sitemaps.json'), discovery.sitemaps);
           writeJson(join(workspace, 'inventory', 'llms.json'), discovery.llms ?? null);
@@ -684,7 +485,7 @@ async function main() {
       }
       const discoveredSession = readSession(workspace);
       discoveredSession.hashes.sourceManifest = manifestHash;
-      if (sourceManifest.source.kind === 'api') discoveredSession.hashes.acquisition = pinAcquisition(workspace, sourceManifest, tree.pages.filter((page) => page.migrate), false);
+      if (sourceManifest.source.kind === 'api') discoveredSession.hashes.acquisition = pinAcquisition(workspace, sourceManifest, tree.pages.filter((page) => page.migrate), false).hash;
       writeSession(workspace, discoveredSession);
       ensureScopeDecisionsFile(workspace);
       if (v.offline && existsSync(join(workspace, 'plan', 'tree.yaml'))) {
@@ -706,6 +507,22 @@ async function main() {
       }
       markStage(workspace, 'discover', 'done');
       humanGate(1, 'scope and structure', `review ${join(workspace, 'plan', 'tree.yaml')} plus source-specific inventory; confirm pages, groups, order, versions and locales before acquisition/inventory`);
+      break;
+    }
+    case 'approve': {
+      // A human gate is a decision about a specific state, so approving pins that state. Changing
+      // it afterwards leaves the approval behind, and the next stage says which file moved.
+      const workspace = ws(); const s = readSession(workspace);
+      const gate = Number(v.gate);
+      if (![1, 2, 3, 4].includes(gate)) fail('--gate must be 1, 2, 3 or 4');
+      const by = (v.by ?? '').trim();
+      if (!by) fail('--by is required: record who approved this gate');
+      const number = gate as 1 | 2 | 3 | 4;
+      const subjects = gateSubjects(workspace, number);
+      if (!subjects.length) fail(`nothing to approve for gate ${number} (${GATE_NAMES[number]}): its files do not exist yet, so the stage before it has not run`);
+      s.approvals = { ...s.approvals, [number]: { at: new Date().toISOString(), by, ...(v.note ? { note: v.note } : {}), pinned: pinGateSubjects(workspace, number) } };
+      writeSession(workspace, s);
+      ok(`human gate ${number} (${GATE_NAMES[number]}) approved by ${by}; pinned ${subjects.join(', ')}`);
       break;
     }
     case 'rebase': {
@@ -739,14 +556,29 @@ async function main() {
       const workspace = ws(); const s = readSession(workspace); const tree = readTree(workspace);
       requireStages(s, 'discover');
       const sourceManifest = requireSourceManifest(workspace, s.hashes.sourceManifest);
-      if (s.source.kind === 'repo' || s.source.kind === 'export') { s.hashes.openapi = await captureOpenapi(workspace, s, tree); writeSession(workspace, s); markStage(workspace, 'acquire', 'done', 'native source and OpenAPI graph frozen'); ok('native source and OpenAPI graph acquired'); break; }
+      if (s.source.kind === 'repo' || s.source.kind === 'export') {
+        s.hashes.openapi = (await captureOpenapiFor(workspace, s, tree)).hash;
+        writeSession(workspace, s);
+        // The frozen files are this source's served bytes. Recording them as acquisitions is what
+        // lets the exactness gates read the output back against the source for a repository or
+        // export, exactly as they do for a live site.
+        const native = acquireNativePages(workspace, frozenRootPath(workspace), tree.pages);
+        writeJson(join(workspace, 'inventory', 'native-acquisition.json'), native);
+        // A page with no readable body is reported, never failed here: the exactness gates are
+        // where a page without a witness stops the migration, and they name the page.
+        for (const page of native.unreadable.slice(0, 5)) console.log(`· no frozen body recorded for ${page.source}: ${page.reason}`);
+        if (native.unreadable.length > 5) console.log(`· ${native.unreadable.length - 5} more in inventory/native-acquisition.json`);
+        markStage(workspace, 'acquire', 'done', `native source frozen; ${native.recorded} page bodies recorded`);
+        ok(`native source and OpenAPI graph acquired; ${native.recorded} frozen page bodies recorded for verification`);
+        break;
+      }
       if (s.hashes.acquisition) {
         if (v.refresh) fail('acquisition is pinned; use a new workspace for refreshed source bytes');
         requireAcquisition(workspace, sourceManifest, s.hashes.acquisition, tree.pages);
         ok('completed acquisition matches its session pin; no requests needed'); break;
       }
       const profile = getProfile(v.profile ?? tree.platform);
-      s.hashes.openapi = await captureOpenapi(workspace, s, tree);
+      s.hashes.openapi = (await captureOpenapiFor(workspace, s, tree)).hash;
       writeSession(workspace, s);
       let pages = tree.pages.filter((p) => p.migrate && /^https?:\/\//.test(p.source));
       if (v.urls) {
@@ -763,14 +595,24 @@ async function main() {
         const publishedFetcher = new Fetcher({ ...networkOptions(workspace, s, [host]), canonicalHosts: sourceCanonicalHosts(workspace, s.source.location, profile) });
         // Firecrawl's generated Markdown is not the publisher's Markdown. Send every page
         // through the same acquisition checks and fetch the declared Markdown separately.
-        await acquireFirecrawlPages({ workspace, pages, profile, fidelityMode: s.fidelityMode ?? 'exact', concurrency: Number(v.concurrency), resume: !v.refresh, fetcher: publishedFetcher, responses: got, loadResponse: (url) => readFirecrawlPage(workspace, url) });
+        await acquireFirecrawlPages({ workspace, pages, profile, fidelityMode: s.fidelityMode ?? 'exact', concurrency: Number(v.concurrency), resume: !v.refresh, fetcher: publishedFetcher, responses: got, loadResponse: (url) => readFirecrawlPage(workspace, url), onProgress: progressReporter('acquired', pages.length) });
       } else {
         const host = new URL(s.source.location).hostname;
         const fetcher = new Fetcher({ ...networkOptions(workspace, s, [host]), canonicalHosts: sourceCanonicalHosts(workspace, s.source.location, profile) });
-        const acquisition = await acquirePages({ workspace, pages, fetcher, profile, fidelityMode: s.fidelityMode ?? 'exact', concurrency: Number(v.concurrency), resume: !v.refresh });
+        const report = progressReporter('acquired', pages.length);
+        const acquisition = await acquirePages({ workspace, pages, fetcher, profile, fidelityMode: s.fidelityMode ?? 'exact', concurrency: Number(v.concurrency), resume: !v.refresh, onProgress: report });
         for (const fallback of acquisition.markdownUnavailable) console.log(`· ${fallback.url}: published Markdown not acquired (${fallback.reason}); permissive mode keeps the rendered HTML`);
       }
-      s.hashes.acquisition = pinAcquisition(workspace, sourceManifest, pages, (s.fidelityMode ?? 'exact') === 'exact' && !!profile.mdSuffix);
+      const pin = pinAcquisition(workspace, sourceManifest, pages, (s.fidelityMode ?? 'exact') === 'exact' && !!profile.mdSuffix);
+      s.hashes.acquisition = pin.hash;
+      if (pin.drifted.length) {
+        // The source published while this run was reading it, so discovery and acquisition saw two
+        // different sites. Mixing them is how a migration of a site that never existed is produced.
+        writeJson(join(workspace, 'inventory', 'source-drift.json'), pin.drifted);
+        for (const page of pin.drifted.slice(0, 5)) console.log(`· source changed during this run: ${page.source}`);
+        if ((s.fidelityMode ?? 'exact') === 'exact') fail(`${pin.drifted.length} page(s) changed between discovery and acquisition; see inventory/source-drift.json. Exact mode will not combine two readings of a moving source: start a new workspace to capture it again`);
+        console.log(`· ${pin.drifted.length} page(s) changed mid-run; permissive mode keeps the acquired copy`);
+      }
       writeSession(workspace, s);
       markStage(workspace, 'acquire', 'done', `${pages.length} pages frozen`);
       ok(`${pages.length} pages acquired into source-cache/acquired`);
@@ -800,7 +642,15 @@ async function main() {
           const file = resolve(root, p.source);
           if (file !== root && !file.startsWith(root + '/')) fail(`source page escapes repository: ${p.source}`);
           const raw = readFileSync(file, 'utf8');
-          if (/\.mdx?$/i.test(file)) docs.push(attachDefinitions(markdownToIr(raw, { platform: tree.platform, file: p.source, pageId: p.id, title: p.title, resolveSnippet: tree.platform === 'mintlify' ? mintlifySnippetResolver(root) : undefined, codeMetaStrip: profile.codeMetaStrip }), definitions));
+          if (/\.mdx?$/i.test(file)) {
+            // GitBook states a page's title as the file's first heading and renders it as the
+            // title, so carrying that heading into the body as well would show the title twice.
+            // Every other repository platform states the title in frontmatter, which the parser
+            // reads, and for them this is the file unchanged.
+            const published = tree.platform === 'gitbook' ? unwrapPublishedMarkdown(raw, 'gitbook', { expectedDescription: p.description }) : { body: raw, title: undefined as string | undefined };
+            const title = published.title ?? p.title;
+            docs.push(attachDefinitions(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, resolveSnippet: tree.platform === 'mintlify' ? mintlifySnippetResolver(root) : undefined, codeMetaStrip: profile.codeMetaStrip }), definitions));
+          }
           else {
             const ir = htmlToIr(raw, htmlAdapterOptions(profile, { platform: tree.platform, file: p.source }));
             docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title: p.title }, children: ir.children });
@@ -822,7 +672,11 @@ async function main() {
             if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry and published Markdown H1 lack one, and the tree title is a URL-derived placeholder (titleSource ${p.titleSource ?? 'unset'}); re-run init with --fidelity permissive to fall back to the URL`);
             const title = stated ?? p.title;
             if (stated && p.titleSource === 'path') { p.title = stated; p.titleSource = p.llms?.title ? 'llms-txt' : 'published-markdown'; statedTitles++; }
-            docs.push(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}) }, codeMetaStrip: profile.codeMetaStrip }));
+            // The rendered page states the search metadata even on a platform whose body is Markdown,
+            // so it is read from the frozen HTML and carried; a canonical naming another page is
+            // retargeted at convert, with the links.
+            const seo = page.html ? seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined) : {};
+            docs.push(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}), ...seo }, codeMetaStrip: profile.codeMetaStrip }));
           }
           else {
             if (page.html === undefined) fail(`acquired record for ${p.source} holds neither published Markdown nor HTML; run dai-migrate acquire again`);
@@ -842,7 +696,8 @@ async function main() {
             // the body — exactly what unwrapPublishedMarkdown does with a published page's leading H1.
             // Only that one heading goes, and only when it is the title: any other H1 is still content.
             const children = firstHeading && h1 && h1 === title ? ir.children.filter((block) => block !== firstHeading) : ir.children;
-            docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}) }, children });
+            const seo = seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined);
+            docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}), ...seo }, children });
           }
         }
       }
@@ -911,6 +766,16 @@ async function main() {
       writeFileSync(planPath, toYaml({ components }), { mode: 0o600 });
       const urlPlan = readUrlPlan(workspace) ?? defaultUrlPlan(tree, { mode: (v.mode as any) ?? 'preserve', stripPrefix: v['strip-prefix'], case: (v.case as any) ?? 'preserve' });
       writeUrlPlan(workspace, urlPlan);
+      if (urlPlan.erased?.length) {
+        // The platform's paths are ASCII, and these titles are written in a script it cannot carry.
+        // Numbering them (page, page-2, page-3) would destroy every URL the site had while reporting
+        // nothing, so the route is asked for rather than invented.
+        writeJson(join(workspace, 'inventory', 'untranslatable-routes.json'), urlPlan.erased);
+        for (const page of urlPlan.erased.slice(0, 5)) console.log(`· no ASCII route for ${page.source ?? page.id}: ${page.segments.join(', ')}`);
+        const message = `${urlPlan.erased.length} page(s) have no route the platform's slug rules can carry (see inventory/untranslatable-routes.json); set each page's "new" path in plan/urls.yaml and run plan again`;
+        if ((s.fidelityMode ?? 'exact') === 'exact') fail(message);
+        console.log(`· ${message}; permissive mode is numbering them instead`);
+      }
       const assetsPlan = { provider: v.provider ?? s.target.assetProvider ?? 'local', generateAlt: false, iframeHosts: ['www.youtube.com', 'youtube.com', 'youtu.be', 'player.vimeo.com', 'www.loom.com'] };
       const ap = join(workspace, 'plan', 'assets.yaml'); if (!existsSync(ap)) writeFileSync(ap, toYaml(assetsPlan), { mode: 0o600 });
       // plans are pinned again by convert; a plan edit invalidates any verified output
@@ -977,7 +842,10 @@ async function main() {
       if ((s.fidelityMode ?? 'exact') === 'exact' && blockExclusions.length) fail(`block exclusions are not permitted in exact mode: plan/block-exclusions.yaml lists ${blockExclusions.length} (${blockExclusions.map((e) => `${e.pageId}:${e.nodeId}`).join(', ')}); remove them, or re-run init with --fidelity permissive`);
       requireFrozenInputs(workspace, s);
       const tree = applyUrlPlan(readTree(workspace), readUrlPlan(workspace) ?? defaultUrlPlan(readTree(workspace)));
-      const docs = loadSnapshot(workspace);
+      // Streamed, not loaded: conversion writes one page at a time, and a large corpus held whole
+      // is what a 5,000-page migration spends its memory on.
+      const docs = snapshotPages(workspace);
+      const pageCount = snapshotPageCount(workspace);
       const manifest = readManifest(workspace);
       const unmatchedExclusions = unmatchedBlockExclusions(docs, blockExclusions);
       if (unmatchedExclusions.length) fail(`plan/block-exclusions.yaml names nodes that are not in the snapshot: ${unmatchedExclusions.map((e) => `${e.pageId}:${e.nodeId}`).join(', ')}`);
@@ -1006,6 +874,7 @@ async function main() {
       let converted = 0; let heldForSnippets = 0; let quarantinedForFidelity = 0;
       // every snapshot page gets a record, so verify can tell a page convert skipped on purpose from one it never saw
       const fidelityRecords: FidelityRecord[] = [];
+      const convertProgress = progressReporter('converted', pageCount);
       for (const doc of docs) {
         const page = byId.get(doc.pageId);
         if (!page || !page.migrate || !page.newPath) { fidelityRecords.push(unconvertedFidelityRecord(doc, 'not-migrated')); continue; }
@@ -1040,6 +909,7 @@ async function main() {
         mkdirSync(dirname(outPath), { recursive: true, mode: 0o700 });
         writeFileSync(outPath, mdx, { mode: 0o600 });
         converted++;
+        convertProgress(converted + heldForSnippets + quarantinedForFidelity);
       }
       writeFidelityRecords(workspace, fidelityRecords);
       writeJson(join(workspace, 'report', 'unmigrated-links.json'), unmigratedLinks);
@@ -1127,6 +997,10 @@ async function main() {
       if (v['allow-lossy'] && !v.push) fail('--allow-lossy only changes what --push accepts; without --push no gate is consulted');
       if (v.push) {
         requireFrozenInputs(workspace, s);
+        // Nothing reaches the customer's repository unapproved: scope, decisions and the output
+        // itself each carry a recorded approval of the exact state being pushed.
+        const unapproved = releaseApprovalProblems(workspace, s, 3);
+        if (unapproved.length) fail(`--push refused until the human gates are approved:\n${unapproved.map((problem) => `  ${problem}`).join('\n')}\napprove with: dai-migrate approve --gate <n> --by "<who approved it>"`);
         const gateFile = join(workspace, 'report', 'gates.json');
         if (!existsSync(gateFile)) fail('--push requires a completed verify run');
         const currentOutputHash = canonicalHash(join(workspace, 'output'));
@@ -1197,7 +1071,9 @@ async function main() {
       const workspace = ws(); const s = readSession(workspace);
       requireStages(s, 'nav');
       const tree = applyUrlPlan(readTree(workspace), readUrlPlan(workspace) ?? defaultUrlPlan(readTree(workspace)));
-      const docs = loadSnapshot(workspace);
+      // Streamed rather than loaded: verification looks at one page at a time, and holding every
+      // parsed page to do that is where a large migration spends its memory.
+      const docs = snapshotPages(workspace);
       const byId = new Map(tree.pages.map((p) => [p.id, p]));
       const qDir = join(workspace, 'quarantine');
       const quarantined = new Set(existsSync(qDir) ? readdirSync(qDir).map((f) => f.replace(/\.json$/, '')) : []);
@@ -1217,11 +1093,16 @@ async function main() {
       }
       // What the source itself served, re-read from the freeze: the gates compare output against
       // this, never only against the snapshot the same run produced.
-      const sourceEvidence = s.source.kind === 'url' ? buildSourceEvidence(workspace, tree) : undefined;
+      // Evidence is built for every source kind: a repository and an export froze their bytes too,
+      // and certifying only live sites left the sources a customer migration most often uses unproven.
+      const sourceEvidence = buildSourceEvidence(workspace, tree);
       const gates = runGates({
         workspace, outputDir: join(workspace, 'output'), sourceEvidence, pinnedSourceManifest: s.hashes.sourceManifest, pinnedAcquisition: s.hashes.acquisition, pinnedOpenapi: s.hashes.openapi,
+        // Gate 3 approves the report this run produces, so a local verify asks for gates 1 and 2;
+        // by preview time the output has been approved and pushed, so gate 3 must hold too.
+        approvalProblems: releaseApprovalProblems(workspace, s, v.preview ? 3 : 2),
         pinnedPlans: { componentPlan: s.hashes.componentPlan, urlPlan: s.hashes.urlPlan, assetPlan: s.hashes.assetPlan, blockExclusions: s.hashes.blockExclusions, scopeDecisions: s.hashes.scopeDecisions },
-        sourceDocs: docs.map((doc) => ({ doc, outputFile: byId.get(doc.pageId)?.newPath ? join(workspace, 'output', `${byId.get(doc.pageId)!.newPath}.mdx`) : undefined })),
+        sourceDocs: { *[Symbol.iterator]() { for (const doc of docs) yield { doc, outputFile: byId.get(doc.pageId)?.newPath ? join(workspace, 'output', `${byId.get(doc.pageId)!.newPath}.mdx`) : undefined }; } },
         treePages: tree.pages, quarantinedPages: quarantined, excludedPages: new Set(), unreviewed,
         previousCanonicalHash: s.hashes.previousConvertOutput, convertOutputHash: s.hashes.convertOutput, previewUrl, pinnedContractVersion: s.versions.contentContract, previewContractVersion,
         fidelityMode: s.fidelityMode ?? 'exact', sourceKind: s.source.kind, navigationSource: tree.navigationSource,
@@ -1236,7 +1117,15 @@ async function main() {
         }
         const anchorFile = join(workspace, 'report', 'anchors.json');
         const browserAnchors = existsSync(anchorFile) ? readJson<BrowserAnchor[]>(anchorFile) : [];
-        const browser = await runBrowserFragmentGate(previewUrl, tree.pages, browserAnchors);
+        // One browser for the whole preview check, and one render per route shared by both gates.
+        // Each gate used to launch its own Chrome for every page, so the same page was fetched,
+        // rendered and thrown away twice. The render opens accordions, expandables and tabs first,
+        // so the content behind them is verified instead of excused.
+        const preview = await openChromeSession(previewUrl, { concurrency: Number(v.concurrency) });
+        const renderPreview = cachedRenderer(preview.render, { prepare: EXPAND_INTERACTIVE });
+        try {
+        const browserConcurrency = Number(v.concurrency);
+        const browser = await runBrowserFragmentGate(previewUrl, tree.pages, browserAnchors, renderPreview, browserConcurrency);
         const index = gates.findIndex((g) => g.id === 'browser-fragments');
         if (index >= 0) gates[index] = browser; else gates.push(browser);
         // The preview is compared against the raw source, not against the snapshot: the same
@@ -1249,7 +1138,7 @@ async function main() {
           tree.pages.map((page) => {
             const raw = rawByPageId.get(page.id);
             const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
-            const snapshot = docs.find((doc) => doc.pageId === page.id);
+            const snapshot = readSnapshotPage(workspace, page.id);
             return { ...page, doc: fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink)) };
           }),
           {
@@ -1259,18 +1148,31 @@ async function main() {
             navSelector: DAI_PREVIEW_NAV_SELECTOR,
             contentSelectors: DAI_PREVIEW_CONTENT_SELECTORS,
             siteName: typeof readPlatformMeta(workspace).name === 'string' ? readPlatformMeta(workspace).name : undefined,
+            render: renderPreview,
+            interactive: true,
+            concurrency: browserConcurrency,
           },
         );
         const contentIndex = gates.findIndex((g) => g.id === 'browser-content');
         if (contentIndex >= 0) gates[contentIndex] = browserContent.gate; else gates.push(browserContent.gate);
         writeJson(join(workspace, 'report', 'preview-routes.json'), browserContent.routes);
+        // The same pages on a phone, a tablet and a desktop: documentation is read on all three,
+        // and a page that spills off the side of a phone passes every content check there is.
+        const responsive = await runResponsiveGate(browserContent.routes.filter((result) => result.route !== '(site)').map((result) => ({ route: result.route, url: routeUrl(previewUrl, result.route) })), preview, undefined, browserConcurrency);
+        writeJson(join(workspace, 'report', 'responsive.json'), responsive.readings);
+        const responsiveIndex = gates.findIndex((g) => g.id === 'responsive-layout');
+        if (responsiveIndex >= 0) gates[responsiveIndex] = responsive.gate; else gates.push(responsive.gate);
+        } finally {
+          await preview.close();
+        }
       }
-      writeGates(workspace, gates, canonicalHash(join(workspace, 'output')));
+      const outputHash = canonicalHash(join(workspace, 'output'));
+      writeGates(workspace, gates, outputHash, previewUrl ? ['gates.json', 'preview-gates.json'] : ['gates.json', 'pre-push-gates.json']);
       const clusters = existsSync(join(workspace, 'inventory', 'components.json')) ? readJson<ClusterEntry[]>(join(workspace, 'inventory', 'components.json')) : [];
       writeReviewQueue(workspace, gates, clusters, Object.fromEntries(Object.entries(plan).map(([k, c]) => [k, c.status ?? 'auto'])));
       if (!s.hashes.canonicalOutput) { s.hashes.canonicalOutput = canonicalHash(join(workspace, 'output')); writeSession(workspace, s); }
       for (const g of gates) console.log(`  ${g.status === 'pass' ? '✔' : g.status === 'fail' ? '✖' : '·'} ${g.id}: ${g.detail}`);
-      const blocked = gates.filter((g) => g.status !== 'pass').length;
+      const blocked = gates.filter((g) => !gateSatisfied(g)).length;
       const prePushBlockers = previewPushBlockers(gates);
       const effectiveBlockers = previewUrl ? blocked : prePushBlockers.length;
       markStage(workspace, 'verify', effectiveBlockers ? 'failed' : 'done', previewUrl ? `${blocked} release gates failing or not run` : `${prePushBlockers.length} pre-push gates failing`);
@@ -1287,6 +1189,33 @@ async function main() {
         humanGate(3, 'pre-push validation', 'review output/documentation.json, converted pages, redirects and report/review-queue.md; approve only the named migration-branch push');
       }
       if (effectiveBlockers) process.exitCode = 2;
+      break;
+    }
+    case 'release': {
+      const workspace = ws(); const s = readSession(workspace);
+      requireStages(s, 'write', 'verify');
+      const approvalProblems = releaseApprovalProblems(workspace, s, 4);
+      if (approvalProblems.length) fail(`release refused until all four human gates approve their current immutable evidence:\n${approvalProblems.map((problem) => `  ${problem}`).join('\n')}`);
+      const previewReportPath = join(workspace, 'report', 'preview-gates.json');
+      if (!existsSync(previewReportPath)) fail('release refused: report/preview-gates.json is missing; run verify --preview and approve gate 4');
+      const previewReport = readJson<{ pass: boolean; outputHash?: string; gates: GateResult[] }>(previewReportPath);
+      const currentOutputHash = canonicalHash(join(workspace, 'output'));
+      const automatedBlockers = releaseBlockers(previewReport.gates);
+      if (!previewReport.pass || automatedBlockers.length) fail(`release refused: the rendered-preview report is incomplete or has unresolved gates (${automatedBlockers.map((gate) => gate.id).join(', ')})`);
+      if (previewReport.outputHash !== currentOutputHash) fail('release refused: output changed after rendered-preview verification; rerun verification and approvals');
+      const certificate = {
+        schemaVersion: 1,
+        at: new Date().toISOString(),
+        migrationId: s.migrationId,
+        outputHash: currentOutputHash,
+        previewUrl: s.target.previewUrl,
+        migrationCommit: s.stages.write?.note,
+        previewReportHash: fileHash(previewReportPath),
+        approvals: s.approvals,
+      };
+      writeJson(join(workspace, 'report', 'release-certificate.json'), certificate);
+      markStage(workspace, 'release', 'done', `${currentOutputHash.slice(0, 12)} approved by all four human gates`);
+      ok(`release certificate written for ${currentOutputHash.slice(0, 12)}; cutover is authorised for the pinned preview and output`);
       break;
     }
     case 'report': {
@@ -1309,4 +1238,21 @@ async function main() {
   }
 }
 
-main().catch((e) => fail((e as Error).message));
+/**
+ * One run owns the workspace while a command is running. A second run would read the same session,
+ * do different work and write its own pins over the first, leaving a workspace that describes
+ * neither. The lock lives beside the workspace, so even two simultaneous `init` commands for a
+ * directory that does not exist yet cannot both claim it.
+ */
+const lockedWorkspace = v.workspace ? resolve(v.workspace) : undefined;
+let workspaceLock: WorkspaceLock | undefined;
+if (lockedWorkspace && cmd === 'init') assertOutsidePlugin(lockedWorkspace, PLUGIN_ROOT);
+try { workspaceLock = lockedWorkspace ? acquireWorkspaceLock(lockedWorkspace, cmd ?? 'unknown') : undefined; }
+catch (error) { fail((error as Error).message); }
+if (workspaceLock?.tookOver) console.log(`· took over the workspace lock left by pid ${workspaceLock.tookOver.pid} ("${workspaceLock.tookOver.command}"), which is no longer running`);
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => { workspaceLock?.release(); process.exit(130); });
+process.once('exit', () => workspaceLock?.release());
+
+main()
+  .then(() => workspaceLock?.release())
+  .catch((e) => { workspaceLock?.release(); fail((e as Error).message); });

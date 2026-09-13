@@ -3,16 +3,24 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { sha256 } from '../session/ids.js';
+import { sourceFingerprint } from '../scrape/drift.js';
 import { assertRelativeSourcePath, sourceManifestHash, type SourceManifest } from './manifest.js';
 
 interface AcquisitionIndex { sourceManifest: string; pages: Array<{ pageId: string; source: string; sha256: string }> }
 const indexPath = (workspace: string): string => join(workspace, 'source-cache', 'acquisition-index.json');
 
-export function pinAcquisition(workspace: string, manifest: SourceManifest, pages: ReadonlyArray<{ id: string; source: string }>, requireMarkdown: boolean): string {
+export interface AcquisitionPin {
+  hash: string;
+  /** Pages the source changed between discovery and acquisition, so the two reads disagree. */
+  drifted: Array<{ pageId: string; source: string }>;
+}
+
+export function pinAcquisition(workspace: string, manifest: SourceManifest, pages: ReadonlyArray<{ id: string; source: string }>, requireMarkdown: boolean): AcquisitionPin {
   const byId = new Map(manifest.pages.map((page) => [page.pageId, page]));
   const index: AcquisitionIndex = { sourceManifest: sourceManifestHash(workspace)!, pages: [] };
   if (!index.sourceManifest) throw new Error('cannot pin acquisition before source discovery is pinned');
   const seen = new Set<string>();
+  const drifted: AcquisitionPin['drifted'] = [];
   for (const page of [...pages].sort((a, b) => a.id.localeCompare(b.id))) {
     assertRelativeSourcePath(page.id);
     if (page.id.includes('/') || seen.has(page.id)) throw new Error(`invalid or duplicate acquired page identity: ${page.id}`);
@@ -27,8 +35,14 @@ export function pinAcquisition(workspace: string, manifest: SourceManifest, page
       if (body !== undefined && (typeof body !== 'string' || record[`${field}Sha256`] !== sha256(body))) throw new Error(`${page.source}: missing or incorrect ${field} checksum`);
     }
     if (manifest.source.kind === 'url' && record.html === undefined) throw new Error(`${page.source}: acquisition has no rendered HTML`);
+    // The page as discovery saw it, against the page as acquisition saw it. A difference here is
+    // the customer publishing during the run; it is reported so the operator can decide, never
+    // mixed into the output silently.
     const sourceHash = byId.get(page.id)?.rawSha256;
-    if (sourceHash && sha256(record.markdown ?? record.html!) !== sourceHash) throw new Error(`${page.source}: acquired body differs from the source index capture`);
+    if (sourceHash) {
+      const acquired = record.html !== undefined ? sha256(sourceFingerprint(record.html)) : sha256(record.markdown!);
+      if (acquired !== sourceHash) drifted.push({ pageId: page.id, source: page.source });
+    }
     if (requireMarkdown && record.markdown === undefined) throw new Error(`${page.source}: published Markdown is required before acquisition can be pinned`);
     index.pages.push({ pageId: page.id, source: page.source, sha256: sha256(raw) });
   }
@@ -39,7 +53,7 @@ export function pinAcquisition(workspace: string, manifest: SourceManifest, page
   } else {
     writeFileSync(`${path}.tmp`, body, { mode: 0o600 }); renameSync(`${path}.tmp`, path);
   }
-  return sha256(body);
+  return { hash: sha256(body), drifted };
 }
 
 export function requireAcquisition(workspace: string, manifest: SourceManifest, pinnedHash: string | undefined, requiredPages: ReadonlyArray<{ id: string; migrate: boolean }> = []): void {

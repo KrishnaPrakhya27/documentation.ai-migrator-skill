@@ -65,7 +65,7 @@ function frozenWorkspace(titleSource: TreePage['titleSource']): string {
     hashes: { sourceManifest: manifestHash },
     stages: { discover: { status: 'done' }, acquire: { status: 'done' } },
   };
-  session.hashes.acquisition = pinAcquisition(workspace, manifest, pages, false);
+  session.hashes.acquisition = pinAcquisition(workspace, manifest, pages, false).hash;
   writeSession(workspace, session);
   return workspace;
 }

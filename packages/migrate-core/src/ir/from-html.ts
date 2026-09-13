@@ -8,6 +8,7 @@ import type { Block, Inline, ImageNode, ComponentNode, HeadingNode, ListItemNode
 import { inlineText } from './types.js';
 import { readPixelDimension } from './dimensions.js';
 import { nodeId } from '../session/ids.js';
+import { srcsetUrls } from '../assets/html-media.js';
 
 /** Minimal DOM built from htmlparser2 events. */
 export interface El { type: 'tag'; name: string; attribs: Record<string, string>; children: Dom[]; parent?: El }
@@ -319,8 +320,10 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
     // so one site migrated differently depending on which format the page arrived in.
     const width = readPixelDimension(n.attribs.width);
     const height = readPixelDimension(n.attribs.height);
+    const sources = srcsetUrls(n.attribs.srcset ?? n.attribs['data-srcset'] ?? '');
     return {
       id: id(p, url), type: 'image', url, alt: (n.attribs.alt ?? '').trim(), title: n.attribs.title,
+      ...(sources.length ? { sources } : {}),
       width: width.value, height: height.value,
       ...(width.unreadable !== undefined ? { unreadableWidth: width.unreadable } : {}),
       ...(height.unreadable !== undefined ? { unreadableHeight: height.unreadable } : {}),
@@ -437,7 +440,19 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
           });
           return { id: id([...p, ri], 'tr'), type: 'tableRow', isHeader: cells.length > 0 && cells.every((c) => c.name === 'th'), children };
         });
-        return [{ id: id(p, 'table'), type: 'table', children: rows }];
+        // Column alignment is authored on the cells and carried per column by a Markdown table, so
+        // the first row states it, and a cell spanning columns states it for every column it covers.
+        const cellAlignment = (cell: El): 'left' | 'center' | 'right' | null => {
+          const style = (cell.attribs.style ?? '').split(';').map((rule) => rule.split(':')).find(([name]) => name?.trim().toLowerCase() === 'text-align');
+          const declared = (cell.attribs.align ?? style?.[1] ?? '').trim().toLowerCase();
+          return declared === 'left' || declared === 'center' || declared === 'right' ? declared : null;
+        };
+        const align: Array<'left' | 'center' | 'right' | null> = [];
+        for (const cell of rowCells[0] ?? []) {
+          const value = cellAlignment(cell);
+          for (let column = 0; column < span(cell, 'colspan', MAX_TABLE_COLUMNS); column++) align.push(value);
+        }
+        return [{ id: id(p, 'table'), type: 'table', ...(align.some(Boolean) ? { align } : {}), children: rows }];
       }
       case 'script': case 'style':
         // executable or styling content never becomes children; keep only a hash so the ledger can account for the node
