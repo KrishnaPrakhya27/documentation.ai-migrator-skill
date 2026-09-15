@@ -162,6 +162,30 @@ describe('Markdown/MDX → IR', () => {
     }
   });
 
+  it('does not lose a card over an icon written as JSX, but still stops on a real expression', () => {
+    const w = mkdtempSync(join(tmpdir(), 'dai-expr-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const resolve = (md: string) => engine.resolveDoc(markdownToIr(md, { platform: 'mintlify', file: 'a.mdx', pageId: 'p' }));
+    // icon is decoration the card rule drops, so the card and its link survive
+    const dropped = resolve('<Card title="Go" href="/docs/go" icon={<svg viewBox="0 0 1 1" />}>\n  Body\n</Card>\n');
+    const cards: any[] = [];
+    walkBlocks(dropped.children, (n: any) => { if (n.type === 'dai' && n.name === 'Card') cards.push(n); });
+    expect(cards).toHaveLength(1);
+    expect(cards[0].props).toMatchObject({ title: 'Go', href: '/docs/go' });
+    // a named icon is still carried; only the JSX spelling is dropped
+    const literal = resolve('<Card title="Go" href="/docs/go" icon="rocket">\n  Body\n</Card>\n');
+    const kept: any[] = [];
+    walkBlocks(literal.children, (n: any) => { if (n.type === 'dai' && n.name === 'Card') kept.push(n); });
+    expect(kept[0].props.icon).toBe('rocket');
+    // an expression the rule does not drop still stops, because nothing evaluates one
+    const blocked = resolve('<Card title={pageTitle} href="/docs/go">\n  Body\n</Card>\n');
+    const quarantined: any[] = [];
+    walkBlocks(blocked.children, (n: any) => { if (n.type === 'quarantined') quarantined.push(n); });
+    expect(quarantined).toHaveLength(1);
+    expect(quarantined[0].reason).toMatch(/non-literal expression \(title\)/);
+    rmSync(w, { recursive: true, force: true });
+  });
+
   it('keeps an operator decision across re-planning and recomputes a derivation', () => {
     // A rule added after the plan was written must take effect, or a migrator fix silently does nothing.
     expect(planEntryIsDecided(undefined)).toBe(false);

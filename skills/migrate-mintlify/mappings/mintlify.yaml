@@ -42,6 +42,8 @@ rules:
     to: { name: Card, props: { title: $title, href: $href, icon: $icon, image: $img, cta: $cta, horizontal: $horizontal } }
     # icon colour, icon style and the hover arrow are decoration; any other authored prop is reported as dropped
     drop: [color, iconType, arrow]
+    # a named icon is carried; one written as inline JSX (icon={<svg/>}) is not, and does not hold the card back
+    dropWhenExpression: [icon]
   - id: mint/frame
     tier: T4
     match: { name: Frame }

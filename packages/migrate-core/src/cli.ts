@@ -769,7 +769,11 @@ async function main() {
         const prev = byCluster.get(c.cluster);
         if (planEntryIsDecided(prev)) return prev!;
         const rule = engine.findRule({ id: 'x', type: 'component', name: c.signature.name, platform: c.signature.platform, props: Object.fromEntries(Object.entries(c.signature.props).map(([k, b]) => [k, b.startsWith('enum:') ? b.slice(5) : b === 'null' ? null : 'x'])), children: [], styleDeps: c.signature.styleDeps });
-        const hasExpression = c.signature.styleDeps.some((x) => x.startsWith('expression:'));
+        // An expression the matching rule drops never reaches the output, so it does not hold the
+        // cluster back; the engine applies the same test, and the two must agree or the plan and the
+        // conversion would disagree about what needed a person to look at it.
+        const droppedByRule = new Set([...(rule?.drop ?? []), ...(rule?.dropWhenExpression ?? [])]);
+        const hasExpression = c.signature.styleDeps.some((x) => x.startsWith('expression:') && !droppedByRule.has(x.slice('expression:'.length)));
         const entry: ComponentPlanEntry & { count: number; signature: unknown } = {
           cluster: c.cluster, count: c.count, signature: c.signature,
           tier: hasExpression ? 'T7' : rule?.tier ?? 'T7', rule: rule?.id,

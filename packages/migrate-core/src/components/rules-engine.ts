@@ -27,6 +27,12 @@ export interface MappingRule {
   to?: { name: string; props?: Record<string, string | number | boolean> };
   /** Source props to drop (recorded as lossy). */
   drop?: string[];
+  /**
+   * Props dropped only when the source wrote them as a non-literal expression. A named icon is
+   * carried; `icon={<svg/>}` is not, and losing the card over it would lose the link that is the
+   * point of the card. The value is never evaluated either way - it is dropped, and reported.
+   */
+  dropWhenExpression?: string[];
   /** 'keep' (default), 'unwrap' (children replace the component) or 'drop' (nothing is emitted; the subtree is recorded as excluded by rule). */
   children?: 'keep' | 'unwrap' | 'drop';
   /** Named restructure handler implemented in code. */
@@ -414,8 +420,16 @@ export class RulesEngine {
     if (plan?.status === 'quarantined') {
       return this.quarantine(node, pageId, plan.reason ?? 'plan: quarantined');
     }
-    if (node.styleDeps?.some((x) => x.startsWith('expression:')) && plan?.status !== 'approved') {
-      return this.quarantine(node, pageId, 'source MDX contains a non-literal expression; explicit reviewed approval is required');
+    // A non-literal prop the matching rule already drops cannot reach the output, so it is no reason
+    // to hold the component back: a Card written with icon={<svg/>} is still a Card, and quarantining
+    // it would lose the link that is the point of it over a glyph the target never carries anyway.
+    // Every other expression still stops here, because nothing evaluates one.
+    const expressions = (node.styleDeps ?? []).filter((x) => x.startsWith('expression:')).map((x) => x.slice('expression:'.length));
+    const matched = this.findRule(node);
+    const dropped = new Set([...(matched?.drop ?? []), ...(matched?.dropWhenExpression ?? [])]);
+    const blocking = expressions.filter((name) => !dropped.has(name));
+    if (blocking.length && plan?.status !== 'approved') {
+      return this.quarantine(node, pageId, `source MDX contains a non-literal expression (${blocking.join(', ')}); explicit reviewed approval is required`);
     }
 
     const rule = plan?.rule ? this.rules.find((r) => r.id === plan.rule) : this.findRule(node);
