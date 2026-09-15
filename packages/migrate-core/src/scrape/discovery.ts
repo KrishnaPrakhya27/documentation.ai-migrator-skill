@@ -693,7 +693,7 @@ export interface SiteSection { label: string; url: string }
  * rendered section switcher, so the labels and order are the source's own. One
  * section is not a section structure, so fewer than two reports none.
  */
-export function extractSectionTabs(html: string, baseUrl: string, origin: string, profile: ScrapeProfile, canonicalHosts?: CanonicalHosts): SiteSection[] | undefined {
+export function extractSectionTabs(html: string, baseUrl: string, origin: string, profile: ScrapeProfile, canonicalHosts?: CanonicalHosts, opts: { requireSeveral?: boolean } = {}): SiteSection[] | undefined {
   if (!profile.navSectionSelector) return undefined;
   const out: SiteSection[] = [];
   const seen = new Set<string>();
@@ -707,7 +707,9 @@ export function extractSectionTabs(html: string, baseUrl: string, origin: string
     seen.add(url);
     out.push({ label, url });
   }
-  return out.length >= 2 ? out : undefined;
+  // One section is not a section structure for the site; a caller asking where a single page belongs
+  // still needs the one root that page declares.
+  return out.length >= (opts.requireSeveral === false ? 1 : 2) ? out : undefined;
 }
 
 /** The section a page belongs to: the section whose path is its longest matching prefix. */
@@ -740,6 +742,47 @@ export function siteSectionNavigation(sections: readonly SiteSection[], sidebars
     children: sidebars.get(section.url) ?? [{ type: 'page' as const, url: section.url }],
   }));
   return tabs.length >= 2 ? tabs : undefined;
+}
+
+/** How a navigation node is identified across two renderings of the same sidebar. */
+function navKey(node: DiscoveredNavigationNode): string {
+  return node.type === 'page' ? `p:${node.url ?? ''}` : `g:${node.label ?? ''}`;
+}
+
+/**
+ * One sidebar merged with another rendering of the same sidebar.
+ *
+ * A platform that expands the sidebar around the page being read renders a different part of one
+ * tree on every page: no single page states the whole structure, and taking the first rendering
+ * leaves most of the site unplaced. Merging the renderings recovers the tree the source has,
+ * rather than inventing one — nodes are matched by identity, their order is preserved, and a node
+ * only one rendering shows is inserted where that rendering puts it.
+ */
+export function mergeNavigationTrees(a: DiscoveredNavigationNode[], b: DiscoveredNavigationNode[]): DiscoveredNavigationNode[] {
+  const out: DiscoveredNavigationNode[] = [];
+  const keysOfA = new Set(a.map(navKey));
+  const keysOfB = new Set(b.map(navKey));
+  let i = 0; let j = 0;
+  while (i < a.length || j < b.length) {
+    const left = a[i]; const right = b[j];
+    if (left && right && navKey(left) === navKey(right)) {
+      out.push(mergeNavigationNode(left, right)); i++; j++;
+    } else if (left && (!right || !keysOfB.has(navKey(left)))) {
+      out.push(left); i++;
+    } else if (right && !keysOfA.has(navKey(right))) {
+      out.push(right); j++;
+    } else if (left) { out.push(left); i++; } else if (right) { out.push(right); j++; }
+  }
+  return out;
+}
+
+/** Two renderings of one node: children merge, and a label the other rendering states fills a gap. */
+function mergeNavigationNode(a: DiscoveredNavigationNode, b: DiscoveredNavigationNode): DiscoveredNavigationNode {
+  if (a.type === 'group' && b.type === 'group') {
+    return { ...a, href: a.href ?? b.href, icon: a.icon ?? b.icon, description: a.description ?? b.description, children: mergeNavigationTrees(a.children, b.children) };
+  }
+  if (a.type === 'page' && b.type === 'page') return { ...a, title: a.title ?? b.title };
+  return a;
 }
 
 /** The balanced JSON object beginning at `start`, respecting quoted strings. */
@@ -859,6 +902,8 @@ export async function discoverLiveSite(input: {
   const helpSystems: HelpSystem[] = [];
   let sections: SiteSection[] | undefined;
   const sectionSidebars = new Map<string, DiscoveredNavigationNode[]>();
+  /** Each space's own label as the source states it, including variant roots that are not site sections. */
+  const spaceLabels = new Map<string, string>();
   let siteName: string | undefined;
   let siteConfig: SiteConfig | undefined;
   const navigationData: NonNullable<DiscoveryResult['navigationData']> = [];
@@ -1120,13 +1165,20 @@ export async function discoverLiveSite(input: {
       }
       // A site that divides itself into sections renders one sidebar per section, so each
       // section's own sidebar is read from the first crawled page inside it.
-      sections ??= extractSectionTabs(response.body, response.finalUrl || url, origin, input.profile, canonicalHosts);
-      const section = sections ? sectionOfUrl(response.finalUrl || url, sections) : undefined;
-      if (!navigationCandidates['dom-sidebar'] || (section && !sectionSidebars.has(section.url))) {
-        const dom = extractDomSidebarNavigation(response.body, response.finalUrl || url, origin, input.profile, canonicalHosts);
-        if (dom) {
-          navigationCandidates['dom-sidebar'] ??= dom;
-          if (section && !sectionSidebars.has(section.url)) sectionSidebars.set(section.url, dom);
+      const pageUrl = response.finalUrl || url;
+      const declared = extractSectionTabs(response.body, pageUrl, origin, input.profile, canonicalHosts, { requireSeveral: false });
+      sections ??= declared && declared.length >= 2 ? declared : undefined;
+      // Where this page says it belongs. A page whose switcher names several sections belongs to the
+      // one containing it; a page whose switcher names a single root — a language variant — belongs
+      // to that root, which its own path would otherwise hide under the section above it.
+      const space = declared?.length === 1 ? declared[0] : sections ? sectionOfUrl(pageUrl, sections) : undefined;
+      const dom = extractDomSidebarNavigation(response.body, pageUrl, origin, input.profile, canonicalHosts);
+      if (dom) {
+        navigationCandidates['dom-sidebar'] ??= dom;
+        if (space) {
+          const seen = sectionSidebars.get(space.url);
+          sectionSidebars.set(space.url, seen ? mergeNavigationTrees(seen, dom) : dom);
+          spaceLabels.set(space.url, space.label);
         }
       }
       for (const anchor of findAll(root, 'a[href]')) if (anchor.attribs.href) add(anchor.attribs.href, 'link-graph', response.finalUrl || url);
@@ -1144,7 +1196,13 @@ export async function discoverLiveSite(input: {
     }
   }
 
-  const sectionNavigation = sections ? siteSectionNavigation(sections, sectionSidebars) : undefined;
+  // Every space that stated a sidebar becomes a container: the site's own sections first, in the
+  // order the source lists them, then any variant root the sections do not already cover.
+  const spaces: SiteSection[] = [
+    ...(sections ?? []),
+    ...[...spaceLabels].filter(([url]) => !(sections ?? []).some((section) => section.url === url)).map(([url, label]) => ({ url, label })),
+  ];
+  const sectionNavigation = spaces.length ? siteSectionNavigation(spaces, sectionSidebars) : undefined;
   if (sectionNavigation) navigationCandidates['dom-sidebar'] = sectionNavigation;
 
   // A theme renders link clusters that look like navigation in isolation: an account menu, a

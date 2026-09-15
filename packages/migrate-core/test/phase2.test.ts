@@ -6,7 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { Response as UndiciResponse } from 'undici';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { CanonicalHosts, Fetcher, discoverSitemaps, type FetchImpl } from '../src/scrape/fetcher.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, mergeNavigationTrees, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
 import { getProfile, profileHostAliases } from '../src/scrape/profiles.js';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { htmlAdapterOptions } from '../src/scrape/profiles.js';
@@ -643,6 +643,50 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(withinSiteBase('https://other.example/docs/a', 'https://acme.example/docs/')).toBe(false);
     // a site published at the origin root contains everything the host serves
     expect(withinSiteBase('https://acme.example/anything', 'https://acme.example/')).toBe(true);
+  });
+  it('merges two renderings of one expandable sidebar without inventing order', () => {
+    const page = (url: string, title?: string) => ({ type: 'page' as const, url, ...(title ? { title } : {}) });
+    const group = (label: string, children: any[]) => ({ type: 'group' as const, label, children });
+    // The same sidebar seen from two pages: each expands a different branch.
+    const fromA = [page('/a'), group('Guides', [page('/g/one')]), page('/z')];
+    const fromB = [page('/a'), group('Guides', [page('/g/one'), page('/g/two')]), group('API', [page('/api/x')]), page('/z')];
+    expect(mergeNavigationTrees(fromA, fromB)).toEqual([
+      page('/a'),
+      group('Guides', [page('/g/one'), page('/g/two')]),
+      group('API', [page('/api/x')]),
+      page('/z'),
+    ]);
+    // merging is stable: a rendering merged with itself is unchanged, and order comes from the source
+    expect(mergeNavigationTrees(fromB, fromB)).toEqual(fromB);
+    expect(mergeNavigationTrees(fromB, fromA)).toEqual(fromB);
+    // a title one rendering states fills a gap in the other, and neither overwrites the first
+    expect(mergeNavigationTrees([page('/a')], [page('/a', 'Alpha')])).toEqual([page('/a', 'Alpha')]);
+    expect(mergeNavigationTrees([page('/a', 'Alpha')], [page('/a', 'Other')])).toEqual([page('/a', 'Alpha')]);
+  });
+  it('gives a language variant its own container instead of folding it into the section above it', async () => {
+    // Every English page declares two sections; a French page declares only its own root. Keying the
+    // sidebar by path prefix alone would file French pages under the English section that contains them.
+    const sections = '<div data-gb-sections><a href="/docs">Documentation</a><a href="/docs/developers">Developers</a></div>';
+    const frSections = '<div data-gb-sections><a href="/docs/documentation/fr">Documentation (FR)</a></div>';
+    const aside = (links: Array<[string, string]>) => `<aside>${links.map(([h, t]) => `<a class="toclink" href="${h}">${t}</a>`).join('')}</aside>`;
+    const site = (async (input: any) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      const p = url.pathname;
+      if (p === '/docs/sitemap.xml') return new Response(`<urlset>${['/docs', '/docs/guides/one', '/docs/documentation/fr', '/docs/documentation/fr/demarrage'].map((u) => `<url><loc>http://8.8.8.8${u}</loc></url>`).join('')}</urlset>`, { status: 200, headers: { 'content-type': 'application/xml' } });
+      if (p.endsWith('.xml') || p.endsWith('.txt')) return new Response('nope', { status: 404 });
+      const body = p.startsWith('/docs/documentation/fr')
+        ? frSections + aside([['/docs/documentation/fr', 'Accueil'], ['/docs/documentation/fr/demarrage', 'D\u00e9marrage']])
+        // the English pages expand different branches of one sidebar
+        : sections + (p === '/docs' ? aside([['/docs', 'Home']]) : aside([['/docs', 'Home'], ['/docs/guides/one', 'Guide one']]));
+      return new Response(`<html><title>P</title>${body}</html>`, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+    }) as unknown as FetchImpl;
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/docs', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('gitbook') });
+    const tabs = (found.navigation ?? []).filter((node): node is Extract<typeof node, { type: 'group' }> => node.type === 'group');
+    expect(tabs.map((tab) => tab.label)).toEqual(['Documentation', 'Developers', 'Documentation (FR)']);
+    // the English tab carries the merged sidebar, and the French pages are not in it
+    const flatten = (nodes: any[]): string[] => nodes.flatMap((n) => n.type === 'page' ? [n.url] : flatten(n.children ?? []));
+    expect(flatten(tabs[0].children)).toEqual(['http://8.8.8.8/docs', 'http://8.8.8.8/docs/guides/one']);
+    expect(flatten(tabs[2].children)).toEqual(['http://8.8.8.8/docs/documentation/fr', 'http://8.8.8.8/docs/documentation/fr/demarrage']);
   });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);
