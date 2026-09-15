@@ -744,6 +744,11 @@ export function siteSectionNavigation(sections: readonly SiteSection[], sidebars
   return tabs.length >= 2 ? tabs : undefined;
 }
 
+/** Every page URL the tree already places, at any depth. */
+function pageKeysIn(nodes: DiscoveredNavigationNode[]): string[] {
+  return nodes.flatMap((node) => node.type === 'page' ? [navKey(node)] : pageKeysIn(node.children));
+}
+
 /** How a navigation node is identified across two renderings of the same sidebar. */
 function navKey(node: DiscoveredNavigationNode): string {
   return node.type === 'page' ? `p:${node.url ?? ''}` : `g:${node.label ?? ''}`;
@@ -758,7 +763,10 @@ function navKey(node: DiscoveredNavigationNode): string {
  * rather than inventing one — nodes are matched by identity, their order is preserved, and a node
  * only one rendering shows is inserted where that rendering puts it.
  */
-export function mergeNavigationTrees(a: DiscoveredNavigationNode[], b: DiscoveredNavigationNode[]): DiscoveredNavigationNode[] {
+export function mergeNavigationTrees(a: DiscoveredNavigationNode[], b: DiscoveredNavigationNode[], placed?: Set<string>): DiscoveredNavigationNode[] {
+  // One rendering may show a page at the top level that another shows inside a group. Keeping both
+  // would place it twice, so the first placement the merge reaches stands for the whole tree.
+  const seen = placed ?? new Set<string>(pageKeysIn(a));
   const out: DiscoveredNavigationNode[] = [];
   const keysOfA = new Set(a.map(navKey));
   const keysOfB = new Set(b.map(navKey));
@@ -766,10 +774,12 @@ export function mergeNavigationTrees(a: DiscoveredNavigationNode[], b: Discovere
   while (i < a.length || j < b.length) {
     const left = a[i]; const right = b[j];
     if (left && right && navKey(left) === navKey(right)) {
-      out.push(mergeNavigationNode(left, right)); i++; j++;
+      out.push(mergeNavigationNode(left, right, seen)); i++; j++;
     } else if (left && (!right || !keysOfB.has(navKey(left)))) {
       out.push(left); i++;
     } else if (right && !keysOfA.has(navKey(right))) {
+      if (right.type === 'page' && seen.has(navKey(right))) { j++; continue; }
+      if (right.type === 'page') seen.add(navKey(right));
       out.push(right); j++;
     } else if (left) { out.push(left); i++; } else if (right) { out.push(right); j++; }
   }
@@ -777,9 +787,9 @@ export function mergeNavigationTrees(a: DiscoveredNavigationNode[], b: Discovere
 }
 
 /** Two renderings of one node: children merge, and a label the other rendering states fills a gap. */
-function mergeNavigationNode(a: DiscoveredNavigationNode, b: DiscoveredNavigationNode): DiscoveredNavigationNode {
+function mergeNavigationNode(a: DiscoveredNavigationNode, b: DiscoveredNavigationNode, placed?: Set<string>): DiscoveredNavigationNode {
   if (a.type === 'group' && b.type === 'group') {
-    return { ...a, href: a.href ?? b.href, icon: a.icon ?? b.icon, description: a.description ?? b.description, children: mergeNavigationTrees(a.children, b.children) };
+    return { ...a, href: a.href ?? b.href, icon: a.icon ?? b.icon, description: a.description ?? b.description, children: mergeNavigationTrees(a.children, b.children, placed) };
   }
   if (a.type === 'page' && b.type === 'page') return { ...a, title: a.title ?? b.title };
   return a;
@@ -1171,7 +1181,10 @@ export async function discoverLiveSite(input: {
       // Where this page says it belongs. A page whose switcher names several sections belongs to the
       // one containing it; a page whose switcher names a single root — a language variant — belongs
       // to that root, which its own path would otherwise hide under the section above it.
-      const space = declared?.length === 1 ? declared[0] : sections ? sectionOfUrl(pageUrl, sections) : undefined;
+      // Resolved against the sections this page declares, not the site's: a translated page names its
+      // own variant of each section, and matching against the default variant's paths would file every
+      // translated page under the section whose path prefix it happens to share.
+      const space = (declared ? sectionOfUrl(pageUrl, declared) : undefined) ?? (sections ? sectionOfUrl(pageUrl, sections) : undefined);
       const dom = extractDomSidebarNavigation(response.body, pageUrl, origin, input.profile, canonicalHosts);
       if (dom) {
         navigationCandidates['dom-sidebar'] ??= dom;

@@ -656,6 +656,8 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
       group('API', [page('/api/x')]),
       page('/z'),
     ]);
+    // a page one rendering shows at the top level and another shows inside a group is placed once
+    expect(mergeNavigationTrees([group('G', [page('/dup')])], [page('/dup')])).toEqual([group('G', [page('/dup')])]);
     // merging is stable: a rendering merged with itself is unchanged, and order comes from the source
     expect(mergeNavigationTrees(fromB, fromB)).toEqual(fromB);
     expect(mergeNavigationTrees(fromB, fromA)).toEqual(fromB);
@@ -667,7 +669,8 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     // Every English page declares two sections; a French page declares only its own root. Keying the
     // sidebar by path prefix alone would file French pages under the English section that contains them.
     const sections = '<div data-gb-sections><a href="/docs">Documentation</a><a href="/docs/developers">Developers</a></div>';
-    const frSections = '<div data-gb-sections><a href="/docs/documentation/fr">Documentation (FR)</a></div>';
+    // the real site: a translated page names its own variant of every section, not just its own
+    const frSections = '<div data-gb-sections><a href="/docs/documentation/fr">Documentation (FR)</a><a href="/docs/developers">D\u00e9veloppeurs</a></div>';
     const aside = (links: Array<[string, string]>) => `<aside>${links.map(([h, t]) => `<a class="toclink" href="${h}">${t}</a>`).join('')}</aside>`;
     const site = (async (input: any) => {
       const url = new URL(typeof input === 'string' ? input : input.toString());
