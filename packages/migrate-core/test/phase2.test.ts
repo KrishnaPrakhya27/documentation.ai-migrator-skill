@@ -706,6 +706,16 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     await expect(assertPublicHost(new URL(`https://${bad}/a`), privateLookup)).rejects.toThrow(/non-public address/);
     await expect(assertPublicHost(new URL(`https://${bad}/b`), privateLookup)).rejects.toThrow(/non-public address/);
   });
+  it('does not read a platform redeploy as the customer editing the page', async () => {
+    const { sourceFingerprint } = await import('../src/scrape/drift.js');
+    const page = (dpl: string) => `<!DOCTYPE html><html data-dpl-id="p-${dpl}" lang="en">`
+      + `<link rel="stylesheet" href="https://static.example/_next/static/css/a.css?dpl=p-${dpl}"/>`
+      + `<body><h1>Custom hostnames</h1><p>The words a reader sees.</p></body></html>`;
+    // the same page either side of a deploy
+    expect(sourceFingerprint(page('39316fc2055b46cd1e13ff22ae9a36'))).toBe(sourceFingerprint(page('05cff0a03bebe979929823b1d69828')));
+    // an actual edit is still a difference
+    expect(sourceFingerprint(page('a').replace('The words a reader sees.', 'Different words.'))).not.toBe(sourceFingerprint(page('a')));
+  });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);
     expect(siteFileBases('https://acme.example/docs/')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);

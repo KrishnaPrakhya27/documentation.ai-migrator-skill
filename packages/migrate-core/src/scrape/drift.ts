@@ -19,6 +19,19 @@ const VOLATILE = [
   /\snonce="[^"]*"/gi,
   /\sdata-(?:build|buildid|build-id|timestamp|reactroot|nonce|csrf)(?:="[^"]*")?/gi,
   /<meta[^>]+name=["'](?:csrf-token|csrf-param|build-id|request-id)["'][^>]*>/gi,
+  // A deployment id: stamped on the root element and onto every asset URL as a cache key. It
+  // changes when the platform redeploys, which it may do while a run is reading the site, and it
+  // says nothing about the page — the same words, the same markup, a new build. Without this, one
+  // deploy mid-run reports hundreds of unchanged pages as edited by the customer.
+  /\sdata-(?:dpl|deployment)-id="[^"]*"/gi,
+  /([?&])dpl=[^"'&\s>]*/gi,
+  // Resource hints and stylesheets: build plumbing whose filenames carry a content hash, so every
+  // one of them changes when the platform rebuilds. They point at the bundle, never at what the
+  // page says, and <script> and <style> are already dropped for the same reason.
+  /<link\b[^>]*\brel=["'](?:preload|modulepreload|prefetch|preconnect|dns-prefetch|stylesheet)["'][^>]*>/gi,
+  // The generator meta names the platform and the build that rendered the page; the build half moves
+  // with every deploy. What generated a page is not what a page says.
+  /<meta[^>]+name=["']generator["'][^>]*>/gi,
 ];
 
 /**
@@ -26,7 +39,10 @@ const VOLATILE = [
  * the text, the markup structure or a link changes it.
  */
 export function sourceFingerprint(body: string): string {
-  let text = body;
+  // A rendered relative time ("14 hours ago") changes every hour while the page does not. The
+  // element and its machine-readable datetime stay, so an actual edit still moves the fingerprint;
+  // only the words counting the hours since are dropped.
+  let text = body.replace(/(<time\b[^>]*>)[\s\S]*?<\/time>/gi, '$1</time>');
   for (const pattern of VOLATILE) text = text.replace(pattern, ' ');
   return text.replace(/\s+/g, ' ').trim();
 }
