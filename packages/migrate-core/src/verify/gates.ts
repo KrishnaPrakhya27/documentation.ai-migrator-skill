@@ -318,6 +318,8 @@ export interface SourceEvidence {
   indexedRoutes?: string[];
   /** The asset manifest the conversion used, so a rehosted asset is compared by what it is and not by where it is served. */
   assets?: AssetManifest;
+  /** The source put through the losses the approved mapping rules declare, so a reviewed loss is not read as a difference. */
+  declaredLosses?: (doc: DocIR) => DocIR;
   /** Where the source's site-relative links land in the migrated site, so the source is compared as convert rewrote it. */
   links?: SiteLinks;
 }
@@ -612,7 +614,7 @@ export function runGates(input: GateInput): GateResult[] {
     });
   };
   const sourcePages = exact && evidence ? evidence.pages : [];
-  sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links, evidence!.assets)), (failures) => `${failures.length} page(s) differ from the published source`);
+  sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links, evidence!.assets, evidence!.declaredLosses)), (failures) => `${failures.length} page(s) differ from the published source`);
   sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page, evidence?.platform ?? 'generic')), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);
   sourceGate('html-reconciliation', evidence?.profile ? sourcePages.map((page) => htmlReconciliation(page, evidence.platform, evidence.profile!)) : sourcePages.map((page) => ({ pageId: page.pageId, path: page.path, pass: false, detail: `profile ${evidence?.platform ?? 'unknown'} declares no rendered-page selectors to reconcile against` })), (failures) => `${failures.length} page(s) disagree with the rendered source`);
   sourceGate('chrome-absent', sourcePages.map((page) => chromeAbsent(page, evidence?.profile?.chromeStrings ?? [])), (failures) => `${failures.length} page(s) contain platform chrome`);

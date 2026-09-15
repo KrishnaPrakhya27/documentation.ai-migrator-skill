@@ -10,7 +10,7 @@
 import { parse as parseYaml } from 'yaml';
 import { readFileSync } from 'node:fs';
 import type { Block, ComponentNode, DaiComponentNode, DocIR, Inline, QuarantinedNode, RawHtmlNode } from '../ir/types.js';
-import { walkBlocks, inlineText } from '../ir/types.js';
+import { walkBlocks, inlineText, isBlockWithChildren } from '../ir/types.js';
 import { Ledger } from '../ledger/dispositions.js';
 import { sanitizeHtmlToJsx } from './sanitize.js';
 import { blocksToMdx } from '../ir/to-dai-mdx.js';
@@ -379,4 +379,37 @@ export function collectComponents(doc: DocIR): ComponentNode[] {
   const out: ComponentNode[] = [];
   walkBlocks(doc.children, (n) => { if (n.type === 'component') out.push(n); });
   return out;
+}
+
+/**
+ * The source as the operator approved it at gate 2, for exact-fidelity comparison.
+ *
+ * `source-content-exact` rebuilds the source from the frozen bytes and compares it with the written
+ * output. The mapping rules the operator approved declare, per component, exactly which authored
+ * material does not survive: `drop` names props, `children: 'drop'` names a whole subtree (platform
+ * chrome such as a GitBook Assistant prompt), and `children: 'unwrap'` discards a wrapper's props
+ * while keeping its content in reading order. Comparing against a source that still carries them
+ * reports every such page as different, which is what happened on this GitBook migration: 16 of 41
+ * pages quarantined for losses that were reviewed and accepted at gate 2.
+ *
+ * Only those declared losses are applied. Handlers are deliberately NOT run here: a handler is the
+ * conversion under test, and re-running it on the source side would compare the conversion with
+ * itself. So a handler that lost a paragraph, a rename that lost a prop, or any loss no approved
+ * rule declared, all still fail the gate.
+ */
+export function applyDeclaredLosses(doc: DocIR, engine: RulesEngine): DocIR {
+  const strip = (blocks: Block[]): Block[] => blocks.flatMap((block): Block[] => {
+    if (block.type === 'list') return [{ ...block, children: block.children.map((li) => ({ ...li, children: strip(li.children) })) }];
+    if (block.type !== 'component') return isBlockWithChildren(block) ? [{ ...block, children: strip(block.children as Block[]) } as Block] : [block];
+    const rule = engine.findRule(block);
+    // A handler decides this node's shape; leave it exactly as the source stated it.
+    if (rule?.handler) return [{ ...block, children: strip(block.children) }];
+    if (rule?.children === 'drop') return [];
+    if (rule?.children === 'unwrap') return strip(block.children);
+    if (!rule?.drop?.length) return [{ ...block, children: strip(block.children) }];
+    const props = { ...block.props };
+    for (const prop of rule.drop) delete props[prop];
+    return [{ ...block, props, children: strip(block.children) }];
+  });
+  return { ...doc, children: strip(doc.children) };
 }

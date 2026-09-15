@@ -57,7 +57,7 @@ import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacemen
 import { documentationSiteSettings, withoutSourceBranding } from './nav/site-settings.js';
 import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
 import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor, type SiteLinks } from './urls/site-links.js';
-import { RulesEngine, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
+import { RulesEngine, applyDeclaredLosses, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
 import { Ledger } from './ledger/dispositions.js';
 import { DecisionLog } from './log/decisions.js';
@@ -886,7 +886,7 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink);
+        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink), engine);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
         const recordSiteLink = (url: string, source?: string): string => {
           const outcome = resolveSiteLink(url, source);
@@ -1095,7 +1095,16 @@ async function main() {
       // this, never only against the snapshot the same run produced.
       // Evidence is built for every source kind: a repository and an export froze their bytes too,
       // and certifying only live sites left the sources a customer migration most often uses unproven.
+      // The same rules convert applied: the source is compared as the operator approved it, so a
+      // declared loss (a dropped chrome subtree, an unwrapped wrapper's props, a prop the contract
+      // cannot express) is not re-reported here as a difference from the source.
+      const verifyEngine = new RulesEngine({
+        platform: tree.platform, mappings: loadMappings(mappingPaths(tree.platform)), plan: readComponentPlan(workspace),
+        ledger: new Ledger(join(workspace, 'plan')), log: new DecisionLog(join(workspace, 'plan')),
+        iframeHosts: existsSync(join(workspace, 'plan', 'assets.yaml')) ? (parseYaml(readFileSync(join(workspace, 'plan', 'assets.yaml'), 'utf8')) as { iframeHosts?: string[] }).iframeHosts : undefined,
+      });
       const sourceEvidence = buildSourceEvidence(workspace, tree);
+      if (sourceEvidence) sourceEvidence.declaredLosses = (d) => applyDeclaredLosses(d, verifyEngine);
       const gates = runGates({
         workspace, outputDir: join(workspace, 'output'), sourceEvidence, pinnedSourceManifest: s.hashes.sourceManifest, pinnedAcquisition: s.hashes.acquisition, pinnedOpenapi: s.hashes.openapi,
         // Gate 3 approves the report this run produces, so a local verify asks for gates 1 and 2;

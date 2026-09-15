@@ -30,11 +30,12 @@ function inlineShape(nodes: Inline[]): FidelityValue[] {
 
 /**
  * Props that only choose how a component looks: variant selectors (kind/type/style/theme/color), decoration
- * (icon/iconType/arrow), layout (columns/cols/horizontal) and initial state (defaultOpen). Losing one is a styling
- * change, never a content change. ParamField's `type` is the one content-bearing `type`; its rule copies it and the
+ * (icon/iconType/arrow), layout (columns/cols/horizontal) and initial state (defaultOpen). `titleType` is which
+ * heading level a title renders at, and the contract offers only p/h2/h3, so a source h4 title renders h3 with the
+ * same words. Losing one is a styling change, never a content change. ParamField's `type` is the one content-bearing `type`; its rule copies it and the
  * serialised-output gate proves it survives, so the comparator need not.
  */
-const VISUAL_PROPS = new Set(['arrow', 'class', 'className', 'color', 'columns', 'cols', 'defaultOpen', 'horizontal', 'icon', 'iconType', 'kind', 'style', 'theme', 'type']);
+const VISUAL_PROPS = new Set(['arrow', 'class', 'className', 'color', 'columns', 'cols', 'defaultOpen', 'horizontal', 'icon', 'iconType', 'kind', 'style', 'theme', 'titleType', 'type']);
 /** Source spellings of a target prop. An alias stands in only while the canonical prop is absent, so the two can never collide. */
 const PROP_ALIASES: Record<string, string> = { summary: 'title', label: 'title', img: 'image' };
 /** HTML data-* attributes are machine metadata (Mintlify's data-path is the asset's repository path), never rendered content. */
@@ -52,6 +53,44 @@ function contentProps(props: Record<string, string | number | boolean | null>): 
     semantic[canonical] = value;
   }
   return ordered(semantic);
+}
+
+/**
+ * A component that states a heading and one that states the same words as its title are the same
+ * page to a reader. GitBook steps carry no title and open with a heading; Documentation.AI's Step
+ * requires `title`, so the conversion promotes that heading. Folding a leading heading into an
+ * absent title canonicalises both spellings, on both sides of the comparison, so the words still
+ * have to match and a heading the conversion simply lost still fails.
+ *
+ * Only an absent title is filled: a component that states both keeps both, so neither can mask the other.
+ */
+function titleFold(props: FidelityValue, children: Block[]): { props: FidelityValue; children: Block[] } {
+  const stated = props as Record<string, FidelityValue>;
+  const [first, ...rest] = children;
+  if (stated.title !== undefined || first?.type !== 'heading') return { props, children };
+  const words = cleanText(inlineShape(first.children).map((node) => ((node as { value?: string }).value ?? '')).join(' '));
+  if (!words) return { props, children };
+  return { props: ordered({ ...stated, title: words }), children: rest };
+}
+
+/** A bare reference to a URL: the target's own address is all the author wrote. */
+const URL_PROPS = ['src', 'url', 'href'];
+
+/**
+ * An embed of a host that is not allowlisted for iframes stays a link to the same address, so the
+ * source's `<embed src="…"/>` and the output's paragraph-with-one-link state the same destination.
+ * Canonicalising both to the link spelling keeps the address under comparison: an embed whose target
+ * the conversion changed, or dropped, still fails.
+ *
+ * Narrow by construction: no children, and exactly one content prop, which must be an http(s) URL.
+ * A component that says anything else (an Iframe's title, a caption) is left alone.
+ */
+function bareUrlShape(props: FidelityValue, children: Block[]): FidelityValue[] | undefined {
+  const stated = Object.entries(props as Record<string, FidelityValue>);
+  if (children.length || stated.length !== 1) return undefined;
+  const [[key, value]] = stated;
+  if (!URL_PROPS.includes(key) || typeof value !== 'string' || !/^https?:\/\//i.test(value)) return undefined;
+  return [{ type: 'paragraph', children: [{ type: 'link', url: value, title: '', children: [{ type: 'text', value }] }] }];
 }
 
 /** A frame (or any captioned wrapper) around exactly one image, as the author sees it: a figure with a caption, or the bare image. */
@@ -81,13 +120,13 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
         ? [blocksShape([block.image], true)[0], ...(block.caption?.length ? [{ type: 'paragraph', children: [{ type: 'emphasis', children: inlineShape(block.caption) }] } as FidelityValue] : [])]
         : [{ type: 'figure', image: blocksShape([block.image], false)[0], caption: inlineShape(block.caption ?? []) }];
       case 'component': case 'dai': {
-        const framed = exactComponents ? undefined : framedImageShape(block);
+        if (exactComponents) return [{ type: 'component', name: block.name, props: ordered(block.props), children: blocksShape(block.children, true) }];
+        const framed = framedImageShape(block);
         if (framed) return framed;
-        return [{
-          type: 'component',
-          ...(exactComponents ? { name: block.name, props: ordered(block.props) } : { props: contentProps(block.props) }),
-          children: blocksShape(block.children, exactComponents),
-        }];
+        const bare = bareUrlShape(contentProps(block.props), block.children);
+        if (bare) return bare;
+        const folded = titleFold(contentProps(block.props), block.children);
+        return [{ type: 'component', props: folded.props, children: blocksShape(folded.children, false) }];
       }
       case 'html': return /^\s*<a\s+id=["'][^"']+["']\s*><\/a>\s*$/i.test(block.value) ? [] : [{ type: 'html', value: block.value.trim() }];
       case 'rawHtml': return [{ type: 'html', value: block.value.trim() }];

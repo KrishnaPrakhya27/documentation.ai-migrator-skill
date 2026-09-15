@@ -137,7 +137,7 @@ export function outputIr(page: RawSourcePage): DocIR | undefined {
  * component naming differences between platforms do not matter but text,
  * headings, links, images, code and component content props all do.
  */
-export function sourceContentExact(page: RawSourcePage, platform: string, profile?: ScrapeProfile, links?: SiteLinks, assets?: AssetManifest): SourceComparison {
+export function sourceContentExact(page: RawSourcePage, platform: string, profile?: ScrapeProfile, links?: SiteLinks, assets?: AssetManifest, declaredLosses?: (doc: DocIR) => DocIR): SourceComparison {
   const source = rawSourceIr(page, platform, profile, links);
   if (!source) return { pageId: page.pageId, path: page.path, pass: false, detail: 'no published Markdown was frozen for this page' };
   const output = outputIr(page);
@@ -147,7 +147,12 @@ export function sourceContentExact(page: RawSourcePage, platform: string, profil
   // the two sides *say* and not between where the bytes are served from; an asset the manifest does
   // not know keeps its source URL and still fails.
   const hosted = assets ? rewriteAssetRefs({ ...source, source: page.url ?? source.source }, assets) : source;
-  const difference = firstFidelityDifference(authoredContentSnapshot(hosted), authoredContentSnapshot(output));
+  // The mapping rules the operator approved at gate 2 declare which authored material does not
+  // survive: a wrapper's own props, a chrome subtree, a named prop the contract cannot express.
+  // The source is read through those same declarations, so a reviewed loss is not reported as a
+  // difference while every loss no rule declared still is.
+  const reviewed = declaredLosses ? declaredLosses(hosted) : hosted;
+  const difference = firstFidelityDifference(authoredContentSnapshot(reviewed), authoredContentSnapshot(output));
   return { pageId: page.pageId, path: page.path, pass: !difference, difference };
 }
 
