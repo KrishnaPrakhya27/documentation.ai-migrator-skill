@@ -186,6 +186,25 @@ describe('Markdown/MDX → IR', () => {
     rmSync(w, { recursive: true, force: true });
   });
 
+  it('reads raw HTML headings and rules as headings and rules, and never emits module syntax', () => {
+    const w = mkdtempSync(join(tmpdir(), 'dai-html-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const out = engine.resolveDoc(markdownToIr('import { X } from "/snippets/x.jsx"\n\n<div className="mt-4 rounded-xl">\n  <h1 className="text-xl">Overview</h1>\n</div>\n\n<hr />\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' }));
+    rmSync(w, { recursive: true, force: true });
+    const kinds: string[] = [];
+    walkBlocks(out.children, (n: any) => { kinds.push(n.type + (n.name ? ':' + n.name : '')); });
+    // the heading keeps its level and its text, so the page outline survives
+    const heading: any = [];
+    walkBlocks(out.children, (n: any) => { if (n.type === 'heading') heading.push(n); });
+    expect(heading).toHaveLength(1);
+    expect(heading[0].depth).toBe(1);
+    expect(inlineText(heading[0].children)).toBe('Overview');
+    expect(kinds).toContain('thematicBreak');
+    // the layout wrapper is gone, and module syntax never reaches the output
+    expect(kinds.some((k) => k.startsWith('component:'))).toBe(false);
+    expect(JSON.stringify(out.children)).not.toContain('snippets/x.jsx');
+  });
+
   it('keeps an operator decision across re-planning and recomputes a derivation', () => {
     // A rule added after the plan was written must take effect, or a migrator fix silently does nothing.
     expect(planEntryIsDecided(undefined)).toBe(false);

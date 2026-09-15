@@ -219,6 +219,37 @@ rules:
     # a published custom heading anchor: <div id="..."> wrapping the heading it names
     match: { name: div, props: { id: any } }
     handler: anchor-div-to-heading
+  # --- raw HTML the published Markdown carries; matched after mint/anchor-div claims an id'd div ---
+  - id: mint/html-h1
+    tier: T3
+    match: { name: h1 }
+    handler: html-heading-to-heading
+    drop: [className]
+  - id: mint/html-hr
+    tier: T2
+    match: { name: hr }
+    handler: html-rule-to-thematic-break
+  - id: mint/html-br
+    tier: T2
+    match: { name: br }
+    children: drop
+  - id: mint/html-label
+    tier: T2
+    # a styling wrapper around its own text; the text is what the source states
+    match: { name: label }
+    children: unwrap
+    drop: [className]
+  - id: mint/html-div
+    tier: T2
+    # a layout wrapper: Tailwind classes the target does not carry, around content that it does
+    match: { name: div }
+    children: unwrap
+    drop: [className]
+  - id: mint/mdx-esm
+    tier: T2
+    # import/export statements are module syntax, never page content, and never reach the output
+    match: { name: esm }
+    children: drop
   - id: mint/expandable
     tier: T1
     # Mintlify's own Expandable, which the target has too: the disclosure stays a disclosure

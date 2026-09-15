@@ -315,6 +315,20 @@ const HANDLERS: Record<string, RestructureHandler> = {
       lossy: [`<${node.name}> is a live demo and cannot be reproduced statically; it became a card linking to the working tool${rule.note ? ` — ${rule.note}` : ''}. Needs a customer-controlled home before cutover.`],
     };
   } },
+  /**
+   * A heading written as raw HTML is a heading. The level comes from the tag, so h1..h6 all read
+   * the same way, and the text is the heading's own - losing it to a fragment would take a page's
+   * outline (and its anchors) with it.
+   */
+  'html-heading-to-heading': { reads: [], run: (node) => {
+    const depth = Number(String(node.name ?? '').replace(/^h/i, ''));
+    const level = (Number.isInteger(depth) && depth >= 1 && depth <= 6 ? depth : 2) as 1 | 2 | 3 | 4 | 5 | 6;
+    const children = node.children.flatMap((child) => (child.type === 'paragraph' || child.type === 'heading' ? child.children : []));
+    if (!children.length) return quarantined(node, 'a heading states no text');
+    return { blocks: [{ id: node.id, type: 'heading', depth: level, children }] };
+  } },
+  /** A horizontal rule written as raw HTML is a thematic break. */
+  'html-rule-to-thematic-break': { reads: [], run: (node) => ({ blocks: [{ id: node.id, type: 'thematicBreak' }] }) },
   /** A view is one of several alternatives a reader picks between; without a wrapper to group siblings, each becomes its own disclosure. */
   'view-to-expandable': { reads: ['title', 'icon'], run: (node, rule) => {
     const title = typeof node.props.title === 'string' && node.props.title.trim() ? node.props.title.trim() : 'View';
@@ -428,7 +442,10 @@ export class RulesEngine {
     const matched = this.findRule(node);
     const dropped = new Set([...(matched?.drop ?? []), ...(matched?.dropWhenExpression ?? [])]);
     const blocking = expressions.filter((name) => !dropped.has(name));
-    if (blocking.length && plan?.status !== 'approved') {
+    // A rule that emits nothing cannot carry an expression into the output either, so a node the
+    // rule drops outright - MDX import/export syntax, which is never page content - is not held here.
+    const emitsNothing = matched?.children === 'drop' && !matched.to && !matched.handler;
+    if (blocking.length && !emitsNothing && plan?.status !== 'approved') {
       return this.quarantine(node, pageId, `source MDX contains a non-literal expression (${blocking.join(', ')}); explicit reviewed approval is required`);
     }
 
