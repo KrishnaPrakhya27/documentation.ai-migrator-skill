@@ -62,7 +62,13 @@ export const EXACT_FAMILY_GATE_IDS = [
 ] as const;
 
 /** HTML elements whose subtree is never authored content, so a rule may drop them in exact mode; dropping anything else is an authored exclusion. */
-export const HTML_CHROME_ELEMENTS: ReadonlySet<string> = new Set(['script', 'style']);
+/**
+ * Nodes that carry nothing an author wrote, so a rule may drop one without removing content.
+ * `esm` is MDX's own `import`/`export` syntax: module wiring, not prose, and the one kind of node
+ * a static target must never emit. It belongs here with script and style rather than being counted
+ * as authored text an exact migration silently lost.
+ */
+export const HTML_CHROME_ELEMENTS: ReadonlySet<string> = new Set(['script', 'style', 'esm']);
 
 /** A GitBook Assistant prompt (`<button data-action="ask">`) works only inside GitBook: platform chrome, like script and style. */
 function isPlatformChromeButton(block: Block): boolean {
