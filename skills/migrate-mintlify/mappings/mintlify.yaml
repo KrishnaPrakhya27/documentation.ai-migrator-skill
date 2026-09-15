@@ -123,10 +123,10 @@ rules:
     handler: tree-file-to-text
     drop: [highlight]
   - id: mint/color-row
-    tier: T2
+    tier: T3
+    # the row's title is authored text, so it is carried rather than dropped
     match: { name: Color.Row }
-    to: { name: Columns }
-    drop: [title]
+    handler: color-row-to-titled-group
   - id: mint/color-item
     tier: T3
     match: { name: Color.Item }
@@ -158,6 +158,29 @@ rules:
     tier: T3
     match: { name: Prompt }
     handler: prompt-to-code
+  - id: mint/view
+    tier: T3
+    match: { name: View }
+    handler: view-to-expandable
+  - id: mint/color-wrapper
+    tier: T2
+    # a container around the swatch rows; the rows carry the meaning
+    match: { name: Color }
+    children: unwrap
+  - id: mint/panel
+    tier: T2
+    # the right-hand panel is a layout slot; its components belong to the page
+    match: { name: Panel }
+    children: unwrap
+  - id: mint/column
+    tier: T2
+    match: { name: Column }
+    children: unwrap
+  - id: mint/icon
+    tier: T2
+    # a named glyph from Mintlify's icon set, which the target has no equivalent for
+    match: { name: Icon }
+    children: drop
   - id: mint/anchor-div
     tier: T3
     # a published custom heading anchor: <div id="..."> wrapping the heading it names

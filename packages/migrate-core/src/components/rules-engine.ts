@@ -127,6 +127,9 @@ function matches(rule: MappingRule, node: ComponentNode): boolean {
   return true;
 }
 
+
+
+
 /** The plain text a run of blocks states, as one string; undefined when they state none. */
 function blocksText(blocks: readonly Block[]): string | undefined {
   const parts: string[] = [];
@@ -250,6 +253,18 @@ const HANDLERS: Record<string, RestructureHandler> = {
     const lossy = repo ? ['the repository card no longer reads live stars and forks from the GitHub API'] : [];
     return { blocks: [{ id: node.id, type: 'dai', name: 'Card', props, children, rule: rule.id }], lossy };
   } },
+  /**
+   * A row of swatches is a titled group: "Primary", "Secondary". That title is authored content,
+   * so it is carried onto a disclosure that holds the row rather than dropped - dropping it would
+   * lose text the source states, which no tier makes acceptable. The row opens by default, so it
+   * still reads as a labelled row rather than something the reader has to find.
+   */
+  'color-row-to-titled-group': { reads: ['title'], run: (node, rule) => {
+    const title = typeof node.props.title === 'string' && node.props.title.trim() ? node.props.title.trim() : undefined;
+    const columns: Block = { id: `${node.id}:cols`, type: 'dai', name: 'Columns', props: { cols: 3 }, children: node.children, rule: rule.id };
+    if (!title) return { blocks: [columns] };
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Expandable', props: { title, defaultOpen: true }, children: [columns], rule: rule.id }] };
+  } },
   /** A colour swatch is a named value: the name titles a card and the value is a code block, which the target renders with a copy button. */
   'color-item-to-card': { reads: ['name', 'value'], run: (node, rule) => {
     const name = typeof node.props.name === 'string' ? node.props.name : '';
@@ -273,6 +288,11 @@ const HANDLERS: Record<string, RestructureHandler> = {
     if (description) blocks.push({ id: `${node.id}:desc`, type: 'paragraph', children: [{ id: `${node.id}:desc:t`, type: 'text', value: description }] });
     blocks.push({ id: `${node.id}:code`, type: 'code', value, lang: 'text' });
     return { blocks, lossy: ['the prompt\'s "open in editor" actions are not carried; the text stays copyable'] };
+  } },
+  /** A view is one of several alternatives a reader picks between; without a wrapper to group siblings, each becomes its own disclosure. */
+  'view-to-expandable': { reads: ['title', 'icon'], run: (node, rule) => {
+    const title = typeof node.props.title === 'string' && node.props.title.trim() ? node.props.title.trim() : 'View';
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Expandable', props: { title }, children: node.children, rule: rule.id }], lossy: ['the page-level view switcher became one disclosure per view'] };
   } },
   /** Frame around one image: a figure when it carries a caption, otherwise the bare image (the frame itself is presentation). */
   'frame-to-image': { reads: ['caption'], run: (node) => {

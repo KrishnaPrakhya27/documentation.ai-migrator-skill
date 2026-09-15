@@ -689,10 +689,61 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     return converted.length ? mapBlocks(converted, { inline: (n) => (n.type === 'link' ? { ...n, url: readmeLinkTarget(n.url) } : n) }) : undefined;
   };
 
+  /**
+   * A table written as raw HTML in Markdown. Published Markdown carries <table> with the usual
+   * thead/tbody/tr/th/td, which otherwise reach the plan as eight separate unmapped components and
+   * are preserved as fragments - keeping the look and losing the structure every later stage reads.
+   * This is the same conversion from-html performs, done here because the element arrives as MDX.
+   *
+   * A merged cell has no expression in a Markdown table, so a table holding one is left alone for a
+   * person to decide rather than silently reshaped into a grid the source does not state.
+   */
+  const htmlTableFlow = (node: any, path: number[]): Block[] | undefined => {
+    if (String(node.name ?? '').toLowerCase() !== 'table') return undefined;
+    const attr = (element: any, name: string): string | undefined =>
+      (element.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && String(a.name).toLowerCase() === name)?.value;
+    const named = (element: any, names: string[]): boolean =>
+      (element?.type === 'mdxJsxFlowElement' || element?.type === 'mdxJsxTextElement') && names.includes(String(element.name ?? '').toLowerCase());
+    let merged = false;
+    const rows: TableRowNode[] = [];
+    const collect = (children: any[], header: boolean, p: number[]): void => {
+      children.forEach((child: any, index: number) => {
+        if (named(child, ['thead'])) collect(child.children ?? [], true, [...p, index]);
+        else if (named(child, ['tbody', 'tfoot'])) collect(child.children ?? [], header, [...p, index]);
+        else if (named(child, ['tr'])) {
+          // Cells written on adjacent lines are inline, so mdast wraps them in a paragraph inside
+          // the row; cells separated by blank lines are flow. Both spellings are the same row.
+          const found: any[] = [];
+          const gather = (nodes: any[]): void => {
+            for (const candidate of nodes) {
+              if (named(candidate, ['td', 'th'])) found.push(candidate);
+              else if (candidate?.children) gather(candidate.children);
+            }
+          };
+          gather(child.children ?? []);
+          let isHeader = header;
+          const cells: TableCellNode[] = found.map((cell: any, cellIndex: number) => {
+            if (attr(cell, 'colspan') || attr(cell, 'rowspan')) merged = true;
+            if (String(cell.name).toLowerCase() === 'th') isHeader = true;
+            const at = [...p, index, cellIndex];
+            return { id: idOf(cell, at), type: 'tableCell' as const, children: flowInlines(cell.children ?? [], at) ?? [] };
+          });
+          if (cells.length) rows.push({ id: idOf(child, [...p, index]), type: 'tableRow', isHeader, children: cells });
+        }
+      });
+    };
+    collect(node.children ?? [], false, path);
+    if (merged || !rows.length) return undefined;
+    return [{ id: idOf(node, path), type: 'table', children: rows }];
+  };
+
   const jsxFlow = (node: any, path: number[]): Block[] => {
     if (isImageElement(node)) return [imageFromMdx(node, path)];
     if (opts.platform === 'gitbook') { const converted = gitbookFlow(node, path); if (converted) return converted; }
     if (opts.platform === 'readme') { const converted = readmeFlow(node, path); if (converted) return converted; }
+    // After the platform's own reading: GitBook and ReadMe give a <table> meanings of their own
+    // (a row of cards, a button), and only a table nothing else claimed is read as a plain table.
+    { const converted = htmlTableFlow(node, path); if (converted) return converted; }
     const importPath = node.name ? imports.get(node.name) : undefined;
     if (importPath && /\.mdx?$/.test(importPath) && !(node.attributes ?? []).length && opts.resolveSnippet) {
       const body = opts.resolveSnippet(importPath);

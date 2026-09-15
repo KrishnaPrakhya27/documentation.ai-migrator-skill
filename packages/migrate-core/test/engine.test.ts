@@ -9,7 +9,7 @@ import { blocksToMdx, docToMdx, frontmatterToYaml, inlineToMdx } from '../src/ir
 import { RulesEngine, loadMappings, collectComponents, planEntryIsDecided } from '../src/components/rules-engine.js';
 import { Ledger, summarize } from '../src/ledger/dispositions.js';
 import { DecisionLog } from '../src/log/decisions.js';
-import { walkBlocks, type DocIR } from '../src/ir/types.js';
+import { walkBlocks, inlineText, type DocIR } from '../src/ir/types.js';
 import { D360_RECOGNISERS, parseMetadata } from '../src/adapters/document360.js';
 import { clusterComponents } from '../src/components/signature.js';
 import { validateMdx } from '@dai/content-contract';
@@ -95,6 +95,47 @@ describe('Markdown/MDX → IR', () => {
     expect(byName('Card').some((c) => c.props.href === 'https://github.com/anthropics/claude-code')).toBe(true);
     // and nothing survives as an unmapped source component
     expect(JSON.stringify(out.children)).not.toContain('"name":"Tree.Folder"');
+  });
+
+  it('rebuilds a raw HTML table into a table rather than preserving it as a fragment', () => {
+    // exactly as the published Markdown writes it: blank lines between the sections, none inside a row
+    const md = [
+      '<table>',
+      '  <colgroup>',
+      '    <col width="25%" />',
+      '',
+      '    <col width="75%" />',
+      '  </colgroup>',
+      '',
+      '  <thead>',
+      '    <tr>',
+      '      <th>Name</th>',
+      '      <th>Type</th>',
+      '    </tr>',
+      '  </thead>',
+      '',
+      '  <tbody>',
+      '    <tr>',
+      '      <td>limit</td>',
+      '      <td>number</td>',
+      '    </tr>',
+      '  </tbody>',
+      '</table>',
+    ].join('\n');
+    const doc = markdownToIr(md + '\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' });
+    const w = mkdtempSync(join(tmpdir(), 'dai-table-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const out = engine.resolveDoc(doc);
+    rmSync(w, { recursive: true, force: true });
+    const tables: any[] = [];
+    walkBlocks(out.children, (n: any) => { if (n.type === 'table') tables.push(n); });
+    expect(tables).toHaveLength(1);
+    expect(tables[0].children).toHaveLength(2);
+    expect(tables[0].children[0].isHeader).toBe(true);
+    expect(inlineText(tables[0].children[0].children[0].children)).toBe('Name');
+    expect(inlineText(tables[0].children[1].children[1].children)).toBe('number');
+    // the HTML scaffolding itself does not survive as unmapped components
+    for (const tag of ['"name":"td"', '"name":"tr"', '"name":"thead"']) expect(JSON.stringify(out.children)).not.toContain(tag);
   });
 
   it('keeps an operator decision across re-planning and recomputes a derivation', () => {
