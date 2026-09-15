@@ -289,6 +289,26 @@ const HANDLERS: Record<string, RestructureHandler> = {
     blocks.push({ id: `${node.id}:code`, type: 'code', value, lang: 'text' });
     return { blocks, lossy: ['the prompt\'s "open in editor" actions are not carried; the text stays copyable'] };
   } },
+  /**
+   * A live demo whose interactivity is the content: a generator, a playground, a counter. Nothing
+   * static reproduces one, and a static shell of a generator looks broken rather than merely
+   * reduced, so it becomes a card linking to the working tool - in the widget's own position,
+   * because the prose around it points at it ("use the generator below").
+   *
+   * The link is to the source site because no customer-controlled home exists yet. That is
+   * temporary by construction, so every one of these is reported as needing a permanent home
+   * before cutover rather than passing quietly as a finished mapping.
+   */
+  'live-demo-to-card': { reads: [], run: (node, rule) => {
+    const title = typeof rule.to?.props?.title === 'string' ? rule.to.props.title : node.name;
+    const href = typeof rule.to?.props?.href === 'string' ? rule.to.props.href : undefined;
+    const props: Record<string, string | number | boolean | null> = { title };
+    if (href) props.href = href;
+    return {
+      blocks: [{ id: node.id, type: 'dai', name: 'Card', props, children: [], rule: rule.id }],
+      lossy: [`<${node.name}> is a live demo and cannot be reproduced statically; it became a card linking to the working tool${rule.note ? ` — ${rule.note}` : ''}. Needs a customer-controlled home before cutover.`],
+    };
+  } },
   /** A view is one of several alternatives a reader picks between; without a wrapper to group siblings, each becomes its own disclosure. */
   'view-to-expandable': { reads: ['title', 'icon'], run: (node, rule) => {
     const title = typeof node.props.title === 'string' && node.props.title.trim() ? node.props.title.trim() : 'View';

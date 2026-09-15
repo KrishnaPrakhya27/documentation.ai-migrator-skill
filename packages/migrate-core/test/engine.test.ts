@@ -138,6 +138,30 @@ describe('Markdown/MDX → IR', () => {
     for (const tag of ['"name":"td"', '"name":"tr"', '"name":"thead"']) expect(JSON.stringify(out.children)).not.toContain(tag);
   });
 
+  it('replaces a live demo with a card in its own place, once per widget across every locale', () => {
+    // The prose points at the widget ("use the generator below"), so the card takes its position.
+    const page = (path: string) => markdownToIr(`Use the generator below.\n\n<VercelJsonGenerator />\n\nAfter that, redeploy.\n`, { platform: 'mintlify', file: path, pageId: path });
+    const w = mkdtempSync(join(tmpdir(), 'dai-demo-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const shapes = ['en.mdx', 'fr.mdx', 'es.mdx', 'zh.mdx'].map((path) => {
+      const out = engine.resolveDoc(page(path));
+      const cards: any[] = [];
+      walkBlocks(out.children, (n: any) => { if (n.type === 'dai' && n.name === 'Card') cards.push(n); });
+      return { at: out.children.findIndex((b: any) => b.type === 'dai' && b.name === 'Card'), cards };
+    });
+    rmSync(w, { recursive: true, force: true });
+    // one card, titled for the thing it replaces, so "the generator below" still resolves
+    expect(shapes[0].cards).toHaveLength(1);
+    expect(shapes[0].cards[0].props).toMatchObject({ title: 'Vercel rewrites generator' });
+    // it sits where the widget sat: after the sentence that points at it
+    expect(shapes[0].at).toBe(1);
+    // and every locale resolves identically - one decision per widget, not one per occurrence
+    for (const shape of shapes.slice(1)) {
+      expect(shape.at).toBe(shapes[0].at);
+      expect(shape.cards[0].props).toEqual(shapes[0].cards[0].props);
+    }
+  });
+
   it('keeps an operator decision across re-planning and recomputes a derivation', () => {
     // A rule added after the plan was written must take effect, or a migrator fix silently does nothing.
     expect(planEntryIsDecided(undefined)).toBe(false);

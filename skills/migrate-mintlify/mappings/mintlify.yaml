@@ -181,6 +181,37 @@ rules:
     # a named glyph from Mintlify's icon set, which the target has no equivalent for
     match: { name: Icon }
     children: drop
+  # --- live demos: one decision per widget, applied to every locale, in the widget's own position ---
+  - id: mint/demo-vercel-json
+    tier: T3
+    match: { name: VercelJsonGenerator }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Vercel rewrites generator", href: "https://www.mintlify.com/docs/deploy/vercel" } }
+    note: "CONTENT LOSS, not convenience: the page states \"use the generator below\" and shows no worked vercel.json, so the generator is the only way to obtain the output"
+  - id: mint/demo-color-generator
+    tier: T3
+    match: { name: ColorGenerator }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Colour generator example", href: "https://www.mintlify.com/docs/customize/react-components" } }
+    note: "convenience only: the component's full source is in an adjacent mdx fence on the same page"
+  - id: mint/demo-counter
+    tier: T3
+    match: { name: Counter }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Interactive counter example", href: "https://www.mintlify.com/docs/customize/react-components" } }
+    note: "convenience only: the component's full source is in an adjacent mdx fence on the same page"
+  - id: mint/demo-assistant-playground
+    tier: T3
+    match: { name: AssistantWidgetPlayground }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Assistant widget playground", href: "https://www.mintlify.com/docs/assistant/widget" } }
+    note: "convenience only: the installation snippets are adjacent on the same page"
+  - id: mint/demo-download-pdf
+    tier: T3
+    match: { name: DownloadPDFButton }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Export this documentation as PDF", href: "https://www.mintlify.com/docs/optimize/pdf-exports" } }
+    note: "convenience only: the dashboard export steps are on the same page"
   - id: mint/anchor-div
     tier: T3
     # a published custom heading anchor: <div id="..."> wrapping the heading it names
