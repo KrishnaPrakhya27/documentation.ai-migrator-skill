@@ -6,7 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { Response as UndiciResponse } from 'undici';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { CanonicalHosts, Fetcher, discoverSitemaps, type FetchImpl } from '../src/scrape/fetcher.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, siteFileBases, sitemapStructureHint } from '../src/scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
 import { getProfile, profileHostAliases } from '../src/scrape/profiles.js';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { htmlAdapterOptions } from '../src/scrape/profiles.js';
@@ -617,6 +617,32 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     const found = await discoverLiveSite({ seedUrl: SITE, fetcher, profile: getProfile('mintlify') });
     // The pages that index lists are not merely unreachable, they are unknown; exact mode stops on this.
     expect(found.structuralIssues?.join(' ')).toMatch(/_llms\/en\.md.*pages it lists are unknown/);
+  });
+  it('keeps a link-graph page outside the site\u2019s base out of scope, but admits what the site declares', async () => {
+    // The host serves marketing pages at its root and the documentation under /docs. Docs pages link
+    // to /pricing; that link does not make it a documentation page. A page the sitemap declares is
+    // this site's own statement and is admitted wherever it lives.
+    const site = (async (input: any) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.pathname === '/docs/sitemap.xml') return new Response('<urlset><url><loc>http://8.8.8.8/docs/quickstart</loc></url><url><loc>http://8.8.8.8/handbook/declared</loc></url></urlset>', { status: 200, headers: { 'content-type': 'application/xml' } });
+      if (url.pathname.endsWith('.xml') || url.pathname.endsWith('.txt')) return new Response('nope', { status: 404 });
+      if (url.pathname === '/docs') return new Response('<html><title>Docs</title><a href="/docs/quickstart">Q</a><a href="/pricing">Pricing</a><a href="/join">Join</a></html>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+      return new Response('<html><title>Page</title></html>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+    }) as unknown as FetchImpl;
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/docs', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('gitbook') });
+    // /pricing and /join were linked but are outside the site; /handbook/declared is outside too but the sitemap declares it
+    expect(found.pages.map((page) => page.url).sort()).toEqual([
+      'http://8.8.8.8/docs', 'http://8.8.8.8/docs/quickstart', 'http://8.8.8.8/handbook/declared',
+    ]);
+  });
+  it('places a URL inside or outside the site base', () => {
+    expect(withinSiteBase('https://acme.example/docs', 'https://acme.example/docs/')).toBe(true);
+    expect(withinSiteBase('https://acme.example/docs/a/b', 'https://acme.example/docs/')).toBe(true);
+    expect(withinSiteBase('https://acme.example/docsearch', 'https://acme.example/docs/')).toBe(false);
+    expect(withinSiteBase('https://acme.example/pricing', 'https://acme.example/docs/')).toBe(false);
+    expect(withinSiteBase('https://other.example/docs/a', 'https://acme.example/docs/')).toBe(false);
+    // a site published at the origin root contains everything the host serves
+    expect(withinSiteBase('https://acme.example/anything', 'https://acme.example/')).toBe(true);
   });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);

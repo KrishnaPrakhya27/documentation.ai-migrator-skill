@@ -282,6 +282,17 @@ export function siteFileBases(seedUrl: string, limit = 4): string[] {
 }
 
 /**
+ * Whether a URL sits inside the site's own base path. `https://acme.example/docs/`
+ * contains `/docs` itself and everything under it, and nothing else the host serves.
+ */
+export function withinSiteBase(url: string, base: string): boolean {
+  const path = new URL(url).pathname.replace(/\/$/, '');
+  const basePath = new URL(base).pathname.replace(/\/$/, '');
+  if (new URL(url).origin !== new URL(base).origin) return false;
+  return basePath === '' || path === basePath || path.startsWith(`${basePath}/`);
+}
+
+/**
  * Whether a response still belongs to the site being migrated. A site-level
  * file that redirects to another host is that host's file, not this site's:
  * `gitbook.com/llms.txt` serves the marketing site's index, which lists
@@ -871,6 +882,13 @@ export async function discoverLiveSite(input: {
     }
   };
 
+  /**
+   * Where the site's own declarations live, which is where the site is rooted: the directory
+   * serving its llms.txt or its sitemap. Derived from what answered rather than from the seed
+   * path, which may be a deep page or a file and names no root. Undefined until those are read,
+   * and left undefined when the site declares neither, so the crawl is never narrowed on a guess.
+   */
+  let siteBase: string | undefined;
   const add = (candidate: string, reason: string, base = input.seedUrl, meta: { sitemap?: SitemapEntry; locale?: string; title?: string; description?: string; sidebarTitle?: string; domSidebarTitle?: string; llms?: LlmsEntry; groupHint?: string[] } = {}) => {
     const normalised = normaliseDiscoveryUrl(candidate, base, origin, canonicalHosts);
     if (!normalised || !isDocumentCandidate(normalised, input.profile.platform)) return;
@@ -879,6 +897,11 @@ export async function discoverLiveSite(input: {
     // and admitting it here wastes the crawl budget before it can be discarded.
     if (PUBLISHED_MARKDOWN.test(new URL(normalised).pathname)) return;
     const url = canonicalTarget(normalised);
+    // A page the crawl only reached by following a link, lying outside the site's own base path,
+    // belongs to whatever else the host publishes rather than to this site: one host serves a
+    // marketing site at its root and the documentation under /docs. What the site declares for
+    // itself — its sitemap, its llms.txt — is admitted wherever it lives.
+    if (reason === 'link-graph' && siteBase && !records.has(url) && !withinSiteBase(url, siteBase)) return;
     let record = records.get(url);
     if (!record) {
       if (records.size >= limit) { refusedByLimit++; return; }
@@ -941,6 +964,13 @@ export async function discoverLiveSite(input: {
     for (const entry of llms.entries) add(pageUrlOfLlmsEntry(entry), 'llms-txt', llms.url, { title: entry.title, description: entry.description, llms: entry });
   }
   const sitemaps = await discoverSitemaps(input.fetcher, origin, { maxUrls: limit, bases: siteFileBases(input.seedUrl) });
+  // The shallowest directory that served a declaration is the site root; when two levels both answer,
+  // the shallower wins so the crawl is widened rather than narrowed.
+  const declarationDirs = [
+    ...(llms ? [llms.url] : []),
+    ...sitemaps.sources.filter((source) => new URL(source).hostname.toLowerCase() === seed.hostname.toLowerCase()),
+  ].map((source) => new URL('.', source).toString());
+  siteBase = declarationDirs.sort((a, b) => new URL(a).pathname.split('/').length - new URL(b).pathname.split('/').length)[0];
   failures.push(...sitemaps.failures.map((failure) => ({ ...failure, error: `sitemap: ${failure.error}` })));
   for (const entry of sitemaps.entries) {
     add(entry.url, 'sitemap', input.seedUrl, { sitemap: entry });
