@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { markdownToIr } from '../src/ir/from-markdown.js';
 import { blocksToMdx, docToMdx, frontmatterToYaml, inlineToMdx } from '../src/ir/to-dai-mdx.js';
-import { RulesEngine, loadMappings, collectComponents } from '../src/components/rules-engine.js';
+import { RulesEngine, loadMappings, collectComponents, planEntryIsDecided } from '../src/components/rules-engine.js';
 import { Ledger, summarize } from '../src/ledger/dispositions.js';
 import { DecisionLog } from '../src/log/decisions.js';
 import { walkBlocks, type DocIR } from '../src/ir/types.js';
@@ -55,6 +55,18 @@ describe('Markdown/MDX → IR', () => {
     expect(JSON.stringify(doc)).not.toContain('dangerous.call()');
     expect(JSON.stringify(doc)).toContain('expression:executable');
     expect(doc.children.some((x) => x.type === 'table')).toBe(true);
+  });
+
+  it('keeps an operator decision across re-planning and recomputes a derivation', () => {
+    // A rule added after the plan was written must take effect, or a migrator fix silently does nothing.
+    expect(planEntryIsDecided(undefined)).toBe(false);
+    expect(planEntryIsDecided({ cluster: 'a', tier: 'T7', status: 'needs-review' })).toBe(false);
+    expect(planEntryIsDecided({ cluster: 'a', tier: 'T1', status: 'auto' })).toBe(false);
+    // Anything a person put their name to, or decided outright, is theirs and survives untouched.
+    expect(planEntryIsDecided({ cluster: 'a', tier: 'T7', status: 'needs-review', reviewer: 'someone' })).toBe(true);
+    for (const status of ['approved', 'excluded', 'quarantined'] as const) {
+      expect(planEntryIsDecided({ cluster: 'a', tier: 'T7', status })).toBe(true);
+    }
   });
 
   it('reads a data literal as data and still refuses code', () => {

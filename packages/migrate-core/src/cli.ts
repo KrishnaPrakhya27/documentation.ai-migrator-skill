@@ -60,7 +60,7 @@ import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacemen
 import { documentationSiteSettings, withoutSourceBranding } from './nav/site-settings.js';
 import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
 import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor, type SiteLinks } from './urls/site-links.js';
-import { RulesEngine, applyDeclaredLosses, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
+import { RulesEngine, applyDeclaredLosses, loadMappings, collectComponents, planEntryIsDecided, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
 import { Ledger } from './ledger/dispositions.js';
 import { DecisionLog } from './log/decisions.js';
@@ -765,8 +765,9 @@ async function main() {
       const existing = existsSync(planPath) ? (parseYaml(readFileSync(planPath, 'utf8')) as { components: ComponentPlanEntry[] }).components : [];
       const byCluster = new Map(existing.map((e) => [e.cluster, e]));
       const components = clusters.map((c) => {
+        // A decision the operator made is kept; a derivation is recomputed against current rules.
         const prev = byCluster.get(c.cluster);
-        if (prev) return prev;
+        if (planEntryIsDecided(prev)) return prev!;
         const rule = engine.findRule({ id: 'x', type: 'component', name: c.signature.name, platform: c.signature.platform, props: Object.fromEntries(Object.entries(c.signature.props).map(([k, b]) => [k, b.startsWith('enum:') ? b.slice(5) : b === 'null' ? null : 'x'])), children: [], styleDeps: c.signature.styleDeps });
         const hasExpression = c.signature.styleDeps.some((x) => x.startsWith('expression:'));
         const entry: ComponentPlanEntry & { count: number; signature: unknown } = {

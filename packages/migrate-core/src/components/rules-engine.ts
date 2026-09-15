@@ -51,6 +51,19 @@ export interface ComponentPlanEntry {
   reason?: string;
 }
 
+/**
+ * Whether a plan entry records a decision a person made, rather than something the
+ * migrator derived. Only a decision survives re-planning: an entry still sitting at
+ * `auto` or `needs-review` with nobody named against it is a derivation, and a mapping
+ * rule added after the plan was first written has to be able to take effect. Without
+ * this a migrator fix looks applied, re-runs clean, and changes nothing.
+ */
+export function planEntryIsDecided(entry?: ComponentPlanEntry): boolean {
+  if (!entry) return false;
+  if (entry.reviewer) return true;
+  return entry.status === 'approved' || entry.status === 'excluded' || entry.status === 'quarantined';
+}
+
 export interface EngineOptions {
   platform: string;
   mappings: MappingTable[];
