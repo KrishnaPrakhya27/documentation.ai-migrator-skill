@@ -49,9 +49,19 @@ function pathOf(location: string): string {
 }
 
 /** Public-path spellings a source repository may use for one page file. */
-function pathCandidates(path: string): string[] {
+/**
+ * The paths a link may spell this page as. In a repository `foo/index.md` and `foo/readme.md` are
+ * both the page at `foo`, so the bare directory is one of its spellings.
+ *
+ * A crawled site has no filenames: the URL is the route. Mintlify's docs publish an overview at
+ * `/docs/migration` and a page about migrating from ReadMe at `/docs/migration/readme`, and
+ * stripping the last segment there would claim one page answers to the other's address - which is
+ * how two real pages collided on a path neither of them shares.
+ */
+function pathCandidates(path: string, fromFilenames: boolean): string[] {
   const exact = normalisePath(path);
   const withoutExtension = normalisePath(exact.replace(/\.(?:mdx?|html?)$/i, ''));
+  if (!fromFilenames) return [...new Set([exact, withoutExtension])];
   const withoutIndex = normalisePath(withoutExtension.replace(/\/(?:index|readme)$/i, ''));
   return [...new Set([exact, withoutExtension, withoutIndex])];
 }
@@ -75,8 +85,8 @@ function sourceBase(page: Tree['pages'][number]): string | undefined {
 export function siteLinksFor(tree: Tree, options: { unmigrated?: 'keep' | 'source'; sourcePages?: string[]; hosts?: string[] } = {}): SiteLinks {
   const routes: Record<string, string> = {};
   const sourceBases: Record<string, string> = {};
-  const addRoute = (path: string, route: string): void => {
-    for (const candidate of pathCandidates(pathOf(path))) {
+  const addRoute = (path: string, route: string, fromFilenames: boolean): void => {
+    for (const candidate of pathCandidates(pathOf(path), fromFilenames)) {
       const existing = routes[candidate];
       if (existing !== undefined && existing !== route) throw new Error(`source path ${candidate} maps to both ${existing} and ${route}`);
       routes[candidate] = route;
@@ -89,13 +99,15 @@ export function siteLinksFor(tree: Tree, options: { unmigrated?: 'keep' | 'sourc
       if (page.oldPath) sourceBases[normalisePath(page.oldPath)] = base;
     }
     if (!page.migrate || !page.newPath || !page.oldPath) continue;
-    addRoute(page.oldPath, page.newPath);
-    for (const alias of page.aliases ?? []) addRoute(alias, page.newPath);
+    // A page crawled from a URL has no filename to read an index convention out of.
+    const fromFilenames = !/^https?:\/\//i.test(page.source);
+    addRoute(page.oldPath, page.newPath, fromFilenames);
+    for (const alias of page.aliases ?? []) addRoute(alias, page.newPath, fromFilenames);
   }
   const live = tree.pages.find((page) => /^https?:\/\//i.test(page.source))?.source;
   const origin = live ? new URL(live).origin : undefined;
   const listed = [...(options.sourcePages ?? []), ...tree.pages.flatMap((page) => [page.oldPath, ...(page.aliases ?? [])])];
-  const sourcePages = [...new Set(listed.filter((path): path is string => !!path).flatMap((path) => pathCandidates(pathOf(path))))];
+  const sourcePages = [...new Set(listed.filter((path): path is string => !!path).flatMap((path) => pathCandidates(pathOf(path), !live)))];
   const hosts = origin ? [...new Set([new URL(origin).hostname, ...(options.hosts ?? []).map((host) => (/^https?:\/\//i.test(host) ? new URL(host).hostname : host))].map((host) => host.toLowerCase()))] : [];
   return { routes, sourceBases, sourcePages, hosts, ...(origin ? { origin } : {}), unmigrated: options.unmigrated ?? 'keep' };
 }
@@ -104,9 +116,12 @@ export function siteLinksFor(tree: Tree, options: { unmigrated?: 'keep' | 'sourc
 export function siteLinkResolver(links: SiteLinks): SiteLinkResolver {
   const written = new Set(Object.values(links.routes));
   const known = new Set(links.sourcePages);
+  // Look a path up the same way it was stored, or a link to a page whose last segment is `readme`
+  // would also try the parent and could resolve to a different page than the one it names.
+  const fromFilenames = !links.origin;
   const hosts = new Set(links.hosts.map((host) => host.toLowerCase()));
-  const routeFor = (path: string): string | undefined => pathCandidates(path).map((candidate) => links.routes[candidate]).find((route) => route !== undefined);
-  const knownPath = (path: string): boolean => pathCandidates(path).some((candidate) => known.has(candidate));
+  const routeFor = (path: string): string | undefined => pathCandidates(path, fromFilenames).map((candidate) => links.routes[candidate]).find((route) => route !== undefined);
+  const knownPath = (path: string): boolean => pathCandidates(path, fromFilenames).some((candidate) => known.has(candidate));
   const baseFor = (source: string | undefined): string | undefined => {
     if (!source) return undefined;
     const exact = links.sourceBases[sourceKey(source)];

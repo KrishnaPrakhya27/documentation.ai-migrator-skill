@@ -6,10 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { markdownToIr } from '../src/ir/from-markdown.js';
 import { blocksToMdx, docToMdx, frontmatterToYaml, inlineToMdx } from '../src/ir/to-dai-mdx.js';
-import { RulesEngine, loadMappings, collectComponents } from '../src/components/rules-engine.js';
+import { RulesEngine, loadMappings, collectComponents, planEntryIsDecided } from '../src/components/rules-engine.js';
 import { Ledger, summarize } from '../src/ledger/dispositions.js';
 import { DecisionLog } from '../src/log/decisions.js';
-import { walkBlocks, type DocIR } from '../src/ir/types.js';
+import { walkBlocks, inlineText, type DocIR } from '../src/ir/types.js';
 import { D360_RECOGNISERS, parseMetadata } from '../src/adapters/document360.js';
 import { clusterComponents } from '../src/components/signature.js';
 import { validateMdx } from '@dai/content-contract';
@@ -55,6 +55,195 @@ describe('Markdown/MDX → IR', () => {
     expect(JSON.stringify(doc)).not.toContain('dangerous.call()');
     expect(JSON.stringify(doc)).toContain('expression:executable');
     expect(doc.children.some((x) => x.type === 'table')).toBe(true);
+  });
+
+  it('maps a component by what it does when the target spells it differently', () => {
+    // A file tree is a group of disclosures; a swatch is a named value; a themed card is a link.
+    // Reporting these as "no target equivalent" would ship dead HTML where the target has the behaviour.
+    const md = [
+      '<Tree>',
+      '  <Tree.Folder name="app" defaultOpen>',
+      '    <Tree.File name="page.tsx" />',
+      '  </Tree.Folder>',
+      '</Tree>',
+      '',
+      '<Color.Row title="Primary">',
+      '  <Color.Item name="primary-500" value="#3B82F6" />',
+      '</Color.Row>',
+      '',
+      '<ThemeCard title="Mint" value="mint" description="Classic theme." href="https://mint.example" />',
+      '',
+      '<GitHub.Repo repo="anthropics/claude-code" />',
+    ].join('\n');
+    const doc = markdownToIr(md + '\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' });
+    const w = mkdtempSync(join(tmpdir(), 'dai-semantic-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const out = engine.resolveDoc(doc);
+    rmSync(w, { recursive: true, force: true });
+    const named: Array<{ name: string; props: any }> = [];
+    walkBlocks(out.children, (n: any) => { if (n.type === 'dai') named.push({ name: n.name, props: n.props }); });
+    const byName = (n: string) => named.filter((x) => x.name === n);
+    // the tree keeps a real disclosure rather than flattening into a fragment
+    expect(byName('ExpandableGroup')).toHaveLength(1);
+    expect(byName('Expandable')[0].props).toMatchObject({ title: 'app', defaultOpen: true });
+    // the swatch row becomes columns of cards, each value copyable
+    expect(byName('Columns')).toHaveLength(1);
+    expect(byName('Card').some((c) => c.props.title === 'primary-500')).toBe(true);
+    // the themed card keeps the link that is the point of it
+    expect(byName('Card').some((c) => c.props.title === 'Mint' && c.props.href === 'https://mint.example')).toBe(true);
+    // a repo card becomes a link to the repository
+    expect(byName('Card').some((c) => c.props.href === 'https://github.com/anthropics/claude-code')).toBe(true);
+    // and nothing survives as an unmapped source component
+    expect(JSON.stringify(out.children)).not.toContain('"name":"Tree.Folder"');
+  });
+
+  it('rebuilds a raw HTML table into a table rather than preserving it as a fragment', () => {
+    // exactly as the published Markdown writes it: blank lines between the sections, none inside a row
+    const md = [
+      '<table>',
+      '  <colgroup>',
+      '    <col width="25%" />',
+      '',
+      '    <col width="75%" />',
+      '  </colgroup>',
+      '',
+      '  <thead>',
+      '    <tr>',
+      '      <th>Name</th>',
+      '      <th>Type</th>',
+      '    </tr>',
+      '  </thead>',
+      '',
+      '  <tbody>',
+      '    <tr>',
+      '      <td>limit</td>',
+      '      <td>number</td>',
+      '    </tr>',
+      '  </tbody>',
+      '</table>',
+    ].join('\n');
+    const doc = markdownToIr(md + '\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' });
+    const w = mkdtempSync(join(tmpdir(), 'dai-table-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const out = engine.resolveDoc(doc);
+    rmSync(w, { recursive: true, force: true });
+    const tables: any[] = [];
+    walkBlocks(out.children, (n: any) => { if (n.type === 'table') tables.push(n); });
+    expect(tables).toHaveLength(1);
+    expect(tables[0].children).toHaveLength(2);
+    expect(tables[0].children[0].isHeader).toBe(true);
+    expect(inlineText(tables[0].children[0].children[0].children)).toBe('Name');
+    expect(inlineText(tables[0].children[1].children[1].children)).toBe('number');
+    // the HTML scaffolding itself does not survive as unmapped components
+    for (const tag of ['"name":"td"', '"name":"tr"', '"name":"thead"']) expect(JSON.stringify(out.children)).not.toContain(tag);
+  });
+
+  it('replaces a live demo with a card in its own place, once per widget across every locale', () => {
+    // The prose points at the widget ("use the generator below"), so the card takes its position.
+    const page = (path: string) => markdownToIr(`Use the generator below.\n\n<VercelJsonGenerator />\n\nAfter that, redeploy.\n`, { platform: 'mintlify', file: path, pageId: path });
+    const w = mkdtempSync(join(tmpdir(), 'dai-demo-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const shapes = ['en.mdx', 'fr.mdx', 'es.mdx', 'zh.mdx'].map((path) => {
+      const out = engine.resolveDoc(page(path));
+      const cards: any[] = [];
+      walkBlocks(out.children, (n: any) => { if (n.type === 'dai' && n.name === 'Card') cards.push(n); });
+      return { at: out.children.findIndex((b: any) => b.type === 'dai' && b.name === 'Card'), cards };
+    });
+    rmSync(w, { recursive: true, force: true });
+    // one card, titled for the thing it replaces, so "the generator below" still resolves
+    expect(shapes[0].cards).toHaveLength(1);
+    expect(shapes[0].cards[0].props).toMatchObject({ title: 'Vercel rewrites generator' });
+    // it sits where the widget sat: after the sentence that points at it
+    expect(shapes[0].at).toBe(1);
+    // and every locale resolves identically - one decision per widget, not one per occurrence
+    for (const shape of shapes.slice(1)) {
+      expect(shape.at).toBe(shapes[0].at);
+      expect(shape.cards[0].props).toEqual(shapes[0].cards[0].props);
+    }
+  });
+
+  it('does not lose a card over an icon written as JSX, but still stops on a real expression', () => {
+    const w = mkdtempSync(join(tmpdir(), 'dai-expr-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const resolve = (md: string) => engine.resolveDoc(markdownToIr(md, { platform: 'mintlify', file: 'a.mdx', pageId: 'p' }));
+    // icon is decoration the card rule drops, so the card and its link survive
+    const dropped = resolve('<Card title="Go" href="/docs/go" icon={<svg viewBox="0 0 1 1" />}>\n  Body\n</Card>\n');
+    const cards: any[] = [];
+    walkBlocks(dropped.children, (n: any) => { if (n.type === 'dai' && n.name === 'Card') cards.push(n); });
+    expect(cards).toHaveLength(1);
+    expect(cards[0].props).toMatchObject({ title: 'Go', href: '/docs/go' });
+    // a named icon is still carried; only the JSX spelling is dropped
+    const literal = resolve('<Card title="Go" href="/docs/go" icon="rocket">\n  Body\n</Card>\n');
+    const kept: any[] = [];
+    walkBlocks(literal.children, (n: any) => { if (n.type === 'dai' && n.name === 'Card') kept.push(n); });
+    expect(kept[0].props.icon).toBe('rocket');
+    // an expression the rule does not drop still stops, because nothing evaluates one
+    const blocked = resolve('<Card title={pageTitle} href="/docs/go">\n  Body\n</Card>\n');
+    const quarantined: any[] = [];
+    walkBlocks(blocked.children, (n: any) => { if (n.type === 'quarantined') quarantined.push(n); });
+    expect(quarantined).toHaveLength(1);
+    expect(quarantined[0].reason).toMatch(/non-literal expression \(title\)/);
+    rmSync(w, { recursive: true, force: true });
+  });
+
+  it('reads raw HTML headings and rules as headings and rules, and never emits module syntax', () => {
+    const w = mkdtempSync(join(tmpdir(), 'dai-html-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const out = engine.resolveDoc(markdownToIr('import { X } from "/snippets/x.jsx"\n\n<div className="mt-4 rounded-xl">\n  <h1 className="text-xl">Overview</h1>\n</div>\n\n<hr />\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' }));
+    rmSync(w, { recursive: true, force: true });
+    const kinds: string[] = [];
+    walkBlocks(out.children, (n: any) => { kinds.push(n.type + (n.name ? ':' + n.name : '')); });
+    // the heading keeps its level and its text, so the page outline survives
+    const heading: any = [];
+    walkBlocks(out.children, (n: any) => { if (n.type === 'heading') heading.push(n); });
+    expect(heading).toHaveLength(1);
+    expect(heading[0].depth).toBe(1);
+    expect(inlineText(heading[0].children)).toBe('Overview');
+    expect(kinds).toContain('thematicBreak');
+    // the layout wrapper is gone, and module syntax never reaches the output
+    expect(kinds.some((k) => k.startsWith('component:'))).toBe(false);
+    expect(JSON.stringify(out.children)).not.toContain('snippets/x.jsx');
+  });
+
+  it('keeps an operator decision across re-planning and recomputes a derivation', () => {
+    // A rule added after the plan was written must take effect, or a migrator fix silently does nothing.
+    expect(planEntryIsDecided(undefined)).toBe(false);
+    expect(planEntryIsDecided({ cluster: 'a', tier: 'T7', status: 'needs-review' })).toBe(false);
+    expect(planEntryIsDecided({ cluster: 'a', tier: 'T1', status: 'auto' })).toBe(false);
+    // Anything a person put their name to, or decided outright, is theirs and survives untouched.
+    expect(planEntryIsDecided({ cluster: 'a', tier: 'T7', status: 'needs-review', reviewer: 'someone' })).toBe(true);
+    for (const status of ['approved', 'excluded', 'quarantined'] as const) {
+      expect(planEntryIsDecided({ cluster: 'a', tier: 'T7', status })).toBe(true);
+    }
+  });
+
+  it('reads a data literal as data and still refuses code', () => {
+    // tags={["a","b"]} and rss={{title:"x"}} are values a component was given, not behaviour,
+    // and holding a whole component back over decoration it never keeps is the worse answer.
+    const doc = markdownToIr('<Update label="v2" tags={["New releases","Bug fixes"]} rss={{ title: "Feed" }}>\nBody\n</Update>\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' });
+    const update = collectComponents(doc).find((x) => x.name === 'Update');
+    expect(update?.props).toMatchObject({ label: 'v2', tags: '["New releases","Bug fixes"]', rss: '{"title":"Feed"}' });
+    expect(JSON.stringify(doc)).not.toContain('expression:tags');
+    // Code has no value until something runs it, and nothing here ever runs anything.
+    const code = markdownToIr('<Button onClick={() => copy(x)} value={input} id={`k-${i}`} />\n', { platform: 'mintlify', file: 'b.mdx', pageId: 'p' });
+    const button = collectComponents(code).find((x) => x.name === 'Button');
+    expect(button?.props).toMatchObject({ onClick: null, value: null, id: null });
+    for (const prop of ['onClick', 'value', 'id']) expect(JSON.stringify(code)).toContain(`expression:${prop}`);
+  });
+
+  it('lifts a published heading anchor out of the div that carries it', () => {
+    const doc = markdownToIr('<div id="openapi-overlays">\n  ## OpenAPI Overlays\n</div>\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' });
+    const w = mkdtempSync(join(tmpdir(), 'dai-anchor-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const out = engine.resolveDoc(doc);
+    rmSync(w, { recursive: true, force: true });
+    const headings: any[] = [];
+    walkBlocks(out.children, (n: any) => { if (n.type === 'heading') headings.push(n); });
+    expect(headings).toHaveLength(1);
+    // the anchor lands in the same field the authored {#custom-id} form lifts into
+    expect((headings[0] as any).sourceId).toBe('openapi-overlays');
+    // and the wrapper itself does not reach the output
+    expect(JSON.stringify(out.children)).not.toContain('"name":"div"');
   });
 
   it('converts Document360 snippet tokens to non-executable references', () => {

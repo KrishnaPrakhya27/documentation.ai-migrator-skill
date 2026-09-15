@@ -42,6 +42,8 @@ rules:
     to: { name: Card, props: { title: $title, href: $href, icon: $icon, image: $img, cta: $cta, horizontal: $horizontal } }
     # icon colour, icon style and the hover arrow are decoration; any other authored prop is reported as dropped
     drop: [color, iconType, arrow]
+    # a named icon is carried; one written as inline JSX (icon={<svg/>}) is not, and does not hold the card back
+    dropWhenExpression: [icon]
   - id: mint/frame
     tier: T4
     match: { name: Frame }
@@ -72,6 +74,8 @@ rules:
     tier: T1
     match: { name: CodeGroup }
     to: { name: CodeGroup }
+    # rendering the group as a dropdown rather than tabs is presentation, and a declared loss
+    drop: [dropdown]
   - id: mint/tooltip
     tier: T4
     match: { name: Tooltip }
@@ -80,6 +84,8 @@ rules:
     tier: T4
     match: { name: Badge }
     handler: badge-to-span
+    # the badge's size is presentation; the target has no prop for it, so it is a declared loss
+    drop: [size, shape, stroke, disabled]
   - id: mint/request-example
     tier: T1
     match: { name: RequestExample }
@@ -91,15 +97,191 @@ rules:
   - id: mint/param-field
     tier: T1
     match: { name: ParamField }
-    to: { name: ParamField, props: { name: $name, type: $type, required: $required } }
+    # path, body, query and header name where the parameter lives and are content the target carries
+    to: { name: ParamField, props: { name: $name, type: $type, required: $required, path: $path, body: $body, query: $query, header: $header, deprecated: $deprecated } }
+    # the documented default value: no component in the contract carries one, so it is a declared loss.
+    # It is NOT written into the body as "Default: x" - that label is Mintlify's renderer, not the source,
+    # and reproducing it would trade a reported loss for source-platform chrome in the customer's content.
+    drop: [default]
   - id: mint/response-field
     tier: T1
     match: { name: ResponseField }
-    to: { name: ResponseField, props: { name: $name, type: $type, required: $required } }
+    to: { name: ResponseField, props: { name: $name, type: $type, required: $required, deprecated: $deprecated } }
+    # as with ParamField, the contract carries no default value
+    drop: [default]
   - id: mint/update
     tier: T1
     match: { name: Update }
     to: { name: Update, props: { label: $label, description: $description } }
+    # the changelog feed and its filter chips are Mintlify's own indexing, not page content
+    drop: [tags, rss]
+  # --- semantic families: mapped by what the component does, not by what it is called ---
+  - id: mint/tree
+    tier: T2
+    # a file tree is a group of disclosures, which is what ExpandableGroup holds
+    match: { name: Tree }
+    to: { name: ExpandableGroup }
+  - id: mint/file-tree
+    tier: T2
+    match: { name: FileTree }
+    to: { name: ExpandableGroup }
+  - id: mint/tree-folder
+    tier: T2
+    # the folder is the disclosure: its name is the title and defaultOpen is carried as authored
+    match: { name: Tree.Folder }
+    to: { name: Expandable, props: { title: $name, defaultOpen: $defaultOpen } }
+  - id: mint/tree-file
+    tier: T3
+    match: { name: Tree.File }
+    handler: tree-file-to-text
+    drop: [highlight]
+  - id: mint/color-row
+    tier: T3
+    # the row's title is authored text, so it is carried rather than dropped
+    match: { name: Color.Row }
+    handler: color-row-to-titled-group
+  - id: mint/color-item
+    tier: T3
+    match: { name: Color.Item }
+    handler: color-item-to-card
+  - id: mint/theme-card
+    tier: T3
+    match: { name: ThemeCard }
+    handler: to-card
+    drop: [value]
+  - id: mint/hero-card
+    tier: T3
+    match: { name: HeroCard }
+    handler: to-card
+    drop: [filename]
+  - id: mint/tile
+    tier: T3
+    match: { name: Tile }
+    handler: to-card
+  - id: mint/preview-button
+    tier: T3
+    match: { name: PreviewButton }
+    handler: to-card
+  - id: mint/github-repo
+    tier: T3
+    # the card links the repository; the live star and fork counts are reported as not carried
+    match: { name: GitHub.Repo }
+    handler: to-card
+  - id: mint/prompt
+    tier: T3
+    match: { name: Prompt }
+    handler: prompt-to-code
+  - id: mint/view
+    tier: T3
+    match: { name: View }
+    handler: view-to-expandable
+  - id: mint/color-wrapper
+    tier: T2
+    # a container around the swatch rows; the rows carry the meaning
+    match: { name: Color }
+    children: unwrap
+  - id: mint/panel
+    tier: T2
+    # the right-hand panel is a layout slot; its components belong to the page
+    match: { name: Panel }
+    children: unwrap
+  - id: mint/column
+    tier: T2
+    match: { name: Column }
+    children: unwrap
+  - id: mint/icon
+    tier: T2
+    # a named glyph from Mintlify's icon set, which the target has no equivalent for
+    match: { name: Icon }
+    children: drop
+  # --- live demos: one decision per widget, applied to every locale, in the widget's own position ---
+  - id: mint/demo-vercel-json
+    tier: T3
+    match: { name: VercelJsonGenerator }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Vercel rewrites generator", href: "https://www.mintlify.com/docs/deploy/vercel" } }
+    note: "CONTENT LOSS, not convenience: the page states \"use the generator below\" and shows no worked vercel.json, so the generator is the only way to obtain the output"
+  - id: mint/demo-color-generator
+    tier: T3
+    match: { name: ColorGenerator }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Colour generator example", href: "https://www.mintlify.com/docs/customize/react-components" } }
+    note: "convenience only: the component's full source is in an adjacent mdx fence on the same page"
+  - id: mint/demo-counter
+    tier: T3
+    match: { name: Counter }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Interactive counter example", href: "https://www.mintlify.com/docs/customize/react-components" } }
+    note: "convenience only: the component's full source is in an adjacent mdx fence on the same page"
+  - id: mint/demo-assistant-playground
+    tier: T3
+    match: { name: AssistantWidgetPlayground }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Assistant widget playground", href: "https://www.mintlify.com/docs/assistant/widget" } }
+    # the playground renders its code blocks through a component reference; the card replaces the whole
+    # widget, so the reference is dropped and reported, never evaluated
+    dropWhenExpression: [CodeBlockComponent]
+    note: "convenience only: the installation snippets are adjacent on the same page"
+  - id: mint/demo-download-pdf
+    tier: T3
+    match: { name: DownloadPDFButton }
+    handler: live-demo-to-card
+    to: { name: Card, props: { title: "Export this documentation as PDF", href: "https://www.mintlify.com/docs/optimize/pdf-exports" } }
+    note: "convenience only: the dashboard export steps are on the same page"
+  - id: mint/anchor-div
+    tier: T3
+    # a published custom heading anchor: <div id="..."> wrapping the heading it names
+    match: { name: div, props: { id: any } }
+    handler: anchor-div-to-heading
+  # --- raw HTML the published Markdown carries; matched after mint/anchor-div claims an id'd div ---
+  - id: mint/html-h1
+    tier: T3
+    match: { name: h1 }
+    handler: html-heading-to-heading
+    drop: [className]
+  - id: mint/html-hr
+    tier: T2
+    match: { name: hr }
+    handler: html-rule-to-thematic-break
+  - id: mint/html-br
+    tier: T2
+    match: { name: br }
+    children: drop
+  - id: mint/html-label
+    tier: T2
+    # a styling wrapper around its own text; the text is what the source states
+    match: { name: label }
+    children: unwrap
+    drop: [className]
+  - id: mint/html-div
+    tier: T2
+    # a layout wrapper: Tailwind classes the target does not carry, around content that it does
+    match: { name: div }
+    children: unwrap
+    drop: [className]
+  - id: mint/mdx-esm
+    tier: T2
+    # import/export statements are module syntax, never page content, and never reach the output
+    match: { name: esm }
+    children: drop
+  - id: mint/expandable
+    tier: T1
+    # Mintlify's own Expandable, which the target has too: the disclosure stays a disclosure
+    match: { name: Expandable }
+    to: { name: Expandable, props: { title: $title, defaultOpen: $defaultOpen } }
+  - id: mint/columns
+    tier: T2
+    match: { name: Columns }
+    # cols is clamped to the contract enum [2,3,4] by the same handler CardGroup uses
+    to: { name: Columns, props: { cols: $cols } }
+  - id: mint/danger
+    tier: T1
+    match: { name: Danger }
+    to: { name: Callout, props: { kind: danger } }
+  - id: mint/callout
+    tier: T1
+    match: { name: Callout }
+    to: { name: Callout, props: { kind: $kind, collapsed: $collapsed } }
   - id: mint/video
     tier: T2
     match: { name: video }

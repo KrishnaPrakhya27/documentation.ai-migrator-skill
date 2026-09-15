@@ -386,6 +386,27 @@ function parseEscapingRejectedText(source: string, parse: (text: string, locatin
   return { tree, text };
 }
 
+/**
+ * Anything in a `{...}` attribute that is data rather than code. `tags={["a","b"]}`
+ * and `rss={{ title: "x" }}` are values a component was given, not behaviour to run,
+ * and refusing them keeps a whole component unresolved over its decoration. Code is
+ * still refused: an arrow, a call, a bare identifier, a template literal or JSX has
+ * no value until something evaluates it, and this never evaluates anything.
+ */
+const EXECUTABLE_SYNTAX = /=>|`|\bfunction\b|\bnew\b|\+\+|--|\.\.\./;
+
+function dataLiteral(text: string): unknown {
+  if (EXECUTABLE_SYNTAX.test(text)) return undefined;
+  try { return JSON.parse(text) as unknown; } catch { /* JS object syntax, tried next */ }
+  // A JS data literal differs from JSON only in unquoted keys and single quotes; both are
+  // rewritten before parsing, and a bare identifier anywhere else still fails the parse.
+  const json = text
+    .replace(/'((?:[^'\\]|\\.)*)'/g, (_m, inner: string) => JSON.stringify(inner.replace(/\\'/g, "'")))
+    .replace(/([{,]\s*)([A-Za-z_$][\w$]*)(\s*:)/g, '$1"$2"$3')
+    .replace(/,(\s*[}\]])/g, '$1');
+  try { return JSON.parse(json) as unknown; } catch { return undefined; }
+}
+
 function literalExpression(value: string): string | number | boolean | null | undefined {
   const v = value.trim();
   if (/^-?(?:\d+\.?\d*|\.\d+)$/.test(v)) return Number(v);
@@ -394,6 +415,13 @@ function literalExpression(value: string): string | number | boolean | null | un
   if (v === 'null') return null;
   const quoted = v.match(/^(?:"([\s\S]*)"|'([\s\S]*)')$/);
   if (quoted) return quoted[1] ?? quoted[2] ?? '';
+  // An array or object of literals is data the component was given, not code. It is recorded as its
+  // canonical JSON text, because a prop holds a scalar here: what matters is that the component is
+  // resolved rather than held back by a value no rule keeps, and the value stays exactly readable.
+  if (/^[[{]/.test(v)) {
+    const data = dataLiteral(v);
+    return data === undefined ? undefined : JSON.stringify(data);
+  }
   return undefined;
 }
 
@@ -721,10 +749,61 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     return converted.length ? mapBlocks(converted, { inline: (n) => (n.type === 'link' ? { ...n, url: readmeLinkTarget(n.url) } : n) }) : undefined;
   };
 
+  /**
+   * A table written as raw HTML in Markdown. Published Markdown carries <table> with the usual
+   * thead/tbody/tr/th/td, which otherwise reach the plan as eight separate unmapped components and
+   * are preserved as fragments - keeping the look and losing the structure every later stage reads.
+   * This is the same conversion from-html performs, done here because the element arrives as MDX.
+   *
+   * A merged cell has no expression in a Markdown table, so a table holding one is left alone for a
+   * person to decide rather than silently reshaped into a grid the source does not state.
+   */
+  const htmlTableFlow = (node: any, path: number[]): Block[] | undefined => {
+    if (String(node.name ?? '').toLowerCase() !== 'table') return undefined;
+    const attr = (element: any, name: string): string | undefined =>
+      (element.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && String(a.name).toLowerCase() === name)?.value;
+    const named = (element: any, names: string[]): boolean =>
+      (element?.type === 'mdxJsxFlowElement' || element?.type === 'mdxJsxTextElement') && names.includes(String(element.name ?? '').toLowerCase());
+    let merged = false;
+    const rows: TableRowNode[] = [];
+    const collect = (children: any[], header: boolean, p: number[]): void => {
+      children.forEach((child: any, index: number) => {
+        if (named(child, ['thead'])) collect(child.children ?? [], true, [...p, index]);
+        else if (named(child, ['tbody', 'tfoot'])) collect(child.children ?? [], header, [...p, index]);
+        else if (named(child, ['tr'])) {
+          // Cells written on adjacent lines are inline, so mdast wraps them in a paragraph inside
+          // the row; cells separated by blank lines are flow. Both spellings are the same row.
+          const found: any[] = [];
+          const gather = (nodes: any[]): void => {
+            for (const candidate of nodes) {
+              if (named(candidate, ['td', 'th'])) found.push(candidate);
+              else if (candidate?.children) gather(candidate.children);
+            }
+          };
+          gather(child.children ?? []);
+          let isHeader = header;
+          const cells: TableCellNode[] = found.map((cell: any, cellIndex: number) => {
+            if (attr(cell, 'colspan') || attr(cell, 'rowspan')) merged = true;
+            if (String(cell.name).toLowerCase() === 'th') isHeader = true;
+            const at = [...p, index, cellIndex];
+            return { id: idOf(cell, at), type: 'tableCell' as const, children: flowInlines(cell.children ?? [], at) ?? [] };
+          });
+          if (cells.length) rows.push({ id: idOf(child, [...p, index]), type: 'tableRow', isHeader, children: cells });
+        }
+      });
+    };
+    collect(node.children ?? [], false, path);
+    if (merged || !rows.length) return undefined;
+    return [{ id: idOf(node, path), type: 'table', children: rows }];
+  };
+
   const jsxFlow = (node: any, path: number[]): Block[] => {
     if (isImageElement(node)) return [imageFromMdx(node, path)];
     if (opts.platform === 'gitbook') { const converted = gitbookFlow(node, path); if (converted) return converted; }
     if (opts.platform === 'readme') { const converted = readmeFlow(node, path); if (converted) return converted; }
+    // After the platform's own reading: GitBook and ReadMe give a <table> meanings of their own
+    // (a row of cards, a button), and only a table nothing else claimed is read as a plain table.
+    { const converted = htmlTableFlow(node, path); if (converted) return converted; }
     const importPath = node.name ? imports.get(node.name) : undefined;
     if (importPath && /\.mdx?$/.test(importPath) && !(node.attributes ?? []).length && opts.resolveSnippet) {
       const body = opts.resolveSnippet(importPath);

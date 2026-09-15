@@ -21,7 +21,24 @@ export interface ScopeExclusion {
   approvedAt?: string;
 }
 
-export interface ScopeDecisions { excluded: ScopeExclusion[] }
+/**
+ * Content the migration writes that the source never stated. A live demo cannot be reproduced
+ * statically, so a card naming the tool takes its place - and that card's words are the migrator's,
+ * not the author's. Exact fidelity refuses invented content, and rightly: the only thing that makes
+ * one acceptable is a named person deciding it, which is what this records. It is deliberately not
+ * an equivalence, because the two are not equal and no future reader should be told they were.
+ */
+export interface ScopeSubstitution {
+  /** Source component being replaced, by name, so one decision covers every locale that uses it. */
+  component: string;
+  reason: string;
+  approvedBy: string;
+  approvedAt?: string;
+  /** Whether the reader loses content rather than convenience; reported to the customer either way. */
+  contentLoss?: boolean;
+}
+
+export interface ScopeDecisions { excluded: ScopeExclusion[]; substituted: ScopeSubstitution[] }
 
 export function scopeDecisionsPath(workspace: string): string {
   return join(workspace, 'plan', 'scope-decisions.yaml');
@@ -37,6 +54,14 @@ const TEMPLATE = `# Scope decisions: the only way a published source page leaves
 #     approvedBy: <who approved it>
 #     approvedAt: <ISO date>
 excluded: []
+#
+# substituted: content the migration writes in place of something it cannot carry.
+# Its words are the migrator's, not the source's, so each one is owned by a person.
+#   - component: <source component name>
+#     reason: <why nothing static can reproduce it>
+#     approvedBy: <who approved it>
+#     contentLoss: true|false
+substituted: []
 `;
 
 /** Writes the commented template when the file does not exist; an existing file is never touched. */
@@ -48,8 +73,8 @@ export function ensureScopeDecisionsFile(workspace: string): void {
 /** A missing file means no exclusions. A malformed entry is refused with its position and the field at fault. */
 export function readScopeDecisions(workspace: string): ScopeDecisions {
   const path = scopeDecisionsPath(workspace);
-  if (!existsSync(path)) return { excluded: [] };
-  const parsed = parseYaml(readFileSync(path, 'utf8')) as { excluded?: unknown } | null;
+  if (!existsSync(path)) return { excluded: [], substituted: [] };
+  const parsed = parseYaml(readFileSync(path, 'utf8')) as { excluded?: unknown; substituted?: unknown } | null;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.excluded)) throw new Error(`${path}: expected an object with an excluded list`);
   const entries = parsed.excluded;
   if (!Array.isArray(entries)) throw new Error(`${path}: excluded must be a list`);
@@ -67,7 +92,29 @@ export function readScopeDecisions(workspace: string): ScopeDecisions {
     seen.add(pageId);
     return { pageId, sourceId: record.sourceId as string, reason: record.reason as string, approvedBy: record.approvedBy as string, ...(record.approvedAt ? { approvedAt: record.approvedAt as string } : {}) };
   });
-  return { excluded };
+  const rawSubstituted = parsed.substituted;
+  if (rawSubstituted !== undefined && rawSubstituted !== null && !Array.isArray(rawSubstituted)) throw new Error(`${path}: substituted must be a list`);
+  const byComponent = new Set<string>();
+  const substituted = ((rawSubstituted ?? []) as unknown[]).map((entry, index): ScopeSubstitution => {
+    const where = `${path}: substituted[${index}]`;
+    if (!entry || typeof entry !== 'object') throw new Error(`${where} must be an object`);
+    const record = entry as Record<string, unknown>;
+    for (const field of ['component', 'reason', 'approvedBy'] as const) {
+      if (typeof record[field] !== 'string' || !(record[field] as string).trim()) throw new Error(`${where}.${field} is required`);
+    }
+    if (record.approvedAt !== undefined && typeof record.approvedAt !== 'string') throw new Error(`${where}.approvedAt must be a string`);
+    if (record.contentLoss !== undefined && typeof record.contentLoss !== 'boolean') throw new Error(`${where}.contentLoss must be true or false`);
+    const component = (record.component as string).trim();
+    // One decision per component, applied wherever it appears, so locales cannot diverge.
+    if (byComponent.has(component)) throw new Error(`${where} repeats component ${component}`);
+    byComponent.add(component);
+    return {
+      component, reason: record.reason as string, approvedBy: record.approvedBy as string,
+      ...(record.approvedAt ? { approvedAt: record.approvedAt as string } : {}),
+      ...(record.contentLoss !== undefined ? { contentLoss: record.contentLoss as boolean } : {}),
+    };
+  });
+  return { excluded, substituted };
 }
 
 export interface UniversePage { id: string; source?: string; migrate: boolean; newPath?: string }

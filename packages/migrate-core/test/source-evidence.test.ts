@@ -173,3 +173,31 @@ describe('real CLI evidence integration', () => {
     expect(gates.find((gate) => gate.id === 'source-universe-accounted')).toMatchObject({ status: 'fail', samples: [expect.stringContaining('b.md')] });
   }, 60_000);
 });
+
+describe('a declared substitution', () => {
+  const temp = () => mkdtempSync(join(tmpdir(), 'dai-subst-'));
+  it('is owned by a person, covers every locale from one entry, and refuses a repeat', () => {
+    const workspace = temp(); ensureWorkspace(workspace); ensureScopeDecisionsFile(workspace);
+    const path = join(workspace, 'plan', 'scope-decisions.yaml');
+    writeFileSync(path, [
+      'excluded: []',
+      'substituted:',
+      '  - component: VercelJsonGenerator',
+      '    reason: a generator cannot be reproduced statically and the page shows no worked output',
+      '    approvedBy: an operator',
+      '    contentLoss: true',
+    ].join('\n'));
+    const decided = readScopeDecisions(workspace);
+    expect(decided.substituted).toHaveLength(1);
+    expect(decided.substituted[0]).toMatchObject({ component: 'VercelJsonGenerator', approvedBy: 'an operator', contentLoss: true });
+    // keyed by component, so one decision applies wherever it appears and locales cannot diverge
+    writeFileSync(path, ['excluded: []', 'substituted:', '  - component: Counter', '    reason: r', '    approvedBy: a', '  - component: Counter', '    reason: r', '    approvedBy: a'].join('\n'));
+    expect(() => readScopeDecisions(workspace)).toThrow(/repeats component Counter/);
+    // nobody named, no substitution: invented content cannot pass unowned
+    writeFileSync(path, ['excluded: []', 'substituted:', '  - component: Counter', '    reason: r'].join('\n'));
+    expect(() => readScopeDecisions(workspace)).toThrow(/approvedBy is required/);
+    // and a file that predates the field still reads
+    writeFileSync(path, 'excluded: []\n');
+    expect(readScopeDecisions(workspace).substituted).toEqual([]);
+  });
+});

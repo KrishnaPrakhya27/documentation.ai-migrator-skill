@@ -19,7 +19,7 @@ import { nativeSourceManifest, liveSourceManifest } from './evidence/capture.js'
 import { requireSourceManifest } from './evidence/verify.js';
 import { nativeNavigationWitness } from './evidence/native-navigation.js';
 import { pinAcquisition, requireAcquisition } from './evidence/acquisition.js';
-import { ensureScopeDecisionsFile, scopeDecisionsPath } from './evidence/scope.js';
+import { ensureScopeDecisionsFile, readScopeDecisions, scopeDecisionsPath } from './evidence/scope.js';
 import { captureSpecGraph, writeSpecOutput, type SpecManifest } from './openapi/graph.js';
 import { readmeCatalogSpecs } from './openapi/readme.js';
 import { HELP, parseCommandLine } from './cli/options.js';
@@ -60,7 +60,7 @@ import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacemen
 import { documentationSiteSettings, withoutSourceBranding } from './nav/site-settings.js';
 import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
 import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor, type SiteLinks } from './urls/site-links.js';
-import { RulesEngine, applyDeclaredLosses, loadMappings, collectComponents, type ComponentPlanEntry } from './components/rules-engine.js';
+import { RulesEngine, applyDeclaredLosses, loadMappings, collectComponents, planEntryIsDecided, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
 import { Ledger } from './ledger/dispositions.js';
 import { DecisionLog } from './log/decisions.js';
@@ -477,6 +477,7 @@ async function main() {
           const withoutSidebar = pages.filter((page) => page.sourceSidebar === 'absent').length;
           if (!observedSidebar) console.log('· no page in the capture rendered a navigation sidebar; the source builds one in the browser or shows none. Page layout is left at the Documentation.AI default and the navigation could not be read from the rendered pages.');
           else if (withoutSidebar) ok(`${withoutSidebar} page(s) render no navigation sidebar in the source and will be written with "show-sidebar": false`);
+          if (discovery.refusedOutsideBase?.length) ok(`${discovery.refusedOutsideBase.length} same-origin URL(s) outside the site's base path were refused as another site on this host: ${discovery.refusedOutsideBase.slice(0, 3).join(', ')}`);
           if (discovery.externalLlmsLinks?.length) ok(`${discovery.externalLlmsLinks.length} llms.txt entr(y/ies) link to another site and are not pages of this one: ${discovery.externalLlmsLinks.slice(0, 3).map((link) => `"${link.title}" → ${link.url}`).join(', ')}`);
           ok(`${pages.length} unique URLs from ${discovery.llms ? `${discovery.llms.entries.length} llms.txt entries, ` : ''}recursive links, sidebars, ${discovery.sitemaps.sources.length} sitemap file(s) and configured map sources${discovery.canonicalHosts.length ? ` (canonical hosts: ${discovery.canonicalHosts.join(', ')})` : ''}; ${discovery.failures.length} fetch failures${discovery.truncated ? '; limit reached' : ''}`);
         }
@@ -688,7 +689,7 @@ async function main() {
             // The rendered page states the search metadata even on a platform whose body is Markdown,
             // so it is read from the frozen HTML and carried; a canonical naming another page is
             // retargeted at convert, with the links.
-            const seo = page.html ? seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined) : {};
+            const seo = page.html ? seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined, profile.generatedOgImage) : {};
             docs.push(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}), ...seo }, codeMetaStrip: profile.codeMetaStrip }));
           }
           else {
@@ -709,7 +710,7 @@ async function main() {
             // the body — exactly what unwrapPublishedMarkdown does with a published page's leading H1.
             // Only that one heading goes, and only when it is the title: any other H1 is still content.
             const children = firstHeading && h1 && h1 === title ? ir.children.filter((block) => block !== firstHeading) : ir.children;
-            const seo = seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined);
+            const seo = seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined, profile.generatedOgImage);
             docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}), ...seo }, children });
           }
         }
@@ -764,10 +765,18 @@ async function main() {
       const existing = existsSync(planPath) ? (parseYaml(readFileSync(planPath, 'utf8')) as { components: ComponentPlanEntry[] }).components : [];
       const byCluster = new Map(existing.map((e) => [e.cluster, e]));
       const components = clusters.map((c) => {
+        // A decision the operator made is kept; a derivation is recomputed against current rules.
         const prev = byCluster.get(c.cluster);
-        if (prev) return prev;
+        if (planEntryIsDecided(prev)) return prev!;
         const rule = engine.findRule({ id: 'x', type: 'component', name: c.signature.name, platform: c.signature.platform, props: Object.fromEntries(Object.entries(c.signature.props).map(([k, b]) => [k, b.startsWith('enum:') ? b.slice(5) : b === 'null' ? null : 'x'])), children: [], styleDeps: c.signature.styleDeps });
-        const hasExpression = c.signature.styleDeps.some((x) => x.startsWith('expression:'));
+        // An expression the matching rule drops never reaches the output, so it does not hold the
+        // cluster back; the engine applies the same test, and the two must agree or the plan and the
+        // conversion would disagree about what needed a person to look at it.
+        const droppedByRule = new Set([...(rule?.drop ?? []), ...(rule?.dropWhenExpression ?? [])]);
+        // A rule that emits nothing cannot carry an expression into the output, so such a cluster is
+        // resolved rather than waiting on a person - the same test the engine applies.
+        const emitsNothing = rule?.children === 'drop' && !rule.to && !rule.handler;
+        const hasExpression = !emitsNothing && c.signature.styleDeps.some((x) => x.startsWith('expression:') && !droppedByRule.has(x.slice('expression:'.length)));
         const entry: ComponentPlanEntry & { count: number; signature: unknown } = {
           cluster: c.cluster, count: c.count, signature: c.signature,
           tier: hasExpression ? 'T7' : rule?.tier ?? 'T7', rule: rule?.id,
@@ -850,6 +859,8 @@ async function main() {
     case 'convert': {
       const workspace = ws(); const s = readSession(workspace);
       requireStages(s, 'plan', 'assets');
+      // Components a person recorded a substitution for; one decision covers every locale.
+      const substitutedComponents = new Set<string>(readScopeDecisions(workspace).substituted.map((entry) => entry.component));
       const blockExclusions = readBlockExclusions(workspace);
       // exact mode carries every authored block; an operator exclusion is refused before anything is read or written
       if ((s.fidelityMode ?? 'exact') === 'exact' && blockExclusions.length) fail(`block exclusions are not permitted in exact mode: plan/block-exclusions.yaml lists ${blockExclusions.length} (${blockExclusions.map((e) => `${e.pageId}:${e.nodeId}`).join(', ')}); remove them, or re-run init with --fidelity permissive`);
@@ -899,7 +910,7 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink), engine);
+        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink), engine, substitutedComponents);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
         const recordSiteLink = (url: string, source?: string): string => {
           const outcome = resolveSiteLink(url, source);

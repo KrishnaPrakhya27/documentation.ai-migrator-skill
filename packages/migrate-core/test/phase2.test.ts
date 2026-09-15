@@ -6,7 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { Response as UndiciResponse } from 'undici';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { CanonicalHosts, Fetcher, discoverSitemaps, type FetchImpl } from '../src/scrape/fetcher.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, mergeNavigationTrees, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, mergeNavigation, mergeNavigationTrees, mintlifyNavBase, normaliseDiscoveryUrl, siteBaseUrl, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
 import { getProfile, profileHostAliases } from '../src/scrape/profiles.js';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { htmlAdapterOptions } from '../src/scrape/profiles.js';
@@ -745,6 +745,78 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(() => ir('````markdown\n{% prompt a="b" %}\n```\ntext\n```\n{% endprompt %}\n````\n')).not.toThrow();
     // TeX braces are not JavaScript
     expect(() => ir('$$f(x) = e^{2 pi i}$$\n')).not.toThrow();
+  it('keeps a site published under a path prefix apart from the marketing site at the same origin', () => {
+    expect(siteBaseUrl('https://acme.example/docs')).toBe('https://acme.example/docs/');
+    expect(siteBaseUrl('https://acme.example/docs/')).toBe('https://acme.example/docs/');
+    expect(siteBaseUrl('https://acme.example')).toBe('https://acme.example/');
+    // The seed's own prefix is the site; the host's other pages are not.
+    expect(withinSiteBase('https://acme.example/docs/quickstart', 'https://acme.example/docs/')).toBe(true);
+    expect(withinSiteBase('https://acme.example/docs', 'https://acme.example/docs/')).toBe(true);
+    expect(withinSiteBase('https://acme.example/blog/hello', 'https://acme.example/docs/')).toBe(false);
+    expect(withinSiteBase('https://acme.example/pricing', 'https://acme.example/docs/')).toBe(false);
+    // A near-miss sibling is not inside the prefix.
+    expect(withinSiteBase('https://acme.example/docs-legacy/x', 'https://acme.example/docs/')).toBe(false);
+    // A seed at the origin root names the whole host, as before.
+    expect(withinSiteBase('https://acme.example/anything', 'https://acme.example/')).toBe(true);
+  });
+  it('resolves a Mintlify sidebar against the docs root the page states, not the seed', () => {
+    // scopedNav hrefs are docs-root relative ("" is the root page), so a base without a trailing
+    // slash drops the prefix and names pages of whatever else the host publishes.
+    const html = '<a href="/docs/sitemap.xml"></a>';
+    expect(mintlifyNavBase(html, 'https://acme.example/docs')).toBe('https://acme.example/docs/');
+    // Read from the page, so any seed page of the site resolves the navigation the same way.
+    expect(mintlifyNavBase(html, 'https://acme.example/docs/guides/setup')).toBe('https://acme.example/docs/');
+    expect(new URL('quickstart', mintlifyNavBase(html, 'https://acme.example/docs')).toString()).toBe('https://acme.example/docs/quickstart');
+    // A site published at the root is unchanged.
+    expect(mintlifyNavBase('<a href="/sitemap.xml"></a>', 'https://acme.example/')).toBe('https://acme.example/');
+    // No declaration: the origin root, never the seed - a deep seed is a page, not a root of its own.
+    expect(mintlifyNavBase('<p>no sitemap link</p>', 'https://acme.example/docs')).toBe('https://acme.example/');
+    expect(mintlifyNavBase('<p>no sitemap link</p>', 'https://acme.example/guides/setup')).toBe('https://acme.example/');
+  });
+  it('refuses same-origin pages outside the site base, and says which', async () => {
+    const site = syntheticSiteFetcher({
+      host: SITE_HOST,
+      pages: {
+        '/docs': { html: HOME_HTML, md: HOME_MD },
+        '/docs/guides/setup': { html: SETUP_HTML, md: SETUP_MD },
+        '/blog/launch': { html: HOME_HTML, md: HOME_MD },
+        '/pricing': { html: HOME_HTML, md: HOME_MD },
+      },
+      // the marketing sitemap the origin's robots.txt advertises, listing pages of both sites
+      sitemapXml: `<urlset><url><loc>${SITE}/docs/guides/setup</loc></url><url><loc>${SITE}/blog/launch</loc></url><url><loc>${SITE}/pricing</loc></url></urlset>`,
+      // the documentation states where it begins by publishing its own index under /docs
+      llmsIndexes: { '/docs/llms.txt': `- [Setup](${SITE}/docs/guides/setup.md): Install Acme.` },
+    });
+    const fetcher = offlineFetcher(site, { workspace: ws(), allowHosts: [SITE_HOST], canonicalHosts: new CanonicalHosts(SITE) });
+    const found = await discoverLiveSite({ seedUrl: `${SITE}/docs`, fetcher, profile: getProfile('mintlify') });
+    const paths = found.pages.map((page) => new URL(page.url).pathname).sort();
+    expect(paths).toEqual(['/docs', '/docs/guides/setup']);
+    // Refused from every direction: the marketing sitemap, and the links the pages themselves carry.
+    expect(found.refusedOutsideBase).toEqual([`${SITE}/`, `${SITE}/blog/launch`, `${SITE}/guides/setup`, `${SITE}/pricing`]);
+  });
+  it('builds the sidebar from every page, because each states only its own locale and tab', () => {
+    const page = (url: string) => ({ type: 'page' as const, url });
+    const group = (label: string, children: any[]) => ({ type: 'group' as const, label, children });
+    const fromEn = [group('en', [group('Documentation', [page(`${SITE}/docs/quickstart`)])])];
+    const fromEnApi = [group('en', [group('API reference', [page(`${SITE}/docs/api/introduction`)])])];
+    const fromFr = [group('fr', [group('Documentation', [page(`${SITE}/docs/fr/quickstart`)])])];
+    let nav = mergeNavigation([], fromEn);
+    nav = mergeNavigation(nav, fromEnApi);
+    nav = mergeNavigation(nav, fromFr);
+    // One tab reached from several pages is one tab; a new locale is a new top-level node.
+    expect(nav).toEqual([
+      group('en', [
+        group('Documentation', [page(`${SITE}/docs/quickstart`)]),
+        group('API reference', [page(`${SITE}/docs/api/introduction`)]),
+      ]),
+      group('fr', [group('Documentation', [page(`${SITE}/docs/fr/quickstart`)])]),
+    ]);
+    // A page already placed among its siblings is not placed twice.
+    expect(mergeNavigation(nav, fromEn)).toEqual(nav);
+    // The already-recorded tree is never mutated by a later page.
+    const before = JSON.parse(JSON.stringify(fromEn));
+    mergeNavigation(fromEn, fromFr);
+    expect(fromEn).toEqual(before);
   });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);

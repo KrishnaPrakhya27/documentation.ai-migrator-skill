@@ -55,6 +55,12 @@ export interface ScrapeProfile {
   /** Platform serves raw markdown at <url>.md; prefer it over HTML. */
   mdSuffix?: boolean;
   /**
+   * Path fragment of the endpoint the platform generates per-page social cards from. Such a card
+   * bakes in the source's own theme, so it is the platform's branding rather than the page's
+   * content and is never carried; an ogImage the author chose is.
+   */
+  generatedOgImage?: string;
+  /**
    * Path segment under which the platform publishes nested llms.txt indexes. A
    * multi-locale Mintlify site lists most of its pages in `/_llms/` indexes and
    * links those from llms.txt instead of listing every page in one file, so an
@@ -182,6 +188,7 @@ export const PROFILES: Record<string, ScrapeProfile> = {
       { kind: 'md-suffix', pattern: '', weight: 2 },
     ],
     llmsIndexSegment: '_llms',
+    generatedOgImage: '/_mintlify/api/og',
     articleSelector: '#content-area',
     // `header` carries the group eyebrow, #page-title and the description, all of which come from
     // llms.txt / the published .md instead. The assistant bar is removed together with everything

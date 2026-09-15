@@ -82,11 +82,26 @@ export interface SeoFrontmatter {
  * `metaTitle` and `metaDescription` are written only when the source stated something other than
  * the page's own title and description, so an unchanged page carries no redundant frontmatter.
  */
-export function seoFrontmatter(seo: SourceSeo, page: { url: string; title?: string; description?: string }, retarget: (url: string) => string | undefined): SeoFrontmatter {
+/**
+ * Whether this social card came from the platform's own generator. The generator is usually reached
+ * through an image proxy, so its path arrives percent-encoded inside a query string and the decoded
+ * form has to be tested as well as the raw one.
+ */
+function isGeneratedCard(url: string, generator?: string): boolean {
+  if (!generator) return false;
+  if (url.includes(generator)) return true;
+  try { return decodeURIComponent(url).includes(generator); } catch { return false; }
+}
+
+export function seoFrontmatter(seo: SourceSeo, page: { url: string; title?: string; description?: string }, retarget: (url: string) => string | undefined, generatedOgImage?: string): SeoFrontmatter {
   const out: SeoFrontmatter = {};
   if (seo.ogTitle && seo.ogTitle !== page.title) out.metaTitle = seo.ogTitle;
   if (seo.ogDescription && seo.ogDescription !== page.description) out.metaDescription = seo.ogDescription;
-  if (seo.ogImage) out.ogImage = seo.ogImage;
+  // A social card the source builds from the page's own title, description and *its own theme* is
+  // the platform's branding, not the page's content - the same reason a logo, favicon and colours
+  // are recorded and never carried. The migrated site states its own. An ogImage the author chose
+  // is a statement about the page and is carried as before.
+  if (seo.ogImage && !isGeneratedCard(seo.ogImage, generatedOgImage)) out.ogImage = seo.ogImage;
   if (seo.canonical && !sameTarget(seo.canonical, page.url)) out.canonical = retarget(seo.canonical) ?? seo.canonical;
   for (const key of Object.keys(out) as Array<keyof SeoFrontmatter>) if (out[key] === undefined) delete out[key];
   return out;

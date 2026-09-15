@@ -27,6 +27,12 @@ export interface MappingRule {
   to?: { name: string; props?: Record<string, string | number | boolean> };
   /** Source props to drop (recorded as lossy). */
   drop?: string[];
+  /**
+   * Props dropped only when the source wrote them as a non-literal expression. A named icon is
+   * carried; `icon={<svg/>}` is not, and losing the card over it would lose the link that is the
+   * point of the card. The value is never evaluated either way - it is dropped, and reported.
+   */
+  dropWhenExpression?: string[];
   /** 'keep' (default), 'unwrap' (children replace the component) or 'drop' (nothing is emitted; the subtree is recorded as excluded by rule). */
   children?: 'keep' | 'unwrap' | 'drop';
   /** Named restructure handler implemented in code. */
@@ -49,6 +55,19 @@ export interface ComponentPlanEntry {
   status?: 'auto' | 'needs-review' | 'approved' | 'quarantined' | 'excluded';
   reviewer?: string;
   reason?: string;
+}
+
+/**
+ * Whether a plan entry records a decision a person made, rather than something the
+ * migrator derived. Only a decision survives re-planning: an entry still sitting at
+ * `auto` or `needs-review` with nobody named against it is a derivation, and a mapping
+ * rule added after the plan was first written has to be able to take effect. Without
+ * this a migrator fix looks applied, re-runs clean, and changes nothing.
+ */
+export function planEntryIsDecided(entry?: ComponentPlanEntry): boolean {
+  if (!entry) return false;
+  if (entry.reviewer) return true;
+  return entry.status === 'approved' || entry.status === 'excluded' || entry.status === 'quarantined';
 }
 
 export interface EngineOptions {
@@ -112,6 +131,20 @@ function matches(rule: MappingRule, node: ComponentNode): boolean {
     if (String(node.props[k]) !== String(v)) return false;
   }
   return true;
+}
+
+
+
+
+/** The plain text a run of blocks states, as one string; undefined when they state none. */
+function blocksText(blocks: readonly Block[]): string | undefined {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === 'paragraph' || block.type === 'heading') parts.push(inlineText(block.children));
+    else if (block.type === 'code') parts.push(block.value);
+  }
+  const text = parts.join('\n\n').trim();
+  return text || undefined;
 }
 
 /** Restructure handlers (T3). */
@@ -182,6 +215,126 @@ const HANDLERS: Record<string, RestructureHandler> = {
   'badge-to-span': { reads: ['text', 'label'], run: (node) => {
     const text = blocksToMdx(node.children).trim() || String(node.props.text ?? node.props.label ?? '');
     return { blocks: [{ id: node.id, type: 'rawHtml', value: `<span className="dai-mig-badge">${text.replace(/</g, '&lt;')}</span>`, reviewFlag: 'T4 compose: badge → span (custom CSS)' }] };
+  } },
+  /**
+   * Mintlify publishes a custom heading anchor as a div wrapping the heading:
+   * `<div id="openapi-overlays">` around `## OpenAPI Overlays`. The div is not content -
+   * it carries the anchor the source states for that heading, which is what an inbound
+   * deep link resolves against. The heading is lifted out carrying that id in the same
+   * `sourceId` the authored `{#custom-id}` form lifts into, so one anchor map serves
+   * both and no wrapper reaches the output.
+   */
+  'anchor-div-to-heading': { reads: ['id'], run: (node) => {
+    const id = typeof node.props.id === 'string' ? node.props.id.trim() : '';
+    const [first, ...rest] = node.children;
+    if (!id || first?.type !== 'heading') return quarantined(node, 'a div carrying an id is a heading anchor only when a heading leads it; this one does not');
+    return { blocks: [{ ...first, sourceId: id }, ...rest] };
+  } },
+  /**
+   * The card-shaped families. Mintlify spells a linked card several ways - ThemeCard, HeroCard,
+   * Tile, PreviewButton, GitHub.Repo - and each is a title, a link and some supporting text, which
+   * is what the target's Card is. The description is a prop here and a child there, so it becomes
+   * the card's own text; an image child becomes the card image; a GitHub repo becomes its URL.
+   * None of this is decoration: the link is the point of the component, and a fragment loses it.
+   */
+  'to-card': { reads: ['title', 'href', 'description', 'icon', 'image', 'cta', 'repo', 'horizontal'], run: (node, rule) => {
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+    const repo = str(node.props.repo);
+    const images = node.children.filter((child): child is Extract<Block, { type: 'image' }> => child.type === 'image');
+    const rest = node.children.filter((child) => child.type !== 'image');
+    const title = str(node.props.title) ?? repo ?? blocksText(rest) ?? 'Card';
+    const href = str(node.props.href) ?? (repo ? `https://github.com/${repo}` : undefined);
+    const description = str(node.props.description);
+    // The label of a button-shaped card became its title, so it is not repeated as body text.
+    const body = str(node.props.title) || repo ? rest : [];
+    const children: Block[] = [
+      ...(description ? [{ id: `${node.id}:desc`, type: 'paragraph' as const, children: [{ id: `${node.id}:desc:t`, type: 'text' as const, value: description }] }] : []),
+      ...body,
+    ];
+    const props: Record<string, string | number | boolean | null> = { title };
+    if (href) props.href = href;
+    const image = str(node.props.image) ?? (images[0] ? images[0].url : undefined);
+    if (image) props.image = image;
+    if (str(node.props.icon)) props.icon = str(node.props.icon)!;
+    const lossy = repo ? ['the repository card no longer reads live stars and forks from the GitHub API'] : [];
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Card', props, children, rule: rule.id }], lossy };
+  } },
+  /**
+   * A row of swatches is a titled group: "Primary", "Secondary". That title is authored content,
+   * so it is carried onto a disclosure that holds the row rather than dropped - dropping it would
+   * lose text the source states, which no tier makes acceptable. The row opens by default, so it
+   * still reads as a labelled row rather than something the reader has to find.
+   */
+  'color-row-to-titled-group': { reads: ['title'], run: (node, rule) => {
+    const title = typeof node.props.title === 'string' && node.props.title.trim() ? node.props.title.trim() : undefined;
+    const columns: Block = { id: `${node.id}:cols`, type: 'dai', name: 'Columns', props: { cols: 3 }, children: node.children, rule: rule.id };
+    if (!title) return { blocks: [columns] };
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Expandable', props: { title, defaultOpen: true }, children: [columns], rule: rule.id }] };
+  } },
+  /** A colour swatch is a named value: the name titles a card and the value is a code block, which the target renders with a copy button. */
+  'color-item-to-card': { reads: ['name', 'value'], run: (node, rule) => {
+    const name = typeof node.props.name === 'string' ? node.props.name : '';
+    const value = typeof node.props.value === 'string' ? node.props.value : '';
+    if (!name && !value) return quarantined(node, 'a colour swatch states neither a name nor a value');
+    const code: Block = { id: `${node.id}:val`, type: 'code', value, lang: 'css' };
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Card', props: { title: name || value }, children: value ? [code] : [], rule: rule.id }], lossy: ['the swatch no longer paints its colour; its value is shown as a copyable code block'] };
+  } },
+  /** A file in a tree is a leaf: its name is the content, and the folder around it carries the disclosure. */
+  'tree-file-to-text': { reads: ['name'], run: (node) => {
+    const name = typeof node.props.name === 'string' ? node.props.name : '';
+    if (!name) return quarantined(node, 'a tree file states no name');
+    return { blocks: [{ id: node.id, type: 'paragraph', children: [{ id: `${node.id}:t`, type: 'inlineCode', value: name }] }] };
+  } },
+  /** A prompt is text meant to be copied, which is what a code block is; its description becomes the line introducing it. */
+  'prompt-to-code': { reads: ['description', 'actions'], run: (node) => {
+    const description = typeof node.props.description === 'string' ? node.props.description.trim() : '';
+    const value = blocksText(node.children) ?? '';
+    if (!value) return quarantined(node, 'a prompt holds no text to copy');
+    const blocks: Block[] = [];
+    if (description) blocks.push({ id: `${node.id}:desc`, type: 'paragraph', children: [{ id: `${node.id}:desc:t`, type: 'text', value: description }] });
+    blocks.push({ id: `${node.id}:code`, type: 'code', value, lang: 'text' });
+    return { blocks, lossy: ['the prompt\'s "open in editor" actions are not carried; the text stays copyable'] };
+  } },
+  /**
+   * A live demo whose interactivity is the content: a generator, a playground, a counter. Nothing
+   * static reproduces one, and a static shell of a generator looks broken rather than merely
+   * reduced, so it becomes a card linking to the working tool - in the widget's own position,
+   * because the prose around it points at it ("use the generator below").
+   *
+   * The link is to the source site because no customer-controlled home exists yet. That is
+   * temporary by construction, so every one of these is reported as needing a permanent home
+   * before cutover rather than passing quietly as a finished mapping.
+   */
+  'live-demo-to-card': { reads: [], run: (node, rule) => {
+    const title = typeof rule.to?.props?.title === 'string' ? rule.to.props.title : node.name;
+    const href = typeof rule.to?.props?.href === 'string' ? rule.to.props.href : undefined;
+    const props: Record<string, string | number | boolean | null> = { title };
+    if (href) props.href = href;
+    // Whatever the widget wrapped is authored content and stays: a playground holds the very
+    // snippets and warnings the page teaches from, and only the live behaviour cannot come.
+    return {
+      blocks: [{ id: node.id, type: 'dai', name: 'Card', props, children: node.children, rule: rule.id }],
+      lossy: [`<${node.name}> is a live demo and cannot be reproduced statically; it became a card linking to the working tool${rule.note ? ` — ${rule.note}` : ''}. Needs a customer-controlled home before cutover.`],
+    };
+  } },
+  /**
+   * A heading written as raw HTML is a heading. The level comes from the tag, so h1..h6 all read
+   * the same way, and the text is the heading's own - losing it to a fragment would take a page's
+   * outline (and its anchors) with it.
+   */
+  'html-heading-to-heading': { reads: [], run: (node) => {
+    const depth = Number(String(node.name ?? '').replace(/^h/i, ''));
+    const level = (Number.isInteger(depth) && depth >= 1 && depth <= 6 ? depth : 2) as 1 | 2 | 3 | 4 | 5 | 6;
+    const children = node.children.flatMap((child) => (child.type === 'paragraph' || child.type === 'heading' ? child.children : []));
+    if (!children.length) return quarantined(node, 'a heading states no text');
+    return { blocks: [{ id: node.id, type: 'heading', depth: level, children }] };
+  } },
+  /** A horizontal rule written as raw HTML is a thematic break. */
+  'html-rule-to-thematic-break': { reads: [], run: (node) => ({ blocks: [{ id: node.id, type: 'thematicBreak' }] }) },
+  /** A view is one of several alternatives a reader picks between; without a wrapper to group siblings, each becomes its own disclosure. */
+  'view-to-expandable': { reads: ['title', 'icon'], run: (node, rule) => {
+    const title = typeof node.props.title === 'string' && node.props.title.trim() ? node.props.title.trim() : 'View';
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Expandable', props: { title }, children: node.children, rule: rule.id }], lossy: ['the page-level view switcher became one disclosure per view'] };
   } },
   /** Frame around one image: a figure when it carries a caption, otherwise the bare image (the frame itself is presentation). */
   'frame-to-image': { reads: ['caption'], run: (node) => {
@@ -283,8 +436,19 @@ export class RulesEngine {
     if (plan?.status === 'quarantined') {
       return this.quarantine(node, pageId, plan.reason ?? 'plan: quarantined');
     }
-    if (node.styleDeps?.some((x) => x.startsWith('expression:')) && plan?.status !== 'approved') {
-      return this.quarantine(node, pageId, 'source MDX contains a non-literal expression; explicit reviewed approval is required');
+    // A non-literal prop the matching rule already drops cannot reach the output, so it is no reason
+    // to hold the component back: a Card written with icon={<svg/>} is still a Card, and quarantining
+    // it would lose the link that is the point of it over a glyph the target never carries anyway.
+    // Every other expression still stops here, because nothing evaluates one.
+    const expressions = (node.styleDeps ?? []).filter((x) => x.startsWith('expression:')).map((x) => x.slice('expression:'.length));
+    const matched = this.findRule(node);
+    const dropped = new Set([...(matched?.drop ?? []), ...(matched?.dropWhenExpression ?? [])]);
+    const blocking = expressions.filter((name) => !dropped.has(name));
+    // A rule that emits nothing cannot carry an expression into the output either, so a node the
+    // rule drops outright - MDX import/export syntax, which is never page content - is not held here.
+    const emitsNothing = matched?.children === 'drop' && !matched.to && !matched.handler;
+    if (blocking.length && !emitsNothing && plan?.status !== 'approved') {
+      return this.quarantine(node, pageId, `source MDX contains a non-literal expression (${blocking.join(', ')}); explicit reviewed approval is required`);
     }
 
     const rule = plan?.rule ? this.rules.find((r) => r.id === plan.rule) : this.findRule(node);
@@ -397,13 +561,23 @@ export function collectComponents(doc: DocIR): ComponentNode[] {
  * itself. So a handler that lost a paragraph, a rename that lost a prop, or any loss no approved
  * rule declared, all still fail the gate.
  */
-export function applyDeclaredLosses(doc: DocIR, engine: RulesEngine): DocIR {
+export function applyDeclaredLosses(doc: DocIR, engine: RulesEngine, substituted: ReadonlySet<string> = new Set()): DocIR {
   const strip = (blocks: Block[]): Block[] => blocks.flatMap((block): Block[] => {
     if (block.type === 'list') return [{ ...block, children: block.children.map((li) => ({ ...li, children: strip(li.children) })) }];
     if (block.type !== 'component') return isBlockWithChildren(block) ? [{ ...block, children: strip(block.children as Block[]) } as Block] : [block];
     const rule = engine.findRule(block);
-    // A handler decides this node's shape; leave it exactly as the source stated it.
-    if (rule?.handler) return [{ ...block, children: strip(block.children) }];
+    // A component a named person recorded a substitution for is read as what replaces it, so the
+    // comparison measures everything else on the page. This is the only way invented content passes,
+    // and it passes because someone owned it - never because anything claimed the two were equal.
+    if (substituted.has(block.name)) return engine.resolveDoc({ ...doc, children: [block] }).children;
+    // A handler decides this node's shape; leave it exactly as the source stated it - except for a
+    // prop the rule declares dropped, which is dropped whoever shapes the node and stays reported.
+    if (rule?.handler) {
+      if (!rule.drop?.length) return [{ ...block, children: strip(block.children) }];
+      const kept = { ...block.props };
+      for (const prop of rule.drop) delete kept[prop];
+      return [{ ...block, props: kept, children: strip(block.children) }];
+    }
     if (rule?.children === 'drop') return [];
     if (rule?.children === 'unwrap') return strip(block.children);
     if (!rule?.drop?.length) return [{ ...block, children: strip(block.children) }];

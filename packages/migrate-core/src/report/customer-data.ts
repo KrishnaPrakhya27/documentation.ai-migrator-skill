@@ -21,6 +21,7 @@ import { gateLanguage, type GateGroup } from './gate-language.js';
 import { describeMigrator } from '../session/provenance.js';
 import { countQuarantine } from '../session/quarantine.js';
 import { readBlockExclusions } from '../ir/exclusions.js';
+import { readScopeDecisions } from '../evidence/scope.js';
 import type { Session } from '../session/workspace.js';
 import type { Tree, TreePage } from '../nav/tree.js';
 
@@ -119,6 +120,22 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
       heading: `${pages.length} page${pages.length === 1 ? '' : 's'} not migrated — ${reason}`,
       explanation: 'These exist in your source but were not carried over for the reason above. If any belong in the new site, they can be added.',
       ...capped(pages.map(pageLabel)),
+      needsYou: true,
+    });
+  }
+
+  // Content the migration wrote in place of something it could not carry. This is the one category
+  // that is the migrator's own words rather than the author's, so it is never summarised away: a
+  // substitution that reached neither the exclusions nor the quarantines would be invisible here,
+  // which is precisely the page a customer reads to find out what is not theirs.
+  const substituted = readScopeDecisions(workspace).substituted;
+  if (substituted.length) {
+    const label = (entry: { component: string; reason: string; approvedBy: string; contentLoss?: boolean }) =>
+      `<${entry.component}> — ${entry.contentLoss ? 'the reader loses content' : 'the reader loses a convenience'}: ${entry.reason} (approved by ${entry.approvedBy})`;
+    shortfalls.push({
+      heading: `${substituted.length} component${substituted.length === 1 ? '' : 's'} replaced by something the migration wrote`,
+      explanation: 'These could not be carried over as they were, so the migration put something in their place. The replacement text is ours, not yours, and each one points at the original tool for now — they need a home you control before you go live.',
+      ...capped(substituted.map(label)),
       needsYou: true,
     });
   }

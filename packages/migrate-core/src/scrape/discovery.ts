@@ -76,6 +76,8 @@ export interface DiscoveryResult {
   llms?: { url: string; entries: LlmsEntry[] };
   /** llms.txt entries that link to another site, which are references rather than pages of this one. */
   externalLlmsLinks?: Array<{ title: string; url: string }>;
+  /** Same-origin URLs outside the site's base path: pages of whatever else the host publishes. */
+  refusedOutsideBase?: string[];
   /** Alias hosts treated as the seed origin: the profile's paired hosts plus those named by robots.txt Sitemap directives and llms.txt. */
   canonicalHosts: string[];
   /** The crawl policy the site published, frozen as the rules this run obeyed. */
@@ -229,6 +231,12 @@ function flightPayloads(html: string): string[] {
 /** Keys Mintlify nests navigation under, outermost first; the same set the repository adapter walks. */
 const CONTAINER_KEYS = ['versions', 'languages', 'products', 'dropdowns', 'anchors', 'tabs', 'menus', 'groups', 'pages'] as const;
 
+/** Which kind of container a navigation node is, by the key that names it. */
+function kindOf(node: Record<string, unknown>): 'group' | 'tab' | 'dropdown' | 'product' | 'version' | 'language' | 'menu' | undefined {
+  return (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string')
+    ?? (typeof node.anchor === 'string' ? 'menu' : undefined);
+}
+
 /** The label a navigation container carries, whatever kind of container it is. */
 function containerLabel(node: Record<string, unknown>): string | undefined {
   for (const key of ['group', 'tab', 'anchor', 'dropdown', 'product', 'version', 'language', 'menu'] as const) {
@@ -243,10 +251,17 @@ interface MintlifyNavigationExtraction {
   pages: Array<{ url: string; title?: string; sidebarTitle?: string; description?: string; groups: string[] }>;
 }
 
-/** Mintlify navigation entries are site-root paths (`quickstart`, `/quickstart`); the root page is authored as `index` and served at `/`. */
-function mintlifyNavigationUrl(entry: string, origin: string): string {
-  const url = new URL(entry.replace(/^\/+/, ''), origin + '/');
-  if (url.origin === origin && url.pathname === '/index') url.pathname = '/';
+/**
+ * Mintlify navigation entries are paths relative to the docs root (`quickstart`,
+ * `/quickstart`), not to the origin: a site published under a prefix states
+ * `quickstart` and serves it at `/docs/quickstart`. They are resolved against
+ * that root, so the prefix survives. The root page is authored as `index` and
+ * served at the root itself.
+ */
+function mintlifyNavigationUrl(entry: string, base: string): string {
+  const root = new URL(base);
+  const url = new URL(entry.replace(/^\/+/, ''), root);
+  if (url.origin === root.origin && url.pathname === `${root.pathname}index`) url.pathname = root.pathname.replace(/\/$/, '') || '/';
   return url.toString();
 }
 
@@ -270,6 +285,69 @@ function pageUrlOfLlmsEntry(entry: LlmsEntry): string {
  * named, so it is tried first, then each ancestor, always ending at the origin
  * so a site published at the root behaves exactly as before.
  */
+/**
+ * The site's navigation as the union of what its pages state. A Mintlify page
+ * carries a `scopedNav` holding only its own locale and tab, so reading one
+ * page states a fraction of the sidebar: on a four-locale site the first page
+ * placed 172 of 1050 pages and left the rest to be grouped by their URL path,
+ * which is structure the source never stated.
+ *
+ * Groups match by label among their siblings and merge their children, so a
+ * tab reached from several pages is one tab. A page already placed is not
+ * placed twice, and anything new keeps the order the source gave it. Nodes are
+ * rebuilt rather than mutated, so an already-recorded candidate never changes
+ * under a later page.
+ */
+export function mergeNavigation(into: DiscoveredNavigationNode[], from: DiscoveredNavigationNode[]): DiscoveredNavigationNode[] {
+  const result = [...into];
+  for (const node of from) {
+    if (node.type === 'page') {
+      if (!result.some((existing) => existing.type === 'page' && existing.url === node.url)) result.push(node);
+      continue;
+    }
+    const at = result.findIndex((existing) => existing.type === 'group' && existing.label === node.label);
+    if (at < 0) { result.push(node); continue; }
+    const existing = result[at] as Extract<DiscoveredNavigationNode, { type: 'group' }>;
+    result[at] = { ...existing, children: mergeNavigation(existing.children, node.children) };
+  }
+  return result;
+}
+
+/**
+ * The path prefix the operator named as the site, always ending in `/` so a
+ * relative href resolves inside it. One host commonly publishes a marketing
+ * site at its root and the documentation under a prefix, and the seed path is
+ * the operator's statement of which of the two is being migrated. A seed at the
+ * origin root names the whole host, which is how a site published at the root
+ * has always behaved.
+ */
+export function siteBaseUrl(seedUrl: string): string {
+  const seed = new URL(seedUrl);
+  seed.search = '';
+  seed.hash = '';
+  if (!seed.pathname.endsWith('/')) seed.pathname = `${seed.pathname}/`;
+  return seed.toString();
+}
+
+/**
+ * The base a Mintlify `scopedNav` href is relative to: the docs deployment
+ * root, which every page states by serving its own sitemap under it. Read from
+ * the page rather than assumed from the seed, so a seed naming any page of the
+ * site resolves the navigation the same way.
+ */
+export function mintlifyNavBase(html: string, seedUrl: string): string {
+  const marker = html.indexOf('/sitemap.xml');
+  if (marker >= 0) {
+    let start = marker;
+    while (start > 0 && !'"\'\\ ='.includes(html[start - 1])) start--;
+    const path = html.slice(start, marker);
+    if (/^(?:\/[A-Za-z0-9._~-]+)*$/.test(path)) return new URL(`${path}/`, new URL(seedUrl).origin).toString();
+  }
+  // Nothing declared: the origin root, which is where a site that states no prefix lives. Never the
+  // seed - an operator may name any page, and a deep page would be read as a root of its own.
+  return new URL('/', seedUrl).toString();
+}
+
 export function siteFileBases(seedUrl: string, limit = 4): string[] {
   const seed = new URL(seedUrl);
   const segments = seed.pathname.split('/').filter(Boolean);
@@ -418,7 +496,9 @@ async function fetchLlmsIndex(fetcher: Fetcher, bases: string[], seedHost: strin
  * labels, descriptions, order, and repeated placements.
  */
 export function extractMintlifyNavigation(html: string, baseUrl: string): MintlifyNavigationExtraction | undefined {
-  const base = new URL(baseUrl);
+  // The page states the docs root it is published under; a base without a trailing slash would
+  // resolve `quickstart` against the parent of its last segment and drop that prefix.
+  const base = new URL(mintlifyNavBase(html, baseUrl));
   const arrays: unknown[][] = [];
   const payloads = flightPayloads(html);
   // `scopedNav` is what the sidebar renders. `docsConfig.navigation` is stripped server-side on
@@ -456,14 +536,14 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
   const pages: MintlifyNavigationExtraction['pages'] = [];
   const walk = (items: unknown[], groups: string[]): DiscoveredNavigationNode[] => items.flatMap((value) => {
     if (typeof value === 'string') {
-      const url = mintlifyNavigationUrl(value, base.origin);
+      const url = mintlifyNavigationUrl(value, base.href);
       pages.push({ url, groups });
       return [{ type: 'page' as const, url }];
     }
     if (!value || typeof value !== 'object') return [];
     const node = value as Record<string, unknown>;
     if (typeof node.href === 'string' && !containerLabel(node)) {
-      const url = mintlifyNavigationUrl(node.href, base.origin);
+      const url = mintlifyNavigationUrl(node.href, base.href);
       const title = typeof node.title === 'string' ? node.title : undefined;
       const sidebarTitle = typeof node.sidebarTitle === 'string' ? node.sidebarTitle : undefined;
       const description = typeof node.description === 'string' ? node.description : undefined;
@@ -472,9 +552,21 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
     }
     // Container kinds survive discovery; flattening switchers changes source structure.
     const label = containerLabel(node);
-    const children = CONTAINER_KEYS.flatMap((key) => (Array.isArray(node[key]) ? walk(node[key] as unknown[], label ? [...groups, label] : groups) : []));
+    // A scoped sidebar carries the current page's own locale and tab in full, and reduces every
+    // *sibling* locale or tab to one entry titled with that container's own name, linking to it -
+    // the switcher, not a placement. Read across a whole site those stubs accumulate one bogus page
+    // per page crawled, all of them titled `en`, beside the real tabs. A group is exempt: a group
+    // holding a single page that shares its name is an ordinary sidebar entry.
+    const switcherStub = (key: string, items: unknown[]): boolean =>
+      key === 'pages' && !!label && kindOf(node) !== 'group' && items.length === 1 &&
+      !!items[0] && typeof items[0] === 'object' && (items[0] as Record<string, unknown>).title === label;
+    const children = CONTAINER_KEYS.flatMap((key) => {
+      const items = node[key];
+      if (!Array.isArray(items) || switcherStub(key, items)) return [];
+      return walk(items as unknown[], label ? [...groups, label] : groups);
+    });
     if (!children.length && typeof node.href !== 'string') return [];
-    const kind = (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string') ?? (typeof node.anchor === 'string' ? 'menu' : undefined);
+    const kind = kindOf(node);
     const metadata = Object.fromEntries(['icon', 'href', 'expandable', 'description'].filter((key) => node[key] !== undefined).map((key) => [key, node[key]]));
     return label ? [{ type: 'group' as const, ...(kind && kind !== 'group' ? { kind } : {}), label, ...metadata, children }] : children;
   });
@@ -649,8 +741,18 @@ export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform
     }
   }
   if (platform === 'mintlify') {
-    const extracted = extractMintlifyNavigation(home.html, origin)?.navigation;
-    if (extracted) return { nodes: extracted, source: 'platform-metadata' };
+    // A Mintlify page states only its own locale and tab, so the site's sidebar is the union of
+    // what its pages state. Reading the home page alone recovered 172 of 1050 placements here.
+    // The union is built in the order the pages were discovered, which is the order the live crawl
+    // merged them in, so re-deriving from the frozen bytes yields the navigation discovery recorded
+    // rather than a second, differently ordered one that verification would reject.
+    let merged: DiscoveredNavigationNode[] | undefined;
+    for (const page of pages) {
+      if (!page.html) continue;
+      const extracted = extractMintlifyNavigation(page.html, page.url)?.navigation;
+      if (extracted) merged = mergeNavigation(merged ?? [], extracted);
+    }
+    if (merged?.length) return { nodes: merged, source: 'platform-metadata' };
   }
   const sections = extractSectionTabs(home.html, seed, origin, profile);
   if (sections) {
@@ -898,6 +1000,12 @@ export async function discoverLiveSite(input: {
   const canonicalHosts = input.fetcher.canonicalHosts ?? new CanonicalHosts(origin);
   if (canonicalHosts.seedOrigin !== origin) throw new Error(`fetcher canonical hosts are bound to ${canonicalHosts.seedOrigin}, not the seed origin ${origin}`);
   const limit = Math.max(1, Math.min(input.limit ?? 5000, 50_000));
+  // Where the site publishes its own index is where the site begins. The seed cannot say: an
+  // operator may name any page, and a deep page of a root-published site would confine it to a
+  // directory. Until the site states a base, nothing is confined - which is the behaviour of a site
+  // published at the origin root.
+  let siteBase = new URL('/', origin).toString();
+  const refusedOutsideBase = new Set<string>();
   const records = new Map<string, { reasons: Set<string>; title?: string; description?: string; sidebarTitle?: string; htmlTitleTag?: string; domSidebarTitle?: string; llms?: LlmsEntry; discoveredOrder: number; sidebarOrder?: number; platformOrder?: number; sitemap?: SitemapEntry; groupHint?: string[]; locale?: string; version?: string; sidebarPages?: number; contentSha256?: string }>();
   const queue: string[] = [];
   const crawled = new Set<string>();
@@ -947,6 +1055,9 @@ export async function discoverLiveSite(input: {
   const add = (candidate: string, reason: string, base = input.seedUrl, meta: { sitemap?: SitemapEntry; locale?: string; title?: string; description?: string; sidebarTitle?: string; domSidebarTitle?: string; llms?: LlmsEntry; groupHint?: string[] } = {}) => {
     const normalised = normaliseDiscoveryUrl(candidate, base, origin, canonicalHosts);
     if (!normalised || !isDocumentCandidate(normalised, input.profile.platform)) return;
+    // Outside the site's own path prefix is another site on the same host. The site's own index is
+    // exempt: if llms.txt names a page, the site published it as documentation whatever its path.
+    if (reason !== 'llms-txt' && !withinSiteBase(normalised, siteBase)) { refusedOutsideBase.add(normalised); return; }
     // GitBook and other themes link to a page's published-Markdown representation.
     // It is acquisition evidence for the extensionless page, never another page entity,
     // and admitting it here wastes the crawl budget before it can be discarded.
@@ -1013,6 +1124,7 @@ export async function discoverLiveSite(input: {
   catch { /* discoverSitemaps and page acquisition report an unverifiable robots policy */ }
   const walkedLlms = await fetchLlmsIndex(input.fetcher, siteFileBases(input.seedUrl), seed.hostname.toLowerCase(), canonicalHosts, input.profile.llmsIndexSegment, failures, structuralIssues);
   const llms = walkedLlms ? { url: walkedLlms.url, entries: walkedLlms.entries } : undefined;
+  if (llms) siteBase = new URL('.', llms.url).toString();
   const externalLlmsLinks = walkedLlms?.external ?? [];
   if (llms) {
     for (const entry of llms.entries) if (PUBLISHED_MARKDOWN.test(new URL(entry.mdUrl).pathname)) canonicalHosts.add(new URL(entry.mdUrl).hostname);
@@ -1027,6 +1139,9 @@ export async function discoverLiveSite(input: {
   ].map((source) => new URL('.', source).toString());
   siteBase = declarationDirs.sort((a, b) => new URL(a).pathname.split('/').length - new URL(b).pathname.split('/').length)[0];
   failures.push(...sitemaps.failures.map((failure) => ({ ...failure, error: `sitemap: ${failure.error}` })));
+  // No llms.txt: the deepest base that serves a sitemap is the site's own, and a host serving one at
+  // its root only says the site is the root, so nothing is confined.
+  if (!llms) siteBase = siteFileBases(input.seedUrl).find((base) => sitemaps.sources.some((source) => source.startsWith(base))) ?? siteBase;
   for (const entry of sitemaps.entries) {
     add(entry.url, 'sitemap', input.seedUrl, { sitemap: entry });
     for (const alternate of entry.alternates) add(alternate.href, 'sitemap-hreflang', entry.url, { sitemap: entry, locale: alternate.hreflang === 'x-default' ? undefined : alternate.hreflang });
@@ -1115,13 +1230,12 @@ export async function discoverLiveSite(input: {
       siteName ??= metaContent(response.body, 'meta[property=og:site_name]');
       if (input.profile.platform === 'mintlify') {
         siteConfig ??= extractMintlifyDocsConfig(response.body);
-        if (!navigation) {
-          const extracted = extractMintlifyNavigation(response.body, input.seedUrl);
-          if (extracted) {
-            navigation = extracted.navigation;
-            navigationCandidates['platform-metadata'] = extracted.navigation;
-            for (const page of extracted.pages) add(page.url, 'platform-navigation', input.seedUrl, { title: page.title, description: page.description, sidebarTitle: page.sidebarTitle, groupHint: page.groups });
-          }
+        // Every page states its own slice of the sidebar, so all of them are read and merged.
+        const extracted = extractMintlifyNavigation(response.body, input.seedUrl);
+        if (extracted) {
+          navigation = mergeNavigation(navigation ?? [], extracted.navigation);
+          navigationCandidates['platform-metadata'] = navigation;
+          for (const page of extracted.pages) add(page.url, 'platform-navigation', input.seedUrl, { title: page.title, description: page.description, sidebarTitle: page.sidebarTitle, groupHint: page.groups });
         }
       }
       // MadCap Flare builds its sidebar in the browser from published data files, so a crawl of
@@ -1251,6 +1365,7 @@ export async function discoverLiveSite(input: {
     siteConfig,
     llms,
     ...(externalLlmsLinks.length ? { externalLlmsLinks } : {}),
+    ...(refusedOutsideBase.size ? { refusedOutsideBase: [...refusedOutsideBase].sort() } : {}),
     canonicalHosts: canonicalHosts.list(),
     robots,
     ...(navigationData.length ? { navigationData } : {}),
