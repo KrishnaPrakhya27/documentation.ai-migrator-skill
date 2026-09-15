@@ -729,6 +729,23 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     // and an edit to the words is still a difference
     expect(sourceFingerprint(stamped('x').replace('Body.', 'New body.'))).not.toBe(sourceFingerprint(stamped('x')));
   });
+  it('reads a GitBook page whose code, blocks and formulas would otherwise stop MDX', async () => {
+    const { markdownToIr } = await import('../src/ir/from-markdown.js');
+    const ir = (md: string) => markdownToIr(md, { platform: 'gitbook', file: 'p.md', pageId: 'p', title: 'T' });
+    // a code block published as HTML: MDX would read each { in the JavaScript as an expression
+    const htmlCode = '<pre class="language-javascript"><code class="lang-javascript"><strong>import { a } from \'m\';\n</strong>const x = { y: 1 };\n</code></pre>';
+    const fromHtml = ir(htmlCode);
+    expect(JSON.stringify(fromHtml)).toContain('import { a }');
+    expect(JSON.stringify(fromHtml)).toContain('javascript');
+    // a block the mapping does not know is still read, so it reaches the ledger instead of failing the stage
+    expect(() => ir('{% prompt description="Ask" %}\n\ntext\n\n{% endprompt %}\n')).not.toThrow();
+    // an embed written as a block, with the caption it falls back to
+    expect(() => ir('{% embed url="https://example.com/v" %}\ncaption\n{% endembed %}\n')).not.toThrow();
+    // a page documenting a block writes its syntax inside a fence, which is code, not a block
+    expect(() => ir('````markdown\n{% prompt a="b" %}\n```\ntext\n```\n{% endprompt %}\n````\n')).not.toThrow();
+    // TeX braces are not JavaScript
+    expect(() => ir('$$f(x) = e^{2 pi i}$$\n')).not.toThrow();
+  });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);
     expect(siteFileBases('https://acme.example/docs/')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);

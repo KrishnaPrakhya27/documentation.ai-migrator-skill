@@ -141,7 +141,7 @@ function gitbookQuotedMarkdown(source: string): string {
 function preprocessSegment(source: string, platform: string): string {
   let out = source.replace(/^(#{1,6}\s+.*?)\s*\{#([A-Za-z][\w:.-]*)\}\s*$/gm, (_, heading, id) => `${heading} ${ANCHOR_OPEN}${id}${ANCHOR_CLOSE}`);
   out = out.replace(/\{\{\s*snippet\.([^}]+?)\s*\}\}/g, (_, token) => `<snippetRef token="${quoteAttr(String(token).trim())}" />`);
-  if (platform === 'gitbook') out = gitbookMdxCompatible(gitbookLiquidBlocks(out));
+  if (platform === 'gitbook') out = gitbookMdxCompatible(gitbookLiquidBlocks(gitbookMathBraces(gitbookHtmlCodeBlocks(out))));
   if (platform === 'readme') out = readmeMdxCompatible(out);
   if (platform === 'docusaurus') {
     out = out.replace(/^:::(note|tip|info|warning|danger|caution)(?:\s+([^\n]+))?\s*$/gm, (_, kind, title) => `<admonition kind="${kind}"${title ? ` title="${quoteAttr(String(title).trim())}"` : ''}>`);
@@ -152,8 +152,17 @@ function preprocessSegment(source: string, platform: string): string {
 }
 
 const GITBOOK_BLOCK_TAGS = ['hint', 'tabs', 'tab', 'content-ref', 'stepper', 'step', 'columns', 'column', 'updates', 'update', 'code'];
-/** A Liquid tag alone on its line, optionally inside a blockquote, indented, or followed by a hard break; quoted attribute values may hold `%` (`width="50%"`). */
-const GITBOOK_TAG_LINE = new RegExp(String.raw`^((?:[ \t]*>)*)[ \t]*\{%\s*(end)?(${GITBOOK_BLOCK_TAGS.join('|')}|embed)\b((?:[^%"']|"[^"]*"|'[^']*')*)%\}[ \t]*(?:\\|<br\s*\/?>)?[ \t]*$`);
+/**
+ * A Liquid tag alone on its line, optionally inside a blockquote, indented, or followed by a hard
+ * break; quoted attribute values may hold `%` (`width="50%"`).
+ *
+ * Any block name is read, not only the ones with a mapping. A platform adds blocks — GitBook's
+ * `{% prompt %}` is newer than this list — and a name we do not know is a block to report as
+ * unmapped, which is what the ledger is for. Matching only known names left the rest as literal
+ * `{`, which MDX reads as the start of an expression and refuses: one unknown block on one page of
+ * 1255 failed the whole stage with "Could not parse expression with acorn" and no page named.
+ */
+const GITBOOK_TAG_LINE = new RegExp(String.raw`^((?:[ \t]*>)*)[ \t]*\{%\s*(end)?([A-Za-z][\w-]*)\b((?:[^%"']|"[^"]*"|'[^']*')*)%\}[ \t]*(?:\\|<br\s*\/?>)?[ \t]*$`);
 
 /**
  * GitBook Liquid block tags become JSX flow elements, each isolated by blank lines (inside
@@ -162,11 +171,62 @@ const GITBOOK_TAG_LINE = new RegExp(String.raw`^((?:[ \t]*>)*)[ \t]*\{%\s*(end)?
  * indentation is dropped because a GitBook block never belongs to a list item, and a hard
  * break left before a tag or on the tag line has nothing to break once the block ends there.
  */
+/**
+ * Braces inside a math span are TeX, not MDX.
+ *
+ * `$$x = e^{2 pi i}$$` is a formula GitBook renders with KaTeX; MDX sees `{2 pi i}` and tries to
+ * read it as JavaScript. Escaping the braces keeps the formula exactly as written — `\\{` is a
+ * literal brace to MDX — so the page parses and the text a reader sees is unchanged.
+ */
+function gitbookMathBraces(segment: string): string {
+  return segment.replace(/\$\$[\s\S]{0,2000}?\$\$/g, (math) => math.replace(/(?<!\\)([{}])/g, '\\$1'));
+}
+
+/**
+ * A code block GitBook published as HTML becomes the fence it renders as.
+ *
+ * `<pre class="language-js"><code class="lang-js">` is how GitBook writes a code block whose lines
+ * it wants to mark up (`<strong>` on a highlighted line). Left as HTML, MDX reads it as JSX and
+ * every `{` in the code starts an expression, so a page of JavaScript fails to parse at all. The
+ * language is the one the class names, the inline markup is presentation around the code rather
+ * than code, and the entities are written back to the characters they stand for.
+ */
+function gitbookHtmlCodeBlocks(segment: string): string {
+  return segment.replace(/<pre\b[^>]*>\s*<code\b([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi, (_whole, attrs: string, code: string) => {
+    const language = /class="[^"]*\blang(?:uage)?-([\w+#.-]+)/i.exec(attrs)?.[1] ?? '';
+    const text = code
+      .replace(/<[^>]+>/g, '')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#(?:39|x27);/gi, "'").replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/^\n/, '').replace(/\s+$/, '');
+    // a fence long enough that the code's own backticks cannot close it
+    const fence = '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+    return `\n\n${fence}${language}\n${text}\n${fence}\n\n`;
+  });
+}
+
 function gitbookLiquidBlocks(segment: string): string {
   const out: string[] = [];
+  // A page that documents a block writes the block's own syntax inside a fence. That is code a
+  // reader is meant to see, not a block to build, so fenced lines are left exactly as they are.
+  let fence: string | undefined;
   for (const line of segment.split('\n')) {
+    const delimiter = line.match(/^[ \t]*(`{3,}|~{3,})/);
+    if (delimiter) {
+      // A fence closes only on the same character, at least as long as the one that opened it, so a
+      // ```` block quoting ``` inside it stays one block.
+      if (!fence) fence = delimiter[1];
+      else if (delimiter[1][0] === fence[0] && delimiter[1].length >= fence.length) fence = undefined;
+      out.push(line); continue;
+    }
+    if (fence) { out.push(line); continue; }
     const m = line.match(GITBOOK_TAG_LINE);
-    if (!m || (m[2] && m[3] === 'embed')) { out.push(line); continue; }
+    if (!m) { out.push(line); continue; }
+    // GitBook writes an embed both ways: alone, and wrapped around the caption a reader sees when
+    // the embed cannot render. The element carries the URL and is self-closing either way, so the
+    // closing tag is dropped rather than left behind — left behind, its `{` reads as the start of an
+    // MDX expression and the page will not parse.
+    if (m[2] && m[3] === 'embed') continue;
     const quote = Array.from({ length: (m[1].match(/>/g) ?? []).length }, () => '>').join(' ');
     const inQuote = (text: string) => (quote && text ? `${quote} ${text}` : quote || text);
     for (let i = out.length - 1; i >= 0; i--) {
