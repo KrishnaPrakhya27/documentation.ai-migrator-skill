@@ -231,6 +231,12 @@ function flightPayloads(html: string): string[] {
 /** Keys Mintlify nests navigation under, outermost first; the same set the repository adapter walks. */
 const CONTAINER_KEYS = ['versions', 'languages', 'products', 'dropdowns', 'anchors', 'tabs', 'menus', 'groups', 'pages'] as const;
 
+/** Which kind of container a navigation node is, by the key that names it. */
+function kindOf(node: Record<string, unknown>): 'group' | 'tab' | 'dropdown' | 'product' | 'version' | 'language' | 'menu' | undefined {
+  return (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string')
+    ?? (typeof node.anchor === 'string' ? 'menu' : undefined);
+}
+
 /** The label a navigation container carries, whatever kind of container it is. */
 function containerLabel(node: Record<string, unknown>): string | undefined {
   for (const key of ['group', 'tab', 'anchor', 'dropdown', 'product', 'version', 'language', 'menu'] as const) {
@@ -549,9 +555,21 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
     }
     // Container kinds survive discovery; flattening switchers changes source structure.
     const label = containerLabel(node);
-    const children = CONTAINER_KEYS.flatMap((key) => (Array.isArray(node[key]) ? walk(node[key] as unknown[], label ? [...groups, label] : groups) : []));
+    // A scoped sidebar carries the current page's own locale and tab in full, and reduces every
+    // *sibling* locale or tab to one entry titled with that container's own name, linking to it -
+    // the switcher, not a placement. Read across a whole site those stubs accumulate one bogus page
+    // per page crawled, all of them titled `en`, beside the real tabs. A group is exempt: a group
+    // holding a single page that shares its name is an ordinary sidebar entry.
+    const switcherStub = (key: string, items: unknown[]): boolean =>
+      key === 'pages' && !!label && kindOf(node) !== 'group' && items.length === 1 &&
+      !!items[0] && typeof items[0] === 'object' && (items[0] as Record<string, unknown>).title === label;
+    const children = CONTAINER_KEYS.flatMap((key) => {
+      const items = node[key];
+      if (!Array.isArray(items) || switcherStub(key, items)) return [];
+      return walk(items as unknown[], label ? [...groups, label] : groups);
+    });
     if (!children.length && typeof node.href !== 'string') return [];
-    const kind = (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string') ?? (typeof node.anchor === 'string' ? 'menu' : undefined);
+    const kind = kindOf(node);
     const metadata = Object.fromEntries(['icon', 'href', 'expandable', 'description'].filter((key) => node[key] !== undefined).map((key) => [key, node[key]]));
     return label ? [{ type: 'group' as const, ...(kind && kind !== 'group' ? { kind } : {}), label, ...metadata, children }] : children;
   });
