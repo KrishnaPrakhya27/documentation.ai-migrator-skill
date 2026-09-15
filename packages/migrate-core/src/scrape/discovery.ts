@@ -726,8 +726,18 @@ export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform
     }
   }
   if (platform === 'mintlify') {
-    const extracted = extractMintlifyNavigation(home.html, origin)?.navigation;
-    if (extracted) return { nodes: extracted, source: 'platform-metadata' };
+    // A Mintlify page states only its own locale and tab, so the site's sidebar is the union of
+    // what its pages state. Reading the home page alone recovered 172 of 1050 placements here.
+    // The union is built in the order the pages were discovered, which is the order the live crawl
+    // merged them in, so re-deriving from the frozen bytes yields the navigation discovery recorded
+    // rather than a second, differently ordered one that verification would reject.
+    let merged: DiscoveredNavigationNode[] | undefined;
+    for (const page of pages) {
+      if (!page.html) continue;
+      const extracted = extractMintlifyNavigation(page.html, page.url)?.navigation;
+      if (extracted) merged = mergeNavigation(merged ?? [], extracted);
+    }
+    if (merged?.length) return { nodes: merged, source: 'platform-metadata' };
   }
   const sections = extractSectionTabs(home.html, seed, origin, profile);
   if (sections) {
