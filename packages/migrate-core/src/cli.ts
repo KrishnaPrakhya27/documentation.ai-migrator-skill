@@ -689,7 +689,7 @@ async function main() {
             // The rendered page states the search metadata even on a platform whose body is Markdown,
             // so it is read from the frozen HTML and carried; a canonical naming another page is
             // retargeted at convert, with the links.
-            const seo = page.html ? seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined) : {};
+            const seo = page.html ? seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined, profile.generatedOgImage) : {};
             docs.push(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}), ...seo }, codeMetaStrip: profile.codeMetaStrip }));
           }
           else {
@@ -710,7 +710,7 @@ async function main() {
             // the body — exactly what unwrapPublishedMarkdown does with a published page's leading H1.
             // Only that one heading goes, and only when it is the title: any other H1 is still content.
             const children = firstHeading && h1 && h1 === title ? ir.children.filter((block) => block !== firstHeading) : ir.children;
-            const seo = seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined);
+            const seo = seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined, profile.generatedOgImage);
             docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}), ...seo }, children });
           }
         }

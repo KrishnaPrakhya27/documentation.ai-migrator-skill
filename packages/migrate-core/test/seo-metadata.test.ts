@@ -96,3 +96,17 @@ describe('robots directives are release evidence', () => {
     expect(compare('index, follow')).toMatchObject({ pass: true });
   });
 });
+
+describe('a social card the platform generates', () => {
+  it('is branding and is not carried, while an authored one is', () => {
+    const page = { url: 'https://acme.example/docs/guide', title: 'Guide', description: 'A guide.' };
+    const generated = { ogImage: 'https://acme.mintlify.app/_next/image?url=%2F_mintlify%2Fapi%2Fog%3Ftitle%3DGuide%26theme%3Dabc' };
+    // baked with the source's own theme: the migrated site states its own, as with a logo or favicon
+    expect(seoFrontmatter(generated, page, () => undefined, '/_mintlify/api/og').ogImage).toBeUndefined();
+    // without the platform's generator declared, nothing is assumed
+    expect(seoFrontmatter(generated, page, () => undefined).ogImage).toBe(generated.ogImage);
+    // an image the author chose is a statement about the page and is carried
+    const authored = { ogImage: 'https://acme.example/images/guide-card.png' };
+    expect(seoFrontmatter(authored, page, () => undefined, '/_mintlify/api/og').ogImage).toBe(authored.ogImage);
+  });
+});
