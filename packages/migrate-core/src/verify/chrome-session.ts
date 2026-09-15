@@ -219,7 +219,11 @@ export async function openChromeSession(previewUrl: string, options: { concurren
   const shutdown = async (): Promise<void> => {
     try { devtools?.close(); } catch { /* the connection is already gone */ }
     chrome.kill('SIGKILL');
-    rmSync(profile, { recursive: true, force: true });
+    // The kill returns before Chrome has finished writing its profile, so a removal that starts at
+    // once races it and throws ENOTEMPTY - which failed a whole preview verification after every
+    // gate had already run. The retries wait for the process to let go, and a profile that still
+    // will not go is a temporary directory the system reclaims, never a reason to lose the result.
+    try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch { /* left for the system to reclaim */ }
   };
 
   try {
