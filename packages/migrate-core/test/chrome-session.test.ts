@@ -89,6 +89,53 @@ describe.skipIf(!chrome)('a real browser, driven over the DevTools protocol', ()
     }
   }, 120_000);
 
+  /**
+   * A server-rendered accordion reaches the DOM before its framework attaches the handler that
+   * opens it. Clicking once and reading the page made the content gate a race: the same preview
+   * reported 6 routes differing on one run and 8 on the next, always the bodies of collapsed
+   * blocks. The handler here attaches late, exactly as a hydrating page's does.
+   */
+  it('waits for a control that only works once the page has hydrated', async () => {
+    process.env.DAI_ALLOW_LOCAL_PREVIEW = '1';
+    const late = `<html><body>
+      <button id="toggle" aria-expanded="false">Show</button>
+      <div id="panel" hidden><p>Content behind a late handler</p></div>
+      <script>
+        setTimeout(() => {
+          document.getElementById('toggle').addEventListener('click', () => {
+            document.getElementById('toggle').setAttribute('aria-expanded', 'true');
+            document.getElementById('panel').hidden = false;
+          });
+        }, 900);
+      </script></body></html>`;
+    const { base, server } = await listen({ '/late': late });
+    const session = await openChromeSession(`${base}/late`, { concurrency: 1 });
+    try {
+      for (let run = 0; run < 2; run++) {
+        const opened = await session.render(`${base}/late`, { prepare: EXPAND_INTERACTIVE });
+        expect(opened).toContain('aria-expanded="true"');
+        expect(opened).toContain('Content behind a late handler');
+      }
+    } finally {
+      await session.close();
+      server.close();
+    }
+  }, 120_000);
+
+  it('gives up on a control that never opens instead of waiting for ever', async () => {
+    process.env.DAI_ALLOW_LOCAL_PREVIEW = '1';
+    const { base, server } = await listen({ '/stuck': '<html><body><button aria-expanded="false">Inert</button><p>Visible all along</p></body></html>' });
+    const session = await openChromeSession(`${base}/stuck`, { concurrency: 1 });
+    try {
+      const rendered = await session.render(`${base}/stuck`, { prepare: EXPAND_INTERACTIVE });
+      expect(rendered).toContain('aria-expanded="false"');
+      expect(rendered).toContain('Visible all along');
+    } finally {
+      await session.close();
+      server.close();
+    }
+  }, 120_000);
+
   it('captures every tab panel instead of only the final selected state', async () => {
     process.env.DAI_ALLOW_LOCAL_PREVIEW = '1';
     const tabs = `<html><body><div role="tablist">

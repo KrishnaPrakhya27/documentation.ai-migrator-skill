@@ -114,9 +114,35 @@ export const EXPAND_INTERACTIVE = `new Promise((done) => {
     timer = setTimeout(finish, 100);
     setTimeout(finish, 2000);
   });
+  const collapsed = () => Array.from(document.querySelectorAll('[aria-expanded="false"]:not([role="tab"])'));
+  /**
+   * A server-rendered accordion is in the DOM before its framework attaches the handler that opens
+   * it, and a click that lands first does nothing at all. Clicking once and reading the DOM made
+   * this gate a race: the same preview reported 6 routes differing on one run and 8 on the next,
+   * always the bodies of collapsed blocks. Clicking is retried until nothing opens any more, so the
+   * run waits for the page to become interactive rather than hoping it already is.
+   */
+  const openAll = async () => {
+    // A handler that has not attached yet is indistinguishable from one that will never attach, so
+    // clicking is retried against a deadline rather than stopped the first time nothing happens.
+    // A control still closed at the deadline is reported by the content gate, which knows whether
+    // anything the author wrote was behind it.
+    const deadline = Date.now() + 4000;
+    while (true) {
+      const remaining = collapsed();
+      if (!remaining.length) return true;
+      remaining.forEach(click);
+      await settle();
+      if (!collapsed().length) return true;
+      if (Date.now() > deadline) return false;
+      await new Promise((ready) => setTimeout(ready, 150));
+    }
+  };
   (async () => {
+    if (document.readyState !== 'complete') await new Promise((ready) => window.addEventListener('load', ready, { once: true }));
     document.querySelectorAll('details').forEach((element) => { element.open = true; });
-    document.querySelectorAll('[aria-expanded="false"]:not([role="tab"])').forEach(click);
+    await openAll();
+    document.querySelectorAll('details').forEach((element) => { element.open = true; });
     await settle();
     // A tab UI exposes one panel at a time. Preserve the DOM of every selected state in tab order,
     // then replace the live panels with those inert clones so verification sees all authored states.
