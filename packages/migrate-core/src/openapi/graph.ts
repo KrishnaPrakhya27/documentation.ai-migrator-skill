@@ -17,6 +17,14 @@ const escapePointer = (value: string): string => value.replace(/~/g, '~0').repla
 const obj = (value: Json | undefined): ObjectValue | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
 const documentUrl = (url: string): string => { const parsed = new URL(url); parsed.hash = ''; return parsed.toString(); };
 const fileFor = (url: string): string => `${sha256(url)}.json`;
+/** The file a captured spec is written to, by the URL it was captured from. */
+export const capturedSpecFile = fileFor;
+
+/** Where a spec lives in the output: the platform reads specifications from `api-reference/`. */
+export function specOutputPath(spec: string): string {
+  const clean = spec.replace(/^\.?\/+/, '');
+  return clean.startsWith('api-reference/') ? clean : `api-reference/${clean}`;
+}
 
 function jsonValue(value: unknown, seen = new Set<unknown>()): Json {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -151,7 +159,7 @@ export async function captureSpecGraph(input: SpecGraphInput): Promise<SpecManif
 }
 
 export function writeSpecOutput(workspace: string, manifest: SpecManifest, outputDir: string): void {
-  const dir = join(outputDir, 'openapi'); mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const dir = join(outputDir, 'api-reference'); mkdirSync(dir, { recursive: true, mode: 0o700 });
   for (const document of manifest.documents) {
     if (document.file !== fileFor(document.source)) throw new Error('OpenAPI manifest contains an invalid output path');
     const source = readFileSync(join(workspace, 'source-cache', 'openapi', `${sha256(document.source)}.source`));

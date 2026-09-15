@@ -30,7 +30,7 @@ export interface MintlifyRepo {
   missing: string[];
 }
 
-const DIVISIONS = ['versions', 'languages', 'tabs', 'anchors', 'dropdowns', 'products', 'menus', 'groups', 'pages'] as const;
+const DIVISIONS = ['versions', 'languages', 'tabs', 'anchors', 'dropdowns', 'products', 'menus', 'menu', 'groups', 'pages'] as const;
 
 function pageFile(root: string, page: string): string | undefined {
   for (const ext of ['.mdx', '.md']) { const p = join(root, `${page}${ext}`); if (existsSync(p)) return p; }
@@ -38,7 +38,7 @@ function pageFile(root: string, page: string): string | undefined {
 }
 
 function labelOf(node: any): string | undefined {
-  return node.group ?? node.tab ?? node.anchor ?? node.dropdown ?? node.product ?? node.version ?? node.language ?? node.menu;
+  return node.group ?? node.tab ?? node.anchor ?? node.dropdown ?? node.product ?? node.version ?? node.language ?? node.menu ?? node.item;
 }
 
 export function readMintlifyRepo(rootIn: string): MintlifyRepo {
@@ -75,7 +75,10 @@ export function readMintlifyRepo(rootIn: string): MintlifyRepo {
     if (label && !node.version && !node.language) next.group = [...ctx.group, String(label)];
     if (typeof node.openapi === 'string') { next.openapi = node.openapi; openapi.push({ groupPath: next.group, spec: node.openapi, version: next.version, locale: next.locale }); }
     else if (node.openapi && typeof node.openapi === 'object' && typeof node.openapi.source === 'string') { openapi.push({ groupPath: next.group, spec: node.openapi.source, version: next.version, locale: next.locale }); }
-    const kind = (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string') ?? (typeof node.anchor === 'string' ? 'menu' : undefined);
+    // A menu's `item` is what the platform calls a dropdown.
+    const kind = (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string') ?? (typeof node.anchor === 'string' ? 'menu' : typeof node.item === 'string' ? 'dropdown' : undefined);
+    // Hidden from the navigation is not unpublished: the pages migrate and are reported as unlisted.
+    if (node.hidden === true) { for (const k of DIVISIONS) if (k in node) walk(node[k], next); return []; }
     if (typeof node.href === 'string' && !DIVISIONS.some((k) => k in node)) {
       if (!label || !kind) throw new Error(`${configFile}: external navigation entry ${node.href} has no supported container label`);
       return [{ type: 'group', kind, label, ...navigationMetadata(node), children: [] }];

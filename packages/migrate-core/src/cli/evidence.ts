@@ -100,7 +100,9 @@ export function buildSourceEvidence(workspace: string, tree: Tree): SourceEviden
       const toSource = (items: DiscoveredNavigationNode[]): SourceNavigationNode[] => items.flatMap((node): SourceNavigationNode[] => {
         if (node.type === 'page') { const id = byUrl.get(node.url.replace(/\/$/, '')); return id ? [{ type: 'page', pageId: id, title: node.title }] : []; }
         const children = toSource(node.children);
-        return children.length || node.href ? [{ ...node, children }] : [];
+        const { pageUrl, ...container } = node;
+        const ownId = pageUrl ? byUrl.get(pageUrl.replace(/\/$/, '')) : undefined;
+        return children.length || node.href || ownId ? [{ ...container, ...(ownId ? { pageId: ownId } : {}), children }] : [];
       });
       navigation = buildDocumentationNavigation({ ...tree, navigation: toSource(nodes) }, writtenPagePaths(workspace, tree), readPlatformMeta(workspace)).navigation;
     }

@@ -46,7 +46,12 @@ export interface DiscoveredUrl {
 
 export type DiscoveredNavigationNode =
   | { type: 'page'; url: string; title?: string }
-  | { type: 'group'; kind?: import('../nav/tree.js').NavigationContainerKind; label: string; children: DiscoveredNavigationNode[]; icon?: string; href?: string; expandable?: boolean; description?: string };
+  | {
+      type: 'group'; kind?: import('../nav/tree.js').NavigationContainerKind; label: string; children: DiscoveredNavigationNode[];
+      /** The page this container itself opens, when the source gives it one: a parent page with subpages. It is the container's own, never a duplicate first entry. */
+      pageUrl?: string;
+      icon?: string; href?: string; expandable?: boolean; description?: string;
+    };
 
 /** Site presentation as the source platform declares it. Recorded as evidence; only the name is carried into the migrated site. */
 export interface SiteConfig {
@@ -229,17 +234,19 @@ function flightPayloads(html: string): string[] {
 }
 
 /** Keys Mintlify nests navigation under, outermost first; the same set the repository adapter walks. */
-const CONTAINER_KEYS = ['versions', 'languages', 'products', 'dropdowns', 'anchors', 'tabs', 'menus', 'groups', 'pages'] as const;
+const CONTAINER_KEYS = ['versions', 'languages', 'products', 'dropdowns', 'anchors', 'tabs', 'menus', 'menu', 'groups', 'pages'] as const;
 
 /** Which kind of container a navigation node is, by the key that names it. */
 function kindOf(node: Record<string, unknown>): 'group' | 'tab' | 'dropdown' | 'product' | 'version' | 'language' | 'menu' | undefined {
   return (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string')
-    ?? (typeof node.anchor === 'string' ? 'menu' : undefined);
+    // An anchor is a menu; a menu's `item` is what the platform calls a dropdown: a labelled entry
+    // with a description and an icon that opens groups, pages, or an external link.
+    ?? (typeof node.anchor === 'string' ? 'menu' : typeof node.item === 'string' ? 'dropdown' : undefined);
 }
 
 /** The label a navigation container carries, whatever kind of container it is. */
 function containerLabel(node: Record<string, unknown>): string | undefined {
-  for (const key of ['group', 'tab', 'anchor', 'dropdown', 'product', 'version', 'language', 'menu'] as const) {
+  for (const key of ['group', 'tab', 'anchor', 'dropdown', 'product', 'version', 'language', 'menu', 'item'] as const) {
     const value = node[key];
     if (typeof value === 'string' && value) return value;
   }
@@ -308,7 +315,8 @@ export function mergeNavigation(into: DiscoveredNavigationNode[], from: Discover
     const at = result.findIndex((existing) => existing.type === 'group' && existing.label === node.label);
     if (at < 0) { result.push(node); continue; }
     const existing = result[at] as Extract<DiscoveredNavigationNode, { type: 'group' }>;
-    result[at] = { ...existing, children: mergeNavigation(existing.children, node.children) };
+    const pageUrl = existing.pageUrl ?? node.pageUrl;
+    result[at] = { ...existing, ...(pageUrl ? { pageUrl } : {}), children: mergeNavigation(existing.children, node.children) };
   }
   return result;
 }
@@ -542,6 +550,14 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
     }
     if (!value || typeof value !== 'object') return [];
     const node = value as Record<string, unknown>;
+    // A tab, group or page the site hides from its navigation is still published: its pages are
+    // discovered and migrate, and are reported as unlisted rather than placed in a sidebar the
+    // source never showed. mintlify.com hides a whole Help center tab this way.
+    if (node.hidden === true) {
+      if (typeof node.href === 'string' && !containerLabel(node)) pages.push({ url: mintlifyNavigationUrl(node.href, base.href), groups, ...(typeof node.title === 'string' ? { title: node.title } : {}) });
+      for (const key of CONTAINER_KEYS) if (Array.isArray(node[key])) walk(node[key] as unknown[], groups);
+      return [];
+    }
     if (typeof node.href === 'string' && !containerLabel(node)) {
       const url = mintlifyNavigationUrl(node.href, base.href);
       const title = typeof node.title === 'string' ? node.title : undefined;
@@ -609,7 +625,7 @@ export function sidebarNavigationFromRoot(root: El, baseUrl: string, origin: str
 function placedPages(nodes: DiscoveredNavigationNode[], seen = new Set<string>()): Set<string> {
   for (const node of nodes) {
     if (node.type === 'page') seen.add(node.url);
-    else placedPages(node.children, seen);
+    else { if (node.pageUrl) seen.add(node.pageUrl); placedPages(node.children, seen); }
   }
   return seen;
 }
@@ -666,14 +682,17 @@ function navigationInContainer(container: El, baseUrl: string, origin: string, p
         const next = childLists.size ? siblings.slice(index + 1).find((sibling) => sibling.type === 'tag') : undefined;
         if (next && childLists.has(next as typeof child) && text) {
           // A parent page leads the group its label names. When one of its subpages is the same page, wherever it sits, that placement stands alone.
-          const group: { type: 'group'; label: string; children: DiscoveredNavigationNode[] } = { type: 'group', label: text, children: page ? [page] : [] };
+          const group: Extract<DiscoveredNavigationNode, { type: 'group' }> = { type: 'group', label: text, children: [] };
           const parent = current;
           current = group;
           walk(next as typeof child);
           current = parent;
-          const [own, ...subpages] = group.children;
-          if (own?.type === 'page' && subpages.some((child) => child.type === 'page' && child.url === own.url)) group.children.shift();
+          // The parent page is the group's own — what a reader opens by clicking the group — not a
+          // duplicate first entry beneath it. When the list also places it as a subpage, that
+          // placement stands alone.
+          if (page && !group.children.some((child) => child.type === 'page' && child.url === page.url)) group.pageUrl = page.url;
           if (group.children.length) (current ? current.children : out).push(group);
+          else if (page) (current ? current.children : out).push(page);
           index = siblings.indexOf(next);
           continue;
         }
@@ -891,7 +910,8 @@ export function mergeNavigationTrees(a: DiscoveredNavigationNode[], b: Discovere
 /** Two renderings of one node: children merge, and a label the other rendering states fills a gap. */
 function mergeNavigationNode(a: DiscoveredNavigationNode, b: DiscoveredNavigationNode, placed?: Set<string>): DiscoveredNavigationNode {
   if (a.type === 'group' && b.type === 'group') {
-    return { ...a, href: a.href ?? b.href, icon: a.icon ?? b.icon, description: a.description ?? b.description, children: mergeNavigationTrees(a.children, b.children, placed) };
+    const pageUrl = a.pageUrl ?? b.pageUrl;
+    return { ...a, ...(pageUrl ? { pageUrl } : {}), href: a.href ?? b.href, icon: a.icon ?? b.icon, description: a.description ?? b.description, children: mergeNavigationTrees(a.children, b.children, placed) };
   }
   if (a.type === 'page' && b.type === 'page') return { ...a, title: a.title ?? b.title };
   return a;
@@ -1038,6 +1058,7 @@ export async function discoverLiveSite(input: {
   const registerNavigationPages = (nodes: readonly DiscoveredNavigationNode[], groups: string[], base: string): void => {
     for (const node of nodes) {
       if (node.type === 'page') { add(node.url, 'platform-navigation', base, { sidebarTitle: node.title, groupHint: groups }); continue; }
+      if (node.pageUrl) add(node.pageUrl, 'platform-navigation', base, { sidebarTitle: node.label, groupHint: groups });
       registerNavigationPages(node.children, [...groups, node.label], base);
     }
   };

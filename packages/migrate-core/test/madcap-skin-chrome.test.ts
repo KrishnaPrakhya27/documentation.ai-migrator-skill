@@ -17,6 +17,15 @@ const textOf = (doc: { children: unknown[] }): string => JSON.stringify(doc.chil
 const TOPIC = '<h2>Set up platform time zone</h2><p>The platform time zone applies to every campaign.</p>';
 
 describe('Flare skin furniture inside the topic body', () => {
+  it('reads the topic, not the content wrapper that also holds the copyright line', () => {
+    // The wrapper is an ancestor of the topic, so document order matched it first and the footer
+    // came along. The topic selector is tried first now, and the footer is skin either way.
+    const html = `<html data-mc-path-to-help-system=""><body><div data-mc-content-body="True"><div class="newtopic-wrap"><div role="main" id="mc-main-content">${TOPIC}</div></div><div class="light-footer"><p class="copyright">©2025 Acme | All rights reserved</p></div></div></body></html>`;
+    const doc = htmlToIr(html, htmlAdapterOptions(getProfile('madcap'), { platform: 'madcap', file: 'topic.htm' }));
+    expect(textOf(doc)).not.toContain('All rights reserved');
+    expect(textOf(doc)).toContain('The platform time zone applies to every campaign.');
+  });
+
   it('drops the topic toolbar Flare itself marks nocontent, and keeps the topic', () => {
     const doc = ir(`${TOPIC}<div class="buttons popup-container clearfix topicToolbarProxy _Skins_Toolbar mc-component nocontent" style="mc-topic-toolbar-items: PreviousTopic NextTopic;"><div class="button-group-container-left"><button class="button needs-pie next-topic-button" title="View next article" disabled="true"><div><div role="img" class="button-icon-wrapper" aria-label="View next article"></div></div></button></div></div>`);
     expect(textOf(doc)).not.toContain('View next article');

@@ -20,7 +20,7 @@ import { requireSourceManifest } from './evidence/verify.js';
 import { nativeNavigationWitness } from './evidence/native-navigation.js';
 import { pinAcquisition, requireAcquisition } from './evidence/acquisition.js';
 import { answeredHelpSystemIssues, ensureScopeDecisionsFile, excludeHelpSystems, readScopeDecisions, recordScopeExclusions, scopeDecisionsPath, type DiscoveredHelpSystem } from './evidence/scope.js';
-import { captureSpecGraph, writeSpecOutput, type SpecManifest } from './openapi/graph.js';
+import { captureSpecGraph, writeSpecOutput, type SpecManifest, specOutputPath } from './openapi/graph.js';
 import { readmeCatalogSpecs } from './openapi/readme.js';
 import { HELP, parseCommandLine } from './cli/options.js';
 import { titleHeading } from './ir/page-title.js';
@@ -29,6 +29,9 @@ import { progressReporter } from './cli/progress.js';
 import { canonicalHostsPath, loadSnapshot, readJson, readSnapshotPage, resetDir, snapshotPageCount, snapshotPages, sourceFiles, writeJson } from './cli/io.js';
 import { buildSourceEvidence, expectedSidebar, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
 import { captureOpenapi, type OpenapiCapture } from './cli/openapi-capture.js';
+import { attachHelpCenterHub, defaultHubPath, helpCenterHubMdx } from './nav/help-center.js';
+import { mergeOperationDocuments, openapiAnchors, parameterLinkRewriter } from './ir/mintlify-openapi.js';
+import type { OpenApiOperationFragment } from './ir/types.js';
 import { buildCustomerReport } from './report/customer-data.js';
 import { renderCustomerReportHtml } from './report/customer-html.js';
 import { htmlToPdf, ChromeUnavailableError } from './report/pdf.js';
@@ -480,7 +483,10 @@ async function main() {
               continue;
             }
             const children = mapNavigation(node.children);
-            if (children.length || node.href) out.push({ ...node, children });
+            const { pageUrl, ...container } = node;
+            const ownId = pageUrl ? pageIdByUrl.get(pageUrl.replace(/\/$/, '')) : undefined;
+            if (pageUrl && !ownId) unmappedNavigationUrls.push(pageUrl);
+            if (children.length || node.href || ownId) out.push({ ...container, ...(ownId ? { pageId: ownId } : {}), children });
             }
             return out;
           };
@@ -984,6 +990,18 @@ async function main() {
       let converted = 0; let heldForSnippets = 0; let quarantinedForFidelity = 0;
       // every snapshot page gets a record, so verify can tell a page convert skipped on purpose from one it never saw
       const fidelityRecords: FidelityRecord[] = [];
+      // Endpoint pages state their operation through a spec. The fragments they carried are collected
+      // here so each spec can be assembled below, and a link into an endpoint page's parameter is sent
+      // to the anchor the platform renders for it rather than the one the source platform wrote.
+      const operations: OpenApiOperationFragment[] = [];
+      const anchorsByRoute = new Map<string, ReadonlySet<string>>();
+      for (const snapshot of snapshotPages(workspace)) {
+        if (!snapshot.openapiOperation) continue;
+        operations.push(snapshot.openapiOperation);
+        const route = byId.get(snapshot.pageId)?.newPath;
+        if (route && snapshot.openapiOperation.document) anchorsByRoute.set(route, openapiAnchors(snapshot.openapiOperation.document, snapshot.openapiOperation.method, snapshot.openapiOperation.path));
+      }
+      const parameterLink = parameterLinkRewriter(anchorsByRoute);
       const convertProgress = progressReporter('converted', pageCount);
       for (const doc of docs) {
         const page = byId.get(doc.pageId);
@@ -996,14 +1014,14 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink), engine, substitutedComponents);
+        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), (url, source) => parameterLink(siteLink(url, source))), engine, substitutedComponents);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
         const recordSiteLink = (url: string, source?: string): string => {
           const outcome = resolveSiteLink(url, source);
           if (outcome && outcome.kind !== 'route') unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
           return outcome?.target ?? url;
         };
-        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(withSnippets, manifest), recordSiteLink));
+        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(withSnippets, manifest), (url, source) => parameterLink(recordSiteLink(url, source))));
         const sourceSnapshot = authoredContentSnapshot(sourcePrepared);
         const resolvedSnapshot = authoredContentSnapshot(resolved);
         const pass = fidelityEqual(sourceSnapshot, resolvedSnapshot);
@@ -1022,6 +1040,18 @@ async function main() {
         convertProgress(converted + heldForSnippets + quarantinedForFidelity);
       }
       writeFidelityRecords(workspace, fidelityRecords);
+      // Each spec the endpoint pages named is assembled from their fragments and written where the
+      // platform reads it. A spec a page named by URL is captured rather than assembled; one the
+      // capture did not reach is listed, so its endpoint pages are not left pointing at nothing.
+      for (const [spec, text] of mergeOperationDocuments(operations.filter((operation) => operation.document))) {
+        const specPath = join(outDir, 'api-reference', spec);
+        mkdirSync(dirname(specPath), { recursive: true, mode: 0o700 });
+        writeFileSync(specPath, text, { mode: 0o600 });
+      }
+      const declaredByUrl = [...new Map(operations.filter((operation) => !operation.document).map((operation) => [operation.spec, operation.specUrl ?? operation.spec])).entries()];
+      writeJson(join(workspace, 'report', 'openapi-declared.json'), declaredByUrl.map(([file, url]) => ({ file: `api-reference/${file}`, url })));
+      const unresolvedSpecs = declaredByUrl.filter(([file]) => !existsSync(join(outDir, 'api-reference', file)));
+      if (unresolvedSpecs.length) console.log(`· ${unresolvedSpecs.length} OpenAPI spec(s) that pages reference by URL are not in the output; supply them with acquire --openapi <url> so those endpoint pages render: ${unresolvedSpecs.slice(0, 3).map(([, url]) => url).join(', ')}`);
       writeJson(join(workspace, 'report', 'unmigrated-links.json'), unmigratedLinks);
       if (s.hashes.openapi) {
         const specs = join(workspace, 'inventory', 'openapi.json');
@@ -1058,7 +1088,7 @@ async function main() {
         const root = frozenRootPath(workspace); const src = resolve(root, ref.spec);
         if (!src.startsWith(join(root, '/'))) fail(`openapi spec ${ref.spec} for group ${group} points outside the source repository`);
         if (!existsSync(src)) fail(`openapi spec ${ref.spec} for group ${group} is not in the source repository at ${root}; fix the reference in inventory/platform-meta.json or restore the file`);
-        const dst = join(workspace, 'output', ref.spec); mkdirSync(dirname(dst), { recursive: true, mode: 0o700 }); writeFileSync(dst, readFileSync(src), { mode: 0o600 });
+        const dst = join(workspace, 'output', specOutputPath(ref.spec)); mkdirSync(dirname(dst), { recursive: true, mode: 0o700 }); writeFileSync(dst, readFileSync(src), { mode: 0o600 });
       }
       // A page the source placed but the output does not would disappear from the sidebar without a word.
       const unplaced = pagesWithoutPlacement(tree).filter((page) => page.navMembership !== 'unlisted');
@@ -1078,6 +1108,28 @@ async function main() {
         tree.navigationSource = 'manual';
         writeTree(workspace, tree);
         ok(`${unlisted.length} page(s) the source never placed will be grouped under the folders it publishes them in, by ${by}; navigation is now operator-reviewed, so approve gate 1 again`);
+      }
+      if (v['help-center']) {
+        const by = (v.by ?? '').trim();
+        const container = String(v['help-center']).trim();
+        if (!by) fail('--help-center needs --by "<who>": a hub page the source never had is a decision that records its approver');
+        if (!tree.navigation?.length) fail('--help-center needs the navigation the source states; this tree records none');
+        const hubPath = (v['hub-path'] ? String(v['hub-path']) : defaultHubPath(container)).replace(/^\/+|\/+$/g, '');
+        if (tree.pages.some((page) => page.migrate && page.newPath === hubPath)) fail(`--help-center: a migrated page already lives at ${hubPath}; name another route with --hub-path`);
+        // The container must exist before anything is recorded: build the navigation once to find it.
+        const preview = buildDocumentationNavigation({ ...tree, helpCenter: undefined }, writtenPagePaths(workspace, tree), meta);
+        try { attachHelpCenterHub(preview.navigation, { container, hubPath }); } catch (error) { fail(`--help-center: ${(error as Error).message}`); }
+        tree.helpCenter = { container, hubPath, approvedBy: by, approvedAt: new Date().toISOString() };
+        writeTree(workspace, tree);
+        ok(`${container} opens on a help-centre hub at ${hubPath}, its categories drawn from its own navigation, by ${by}; the tree changed, so approve gate 1 again`);
+      }
+      if (tree.helpCenter) {
+        // The hub is written on every nav run, because convert rebuilds the output it lives in.
+        const preview = buildDocumentationNavigation({ ...tree, helpCenter: undefined }, writtenPagePaths(workspace, tree), meta);
+        const { nodePath } = attachHelpCenterHub(preview.navigation, tree.helpCenter);
+        const hubFile = join(workspace, 'output', `${tree.helpCenter.hubPath}.mdx`);
+        mkdirSync(dirname(hubFile), { recursive: true, mode: 0o700 });
+        writeFileSync(hubFile, helpCenterHubMdx(tree.helpCenter, nodePath), { mode: 0o600 });
       }
       const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta);
       // The documentation's name travels with it; the source's logo, favicon, colours and theme do not,

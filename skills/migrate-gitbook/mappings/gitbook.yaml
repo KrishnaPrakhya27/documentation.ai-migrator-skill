@@ -89,3 +89,23 @@ rules:
     match: { name: api-properties }
     to: { name: Expandable, props: { title: $title } }
     note: "the nested properties of an object or array field, as Documentation.AI's generated API pages show them"
+  - id: gitbook/prompt
+    tier: T3
+    match: { name: prompt }
+    handler: prompt-to-code
+    note: "a copyable prompt: its description is the caption the reader sees, its text is the code they copy; the 'open in AI provider' actions are GitBook's and are recorded as not carried"
+  - id: gitbook/file
+    tier: T2
+    match: { name: file }
+    to: { name: Card, props: { href: $src } }
+    note: "a file the reader downloads: the block's text is the card's, and the file's address is its link. A file served by the source site is a link this migration does not rewrite, so it is listed with the unmigrated links"
+  - id: gitbook/br
+    tier: T4
+    match: { name: br }
+    children: drop
+    note: "a bare line break between blocks is spacing the blocks already have; verify treats it as chrome like script and style"
+  - id: gitbook/mdx-esm
+    tier: T2
+    match: { name: esm }
+    children: drop
+    note: "import/export statements are module syntax, never page content, and never reach the output"

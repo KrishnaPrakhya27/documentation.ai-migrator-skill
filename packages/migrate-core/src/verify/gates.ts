@@ -68,7 +68,7 @@ export const EXACT_FAMILY_GATE_IDS = [
  * a static target must never emit. It belongs here with script and style rather than being counted
  * as authored text an exact migration silently lost.
  */
-export const HTML_CHROME_ELEMENTS: ReadonlySet<string> = new Set(['script', 'style', 'esm']);
+export const HTML_CHROME_ELEMENTS: ReadonlySet<string> = new Set(['script', 'style', 'esm', 'br']);
 
 /** A GitBook Assistant prompt (`<button data-action="ask">`) works only inside GitBook: platform chrome, like script and style. */
 function isPlatformChromeButton(block: Block): boolean {
@@ -675,7 +675,7 @@ export function runGates(input: GateInput): GateResult[] {
       const text = readFileSync(f, 'utf8');
       const parsed = markdownToIr(text, { platform: 'dai', file: route, pageId: route });
       outputLinks.set(f, documentLinks(parsed));
-      outputAnchors.set(route, documentAnchors(parsed, text));
+      outputAnchors.set(route, documentAnchors(parsed, text, (spec) => (existsSync(join(input.outputDir, spec)) ? readFileSync(join(input.outputDir, spec), 'utf8') : undefined)));
     } catch {
       // contract-valid already blocks a file that cannot be parsed; do not manufacture a second diagnosis here
       outputLinks.set(f, []);

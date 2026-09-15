@@ -140,6 +140,15 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     });
   }
 
+  // A help-centre hub the migration wrote: no words of its own, only the section's categories.
+  if (tree.helpCenter) {
+    shortfalls.push({
+      heading: `1 page written by the migration: a help-centre hub for “${tree.helpCenter.container}”`,
+      explanation: `Your source had no landing page for this section, so one was written at /${tree.helpCenter.hubPath}. It holds no text of ours: it renders the section's own categories as cards, drawn from the navigation. Approved by ${tree.helpCenter.approvedBy}.`,
+      items: [], more: 0, needsYou: false,
+    });
+  }
+
   // Pages held back at conversion: a snippet that could not be resolved, or content exact mode
   // refused to approximate.
   const quarantine = countQuarantine(workspace);

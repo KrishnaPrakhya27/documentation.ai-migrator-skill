@@ -30,7 +30,7 @@ describe('OpenAPI preservation', () => {
     };
     const manifest = await captureSpecGraph({ workspace: ws, roots: [url], fetch: async () => response(spec) });
     writeSpecOutput(ws, manifest, join(ws, 'output'));
-    const output = JSON.parse(readFileSync(join(ws, 'output/openapi', manifest.documents[0].file), 'utf8')) as unknown;
+    const output = JSON.parse(readFileSync(join(ws, 'output/api-reference', manifest.documents[0].file), 'utf8')) as unknown;
     expect(output).toEqual(spec);
     expect(manifest.operations.map((operation) => operation.method)).toEqual(['POST', 'TRACE', 'POST']);
     expect(readFileSync(join(ws, 'source-cache/openapi', `${sha256(url)}.source`), 'utf8')).toBe(JSON.stringify(spec));

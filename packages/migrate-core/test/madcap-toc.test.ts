@@ -81,6 +81,15 @@ describe('the define() data files', () => {
     expect(parsed['/a.htm'].t[0]).toBe("What's New");
   });
 
+  it('reads a \\u escape as the character it names, not as six characters', () => {
+    // Flare writes an ampersand in a title as \u0026. The sidebar once showed those six characters.
+    const parsed = parseDefine(`define({'/a.htm':{i:[0],t:['Admin \\u0026 Rights'],b:['']}});`) as Record<string, { t: string[] }>;
+    expect(parsed['/a.htm'].t[0]).toBe('Admin & Rights');
+    // the other spellings JavaScript allows and JSON does not
+    const more = parseDefine(`define({'/b.htm':{i:[0],t:['Say \"hi\" \\x26 go'],b:['']}});`) as Record<string, { t: string[] }>;
+    expect(more['/b.htm'].t[0]).toBe('Say "hi" & go');
+  });
+
   it('refuses anything that is not a define() data file', () => {
     expect(() => parseDefine('window.location = "x"')).toThrow(/not a define/);
   });
@@ -95,8 +104,8 @@ describe('the published sidebar', () => {
       {
         type: 'group',
         label: 'Release Notes',
+        pageUrl: `${HOST}/ReleaseNotes/release-2022-1.htm`,
         children: [
-          { type: 'page', url: `${HOST}/ReleaseNotes/release-2022-1.htm`, title: 'Release Notes' },
           { type: 'page', url: `${HOST}/ReleaseNotes/2022-1.htm`, title: '2022.1' },
           { type: 'page', url: `${HOST}/ReleaseNotes/2021-4.htm`, title: '2021.4' },
         ],
@@ -214,8 +223,8 @@ describe('a live Flare site, crawled', () => {
       {
         type: 'group',
         label: 'Release Notes',
+        pageUrl: 'http://8.8.8.8/ReleaseNotes/release-2022-1.htm',
         children: [
-          { type: 'page', url: 'http://8.8.8.8/ReleaseNotes/release-2022-1.htm', title: 'Release Notes' },
           { type: 'page', url: 'http://8.8.8.8/ReleaseNotes/2022-1.htm', title: '2022.1' },
           { type: 'page', url: 'http://8.8.8.8/ReleaseNotes/2021-4.htm', title: '2021.4' },
         ],

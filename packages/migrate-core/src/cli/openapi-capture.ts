@@ -83,7 +83,7 @@ export async function captureOpenapi({ workspace, session, tree, supplied: suppl
   if (meta.openapi?.length) {
     const rewritten = meta.openapi.map((entry, i) => {
       const url = new URL(native[i]); url.hash = '';
-      return { ...entry, spec: `openapi/${manifest.documents.find((document) => document.source === url.toString())!.file}` };
+      return { ...entry, spec: `api-reference/${manifest.documents.find((document) => document.source === url.toString())!.file}` };
     });
     writeJson(join(workspace, 'inventory', 'platform-meta.json'), { ...meta, openapi: rewritten, openapiCaptured: true });
   }

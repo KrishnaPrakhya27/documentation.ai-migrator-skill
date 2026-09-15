@@ -25,7 +25,7 @@ The second is the point. A migration that omits pages and reports only its succe
 - every link still pointing at the old site, because its target is outside the agreed scope;
 - every check that failed or did not run — a permissive run states that it proves nothing about fidelity rather than showing those checks as passed.
 
-Items needing a customer decision are marked. A list longer than 25 entries states how many it is not showing and points at `customer-report.json`, which holds the full set; nothing is truncated silently.
+A help-centre hub the migration wrote (`nav --help-center`) is listed as a page the migration wrote, with its approver: it holds no words of ours. Items needing a customer decision are marked. A list longer than 25 entries states how many it is not showing and points at `customer-report.json`, which holds the full set; nothing is truncated silently.
 
 Gate ids never appear. Each is rendered in the customer's terms (`code-blocks-exact` → "Code samples are character-for-character identical") by `report/gate-language.ts`; a gate with no entry there falls back to its raw id, so add one when adding a gate.
 

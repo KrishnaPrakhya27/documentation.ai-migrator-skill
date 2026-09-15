@@ -72,14 +72,9 @@ export function parseDefine(source: string): unknown {
   for (let index = 0; index < body.length; index++) {
     const character = body[index];
     if (character === '"' || character === "'") {
-      // Re-spell the string as JSON: single quotes become double, and inner quotes are escaped.
-      const quote = character;
-      let text = '';
-      for (index++; index < body.length && body[index] !== quote; index++) {
-        if (body[index] === '\\') { text += body[index] + body[index + 1]; index++; continue; }
-        text += body[index];
-      }
-      json += JSON.stringify(text.replace(/\\'/g, "'"));
+      const literal = jsStringToJson(body, index);
+      json += literal.json;
+      index = literal.end - 1;
       continue;
     }
     // A bare key: quote it.
@@ -94,6 +89,39 @@ export function parseDefine(source: string): unknown {
     json += character;
   }
   return JSON.parse(json) as unknown;
+}
+
+/**
+ * A JavaScript string literal, starting on its opening quote, as the JSON string literal that
+ * names the same characters — and the index just past its closing quote.
+ *
+ * JavaScript and JSON share some escapes (`\uXXXX`, `\n`), and differ on others: `\'` and `\xHH`
+ * exist only in JavaScript, a bare `"` inside single quotes needs escaping in JSON. Flare writes
+ * an ampersand in a title as `\u0026`; carrying that backslash through as text once put the six
+ * characters `\u0026` into a sidebar label where the reader expected `&`.
+ */
+function jsStringToJson(body: string, start: number): { json: string; end: number } {
+  const quote = body[start];
+  let out = '';
+  let i = start + 1;
+  for (; i < body.length && body[i] !== quote; i++) {
+    const ch = body[i];
+    if (ch !== '\\') { out += ch === '"' ? '\\"' : ch; continue; }
+    const next = body[++i];
+    if (next === undefined) break;
+    const hex4 = body.slice(i + 1, i + 5);
+    const hex2 = body.slice(i + 1, i + 3);
+    if (next === 'u' && /^[0-9a-fA-F]{4}$/.test(hex4)) { out += `\\u${hex4}`; i += 4; }
+    else if (next === 'x' && /^[0-9a-fA-F]{2}$/.test(hex2)) { out += `\\u00${hex2}`; i += 2; }
+    else if ('nrtbf'.includes(next)) out += `\\${next}`;
+    else if (next === '\\' || next === '"') out += `\\${next}`;
+    else if (next === '0') out += '\\u0000';
+    else if (next === '\n') { /* a line continuation names no character */ }
+    else out += next; // `\'`, `\/` and any other escaped character: the character itself
+  }
+  // JSON refuses a raw control character inside a string; JavaScript does not.
+  out = out.replace(/[\u0000-\u001f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  return { json: `"${out}"`, end: i + 1 };
 }
 
 interface TocNode { i?: number; c?: number; n?: TocNode[] }
@@ -166,8 +194,9 @@ export function flareNavigationFromData(pageUrl: string, html: string, data: Fla
         ? undefined
         : { type: 'page', url: new URL(target, root).toString(), ...(entry.title ? { title: entry.title } : {}) };
       if (!children.length) { if (page) out.push(page); continue; }
-      // A topic with children leads the group its own title names, which is how Flare renders it.
-      out.push({ type: 'group', label: entry.title || 'Untitled', children: [...(page ? [page] : []), ...children] });
+      // A topic with children is the group its own title names, and opens as that topic: the page is
+      // the container's own, not a duplicate first entry beneath it.
+      out.push({ type: 'group', label: entry.title || 'Untitled', ...(page ? { pageUrl: page.url } : {}), children });
     }
     return out;
   };

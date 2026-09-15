@@ -43,7 +43,8 @@ describe('fingerprint', () => {
     ] } as unknown as Parameters<typeof defaultUrlPlan>[0];
     const plan = defaultUrlPlan(tree);
     // ".htm" is how the server names the file; it is not a word in the page's route.
-    expect(plan.pages.map((page) => page.new)).toEqual(['home', 'procedures/create', 'pos']);
+    // the server's letter case is part of the address, and the default plan keeps it
+    expect(plan.pages.map((page) => page.new)).toEqual(['home', 'Procedures/Create', 'pos']);
     expect(plan.pages[0].reason).toContain('dropped the source file extension');
   });
   it('scores Mintlify, GitBook and ReadMe from their markers', () => {
@@ -69,7 +70,8 @@ describe('fingerprint', () => {
 
 describe('urls', () => {
   it('preserves case by default and legalises illegal segments with a reason', () => {
-    expect(legalisePath('/docs/Getting Started/API_Keys', { case: 'preserve' })).toEqual({ path: 'docs/getting-started/api-keys', changed: true, reason: '"Getting Started" → "getting-started"; "API_Keys" → "api-keys"' });
+    expect(legalisePath('/docs/Getting Started/API_Keys', { case: 'preserve' })).toEqual({ path: 'docs/Getting-Started/API-Keys', changed: true, reason: '"Getting Started" → "Getting-Started"; "API_Keys" → "API-Keys"' });
+    expect(legalisePath('/docs/Getting Started/API_Keys', { case: 'lower' }).path).toBe('docs/getting-started/api-keys');
     expect(legalisePath('/docs/setup', { case: 'preserve' })).toEqual({ path: 'docs/setup', changed: false, reason: undefined });
     expect(slugify('Frameworks & Controls!')).toBe('frameworks-controls');
     expect(headingSlug('Hello -- World')).toBe('hello-world');

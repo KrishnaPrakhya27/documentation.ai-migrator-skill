@@ -177,6 +177,36 @@ function namedAnchorIn(heading: El): string | undefined {
 
 const INLINE = new Set(['a', 'strong', 'b', 'em', 'i', 'del', 's', 'strike', 'code', 'br', 'kbd', 'span', 'sup', 'sub', 'u', 'mark', 'small', 'abbr', 'img', 'time', 'label']);
 
+/**
+ * The first selector in a comma list that matches anywhere, rather than the first element in
+ * document order that matches any of them. The two differ when one selector names an ancestor of
+ * another's match: `#mc-main-content, [data-mc-content-body]` names the topic and then, as a
+ * fallback, the wrapper around it — and document order found the wrapper first, footer and all.
+ */
+function firstMatching(root: El, selectors: string): El | undefined {
+  for (const selector of splitSelectorList(selectors)) {
+    const hit = find(root, selector);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/** Comma-separated selectors, split only on the commas outside brackets, parentheses and quotes. */
+function splitSelectorList(list: string): string[] {
+  const out: string[] = [];
+  let depth = 0; let quote = ''; let current = '';
+  for (const ch of list) {
+    if (quote) { current += ch; if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; current += ch; continue; }
+    if (ch === '[' || ch === '(') depth++;
+    else if (ch === ']' || ch === ')') depth--;
+    if (ch === ',' && depth === 0) { if (current.trim()) out.push(current.trim()); current = ''; continue; }
+    current += ch;
+  }
+  if (current.trim()) out.push(current.trim());
+  return out;
+}
+
 export function find(el: El, selector: string): El | undefined {
   for (const c of el.children) {
     if (c.type === 'tag') {
@@ -256,7 +286,7 @@ function fenceLanguage(renderedId: string): string | undefined {
 export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult {
   const root = parseHtml(html);
   let scope: El = root;
-  if (opts.articleSelector) scope = find(root, opts.articleSelector) ?? root;
+  if (opts.articleSelector) scope = firstMatching(root, opts.articleSelector) ?? root;
   if (opts.removeSelectors?.length) remove(scope, opts.removeSelectors);
 
   const headings: HeadingNode[] = [];

@@ -97,6 +97,21 @@ export interface Frontmatter {
   [k: string]: unknown;
 }
 
+/**
+ * An API operation a page documents through a specification, as Mintlify's published Markdown
+ * states it: the spec's path within the docs, the operation, and the spec text the page carried.
+ */
+export interface OpenApiOperationFragment {
+  /** The spec's path under api-reference/ in the output. */
+  spec: string;
+  method: string;
+  path: string;
+  /** The spec text the page carried, cut to this operation; empty when the page named a URL instead. */
+  document: string;
+  /** The URL the page named, when the spec is to be captured rather than assembled. */
+  specUrl?: string;
+}
+
 export interface DocIR {
   /** Stable page entity id (UUIDv5 of platform + platform page id, or identity-map id). */
   pageId: string;
@@ -105,6 +120,8 @@ export interface DocIR {
   source: string;
   frontmatter: Frontmatter;
   children: Block[];
+  /** The operation this page documents, when the platform renders it from a spec rather than from prose. */
+  openapiOperation?: OpenApiOperationFragment;
 }
 
 export function isBlockWithChildren(n: Block): n is Extract<Block, { children: Block[] }> {

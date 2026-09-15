@@ -403,6 +403,9 @@ export const PROFILES: Record<string, ScrapeProfile> = {
       // unsafe URL, which used to leave the bare word "Copy" sitting above the code as if authored.
       // The snippet's caption beside it is authored text and stays.
       '.codeSnippetCopyButton',
+      // The skin's copyright line. It sits inside the content body but outside the topic, and on
+      // a surveyed site it reached 427 written pages before the topic selector was tried first.
+      '.light-footer', '.copyright',
     ],
     // Recorded as the independent witness verification cross-checks; it is empty on a live site,
     // and `navigationData` carries the tree the site actually renders.

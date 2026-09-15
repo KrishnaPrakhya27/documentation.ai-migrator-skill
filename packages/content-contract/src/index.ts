@@ -100,7 +100,8 @@ function stripCode(body: string): string {
   // fences count only at line start (a mid-line ``` must not hide the rest of the document); a component's children indent theirs
   return body
     .replace(/^ *(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n *\1[ \t]*$/gm, (s) => s.replace(/[^\n]/g, ' '))
-    .replace(/`[^`\n]*`/g, (s) => ' '.repeat(s.length));
+    // a code span opens and closes with the same run of backticks, and may hold a shorter run inside
+    .replace(/(`+)(?:(?!\1)[^\n])*\1/g, (s) => ' '.repeat(s.length));
 }
 
 /** Multi-line tags, expressions and import statements are folded onto one line so line-based checks cannot be split around. */
@@ -176,8 +177,8 @@ const NAV_CHILDREN: Record<string, string[]> = {
   product: ['versions', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'],
   version: ['tabs', 'dropdowns', 'menus', 'groups', 'pages'],
   language: ['versions', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'],
-  tab: ['menus', 'groups', 'pages'],
-  dropdown: ['tabs', 'menus', 'groups', 'pages'],
+  tab: ['dropdowns', 'menus', 'groups', 'pages'],
+  dropdown: ['tabs', 'dropdowns', 'menus', 'groups', 'pages'],
   menu: ['groups', 'pages'],
   group: ['pages'],
 };
@@ -212,9 +213,12 @@ export function validateNavigation(doc: any, pageExists: (path: string) => boole
     if (!node || typeof node !== 'object' || Array.isArray(node)) { err(`${path} must be an object`); return; }
     if (kind !== 'navigation' && (typeof node[kind] !== 'string' || !node[kind])) err(`${path} requires a string "${kind}"`);
     if ((kind === 'version' || kind === 'language') && 'default' in node) err(`${path}: "default" is not a ${kind} property; list the default ${kind} first`);
+    // a container's own page, which it opens when clicked
+    if (typeof node.path === 'string' && !pageExists(node.path)) err(`${path}: ${kind} path "${node.path}" has no file`);
     const allowed = NAV_CHILDREN[kind];
     const present = keys.filter((k) => k in node);
-    const externalTab = kind === 'tab' && typeof node.href === 'string';
+    // a tab or dropdown may be an external link instead of a container
+    const externalTab = (kind === 'tab' || kind === 'dropdown') && typeof node.href === 'string';
     if (!externalTab && present.length !== 1) err(`${path} must have exactly one of [${allowed.join(', ')}]`);
     for (const k of present) {
       if (!allowed.includes(k)) { err(`${path}: a ${kind} cannot contain ${k}`); continue; }
@@ -236,9 +240,11 @@ export function classifyRedirect(source: string, contract = loadContract()): 'ex
 
 export const SLUG_RULES = {
   pattern: /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
+  /** The same shape with letter case kept: the platform serves a path as it is written. */
+  patternAnyCase: /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/,
   maxKeyBytes: 1024,
 };
 
-export function isValidSlugSegment(s: string): boolean {
-  return SLUG_RULES.pattern.test(s);
+export function isValidSlugSegment(s: string, opts: { case?: 'preserve' | 'lower' } = {}): boolean {
+  return (opts.case === 'preserve' ? SLUG_RULES.patternAnyCase : SLUG_RULES.pattern).test(s);
 }

@@ -184,10 +184,10 @@ export function readMadcapRepo(rootIn: string, options: { target?: string } = {}
       }
       const page = addPage(link, title, group);
       if (!children.length) { if (page) out.push(page); continue; }
-      // A topic with children leads the group its own title names.
+      // A topic with children is the group its own title names, and opens as that topic.
       const label = page?.type === 'page' ? (page.title ?? 'Untitled') : (title ?? 'Untitled');
       const nested = walkToc(entry, [...group, label], tocDir, visited);
-      out.push({ type: 'group', label, children: [...(page ? [page] : []), ...nested] });
+      out.push({ type: 'group', label, ...(page?.type === 'page' ? { pageId: page.pageId } : {}), children: nested });
     }
     return out;
   };

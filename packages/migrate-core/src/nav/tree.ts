@@ -2,6 +2,8 @@
  * The page tree (plan/tree.yaml) and documentation.json generation.
  * Pages are entities: identity is the entity id, URL is an attribute.
  */
+import { attachHelpCenterHub } from './help-center.js';
+import { specOutputPath } from '../openapi/graph.js';
 import { parse as parseYaml, stringify as toYaml } from 'yaml';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -73,7 +75,12 @@ export interface TreePage {
 /** Navigation placements are separate from page entities: one page may appear in several groups. */
 export type SourceNavigationNode =
   | { type: 'page'; pageId: string; title?: string; icon?: string; tags?: string; badge?: string; method?: string }
-  | { type: 'group'; kind?: NavigationContainerKind; label: string; children: SourceNavigationNode[]; icon?: string; href?: string; expandable?: boolean; description?: string };
+  | {
+      type: 'group'; kind?: NavigationContainerKind; label: string; children: SourceNavigationNode[];
+      /** The page this container itself opens, when the source gives it one (a GitBook parent page, a Flare topic with subtopics). Written as the container's `path`, never as a duplicate first entry. */
+      pageId?: string;
+      icon?: string; href?: string; expandable?: boolean; description?: string;
+    };
 
 export type NavigationContainerKind = 'product' | 'language' | 'version' | 'tab' | 'dropdown' | 'menu' | 'group';
 
@@ -104,6 +111,8 @@ export interface Tree {
    * because it states a structure the source's sidebar does not.
    */
   unlistedPlacement?: { strategy: 'source-path'; approvedBy: string; approvedAt: string };
+  /** A container the operator declared a help centre: it opens on a hub page the migration writes, rendered by the platform's own `CollectionList`. */
+  helpCenter?: import('./help-center.js').HelpCenterDecision;
   /** Version and locale served at the root paths; others are prefixed. */
   defaultVersion?: string;
   defaultLocale?: string;
@@ -124,7 +133,7 @@ export function placedPageIds(nodes: SourceNavigationNode[] | undefined): Set<st
   const walk = (items: SourceNavigationNode[]): void => {
     for (const node of items) {
       if (node.type === 'page') ids.add(node.pageId);
-      else walk(node.children);
+      else { if (node.pageId) ids.add(node.pageId); walk(node.children); }
     }
   };
   walk(nodes ?? []);
@@ -157,7 +166,11 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
       }
       const children = convert(node.children);
       const kind = node.kind ?? 'group';
-      if (children.length || node.href) out.push({ [kind]: node.label, ...navigationMetadata(node), ...(children.length ? collection(children, kind) : {}) });
+      // The container's own page, which the platform reads from the container's `path`. A container
+      // with nothing left beneath it is simply that page.
+      const own = node.pageId ? eligible.get(node.pageId) : undefined;
+      if (own && !children.length && !node.href) { out.push({ ...pageMetadata(own), ...pageLayout(own), title: node.label, path: own.newPath! }); continue; }
+      if (children.length || node.href) out.push({ [kind]: node.label, ...navigationMetadata(node), ...(own ? { path: own.newPath!, ...pageLayout(own) } : {}), ...(children.length ? collection(children, kind) : {}) });
       }
       return out;
     };
@@ -282,11 +295,13 @@ export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlyS
   let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation, placeUnlisted: !!tree.unlistedPlacement });
   for (const ref of platformMeta.openapi ?? []) {
     try {
-      navigation = attachGroupOpenapi(navigation, ref.groupPath, ref.spec, ref.version, ref.locale);
+      navigation = attachGroupOpenapi(navigation, ref.groupPath, specOutputPath(ref.spec), ref.version, ref.locale);
     } catch (error) {
       throw new Error(`openapi ${ref.spec}: ${(error as Error).message}; no written page is placed under that group, so remove the entry from inventory/platform-meta.json or migrate the group's pages`);
     }
   }
+  // Applied here, so the navigation verification re-derives carries the same hub as the one written.
+  if (tree.helpCenter) navigation = { navigation: attachHelpCenterHub(navigation.navigation, tree.helpCenter).navigation };
   return navigation;
 }
 

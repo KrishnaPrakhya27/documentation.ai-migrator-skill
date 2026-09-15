@@ -47,6 +47,11 @@ describe('navigation follows renderer container rules', () => {
   const page = { title: 'Guide', path: 'guide' };
   const check = (navigation: unknown) => validateNavigation({ name: 'Synthetic', navigation }, (path) => path === 'guide');
 
+  it('accepts a tab holding dropdowns, and a dropdown holding dropdowns, as the platform does', () => {
+    expect(check({ tabs: [{ tab: 'Learn', dropdowns: [{ dropdown: 'Guides', pages: [page] }, { dropdown: 'Lessons', href: 'https://learn.example/' }] }] })).toEqual([]);
+    expect(check({ dropdowns: [{ dropdown: 'Docs', dropdowns: [{ dropdown: 'Nested', pages: [page] }] }] })).toEqual([]);
+  });
+
   it('accepts languages containing versions, tabs and menus', () => {
     expect(check({ languages: [{ language: 'ar', versions: [{ version: 'v1', tabs: [{ tab: 'Docs', menus: [{ menu: 'Guide', pages: [page] }] }] }] }] })).toEqual([]);
   });
@@ -54,8 +59,8 @@ describe('navigation follows renderer container rules', () => {
   it.each([
     { products: [{ product: 'Product', languages: [{ language: 'ar', pages: [page] }] }] },
     { versions: [{ version: 'v1', languages: [{ language: 'ar', pages: [page] }] }] },
-    { tabs: [{ tab: 'Docs', dropdowns: [{ dropdown: 'Nested', pages: [page] }] }] },
-    { dropdowns: [{ dropdown: 'Docs', dropdowns: [{ dropdown: 'Nested', pages: [page] }] }] },
+    { groups: [{ group: 'Docs', tabs: [{ tab: 'Nested', pages: [page] }] }] },
+    { tabs: [{ tab: 'Docs', versions: [{ version: 'v1', pages: [page] }] }] },
   ])('rejects invalid nesting %#', (navigation) => {
     expect(check(navigation).some((issue) => issue.message.includes('cannot contain'))).toBe(true);
   });

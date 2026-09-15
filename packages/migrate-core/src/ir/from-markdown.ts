@@ -19,6 +19,9 @@ import { htmlToIr } from './from-html.js';
 import { mapBlocks } from './types.js';
 import { gitbookHtmlBlockToIr, isGitbookHtmlBlock, isGitbookHtmlInline, TRANSPARENT_HTML } from './gitbook-html.js';
 import { gitbookOpenApiBlocks } from './gitbook-openapi.js';
+import { mintlifyOperationSection, operationFrontmatter } from './mintlify-openapi.js';
+import { srcsetUrls } from '../assets/html-media.js';
+import { capturedSpecFile } from '../openapi/graph.js';
 
 export interface MarkdownAdapterOptions {
   platform: string;
@@ -481,6 +484,20 @@ function liftSummary(node: any): any {
   return { ...node, attributes: [...(node.attributes ?? []), { type: 'mdxJsxAttribute', name: 'summary', value: title }], children: node.children.filter((_: any, i: number) => i !== index) };
 }
 
+/**
+ * GitBook's block-form OpenAPI reference (`{% openapi src="…" path="/pet" method="post" %}`), read
+ * as the operation it documents. The spec is a URL; the platform reads the file captured from it
+ * (`acquire --openapi <url>` supplies one the capture cannot reach), and the block's own text —
+ * a description the author wrote — stays on the page.
+ */
+function gitbookOperationBlock(children: Block[]): { children: Block[]; operation: import('./types.js').OpenApiOperationFragment } | undefined {
+  const at = children.findIndex((block) => block.type === 'component' && block.name === 'openapi' && typeof block.props.src === 'string' && /^https?:\/\//i.test(block.props.src) && typeof block.props.path === 'string' && typeof block.props.method === 'string');
+  if (at < 0) return undefined;
+  const block = children[at] as Extract<Block, { type: 'component' }>;
+  const operation = { spec: capturedSpecFile(String(block.props.src)), method: String(block.props.method).toUpperCase(), path: String(block.props.path), document: '', specUrl: String(block.props.src) };
+  return { children: [...children.slice(0, at), ...block.children, ...children.slice(at + 1)], operation };
+}
+
 export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocIR {
   const { data, body } = splitFrontmatter(source, opts.file);
   // `locating` parses with an acorn that accepts any expression; see parseEscapingRejectedText
@@ -568,6 +585,10 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       case 'mdxJsxTextElement': {
         const name = String(node.name).toLowerCase();
         if (isImageElement(node)) return [imageFromMdx(node, p)];
+        // A responsive image: the wrapper and its sources are the theme's art direction, the img is
+        // the content. GitBook wraps every picture this way; read whole, each wrapper left a marker.
+        if (name === 'picture') { const picture = pictureImage(node, p); if (picture) return [picture]; }
+        if (name === 'source') return [];
         if (name === 'br') return [{ ...base, type: 'break' }];
         if (name === 'kbd') return [{ ...base, type: 'kbd', children: inline(node.children ?? [], p) }];
         if (opts.platform === 'readme' && node.name === 'Anchor') {
@@ -818,8 +839,21 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     return [{ id: idOf(node, path), type: 'table', children: rows }];
   };
 
+  /** The image inside a `<picture>`, carrying its `<source>` candidates, or undefined when it holds none. */
+  const pictureImage = (node: any, path: number[]): ImageNode | undefined => {
+    const kids: any[] = node.children ?? [];
+    const img = kids.find((child) => (child.type === 'mdxJsxTextElement' || child.type === 'mdxJsxFlowElement') && String(child.name).toLowerCase() === 'img');
+    if (!img) return undefined;
+    const sources = kids
+      .filter((child) => (child.type === 'mdxJsxTextElement' || child.type === 'mdxJsxFlowElement') && String(child.name).toLowerCase() === 'source')
+      .flatMap((child) => { const value = (child.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && a.name === 'srcset')?.value; return typeof value === 'string' ? srcsetUrls(value) : []; });
+    const image = imageFromMdx(img, path);
+    return sources.length ? { ...image, sources: [...new Set([...(image.sources ?? []), ...sources])] } : image;
+  };
+
   const jsxFlow = (node: any, path: number[]): Block[] => {
     if (isImageElement(node)) return [imageFromMdx(node, path)];
+    if (String(node.name).toLowerCase() === 'picture') { const picture = pictureImage(node, path); if (picture) return [picture]; }
     if (opts.platform === 'gitbook') { const converted = gitbookFlow(node, path); if (converted) return converted; }
     if (opts.platform === 'readme') { const converted = readmeFlow(node, path); if (converted) return converted; }
     // After the platform's own reading: GitBook and ReadMe give a <table> meanings of their own
@@ -940,5 +974,11 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
   const fallbackTitle = opts.title ?? basename(opts.file, extname(opts.file)).replace(/[-_]+/g, ' ');
   const frontmatter = { ...data, ...opts.frontmatter, title: String(opts.frontmatter?.title ?? data.title ?? fallbackTitle) } as Frontmatter;
   const children = blocks(tree.children ?? [], [0]);
+  // A Mintlify endpoint page states its operation; the OpenAPI section its published Markdown
+  // appends is the platform's rendering of that statement, and is read back into it.
+  const endpoint = opts.platform === 'mintlify' ? mintlifyOperationSection(children) : opts.platform === 'gitbook' ? gitbookOperationBlock(children) : undefined;
+  if (endpoint) {
+    return { pageId: opts.pageId, platform: opts.platform, source: opts.file, frontmatter: { ...frontmatter, openapi: operationFrontmatter(endpoint.operation) }, children: endpoint.children, openapiOperation: endpoint.operation };
+  }
   return { pageId: opts.pageId, platform: opts.platform, source: opts.file, frontmatter, children: opts.platform === 'gitbook' ? children.map(gitbookBlockLinks) : children };
 }

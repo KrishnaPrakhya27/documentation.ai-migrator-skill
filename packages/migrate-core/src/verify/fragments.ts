@@ -13,9 +13,10 @@
 import GithubSlugger from 'github-slugger';
 import { headingSlug } from '../urls/slugger.js';
 import { inlineText, walkBlocks, type DocIR } from '../ir/types.js';
+import { openapiAnchors, parseOperationFrontmatter } from '../ir/mintlify-openapi.js';
 
 /** Every id a written page offers a link: its headings, and any id written into the page itself. */
-export function documentAnchors(doc: DocIR, text: string): Set<string> {
+export function documentAnchors(doc: DocIR, text: string, readSpec?: (spec: string) => string | undefined): Set<string> {
   const anchors = new Set<string>();
   // The renderer slugs headings per document, so repeated titles get the -1, -2 suffixes it gives them.
   const slugger = new GithubSlugger();
@@ -24,6 +25,10 @@ export function documentAnchors(doc: DocIR, text: string): Set<string> {
   });
   // An explicit id — an anchor shim for a renamed heading, or one the author wrote — is an anchor too.
   for (const match of text.matchAll(/\b(?:id|name)=["']([^"']+)["']/g)) anchors.add(match[1]);
+  // An endpoint page renders its parameters from a spec, each with the id the platform gives it.
+  const operation = parseOperationFrontmatter(doc.frontmatter.openapi);
+  const spec = operation && readSpec ? readSpec(operation.spec) : undefined;
+  if (operation && spec !== undefined) for (const anchor of openapiAnchors(spec, operation.method, operation.path)) anchors.add(anchor);
   return anchors;
 }
 

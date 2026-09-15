@@ -26,6 +26,8 @@ Commands (run in order; the workflow has exactly four standard human gates):
   assets       [--provider none|local|s3|dai-api]                   → plan/assets.json, assets-original/
   convert                                                           → output/, ledger/, quarantine/
   nav          [--place-unlisted --by "<who>"]                      → output/documentation.json, report/redirects.*.json, report/anchors.json
+               [--help-center "<container>" [--hub-path <route>] --by "<who>"]
+               opens that container on a help-centre hub: a page of category cards drawn from its own navigation
                --place-unlisted puts pages the source's own sidebar never named under the folders the source
                publishes them in, because the renderer serves only routes the navigation names. It states a
                structure the source's sidebar does not, so it records who decided and marks the navigation
@@ -61,7 +63,7 @@ export function parseCommandLine() {
     'firecrawl-timeout-min': { type: 'string', default: process.env.FIRECRAWL_TIMEOUT_MIN ?? '360' },
     openapi: { type: 'string', multiple: true },
     'exclude-help-system': { type: 'string', multiple: true },
-    'place-unlisted': { type: 'boolean', default: false },
+    'place-unlisted': { type: 'boolean', default: false }, 'help-center': { type: 'string' }, 'hub-path': { type: 'string' },
     revision: { type: 'string' },
     concurrency: { type: 'string', default: process.env.MIGRATION_CONCURRENCY ?? '4' },
     rps: { type: 'string', default: process.env.MIGRATION_RPS ?? '2' },

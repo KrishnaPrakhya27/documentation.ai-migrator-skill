@@ -51,11 +51,11 @@ export function readGitbookRepo(rootIn: string): GitbookRepo {
   const containerFor = (indent: number): { indent: number; children: SourceNavigationNode[]; own?: { siblings: SourceNavigationNode[]; index: number; title: string } } => {
     while (containers.length > 1 && containers[containers.length - 1].indent >= indent) containers.pop();
     const parent = containers[containers.length - 1];
-    // A page that gains children becomes the group its own title names, led by the page itself,
-    // which is how GitBook renders a parent page and how the sidebar reads back.
+    // A page that gains children becomes the group its own title names and opens as that page,
+    // which is how GitBook renders a parent page: the page is the group's own, not its first entry.
     if (parent.own) {
       const page = parent.own.siblings[parent.own.index];
-      const group: SourceNavigationNode = { type: 'group', label: parent.own.title, children: page ? [page] : [] };
+      const group: SourceNavigationNode = { type: 'group', label: parent.own.title, ...(page?.type === 'page' ? { pageId: page.pageId } : {}), children: [] };
       parent.own.siblings[parent.own.index] = group;
       parent.children = group.children;
       parent.own = undefined;

@@ -90,8 +90,7 @@ describe('GitBook states its navigation in SUMMARY.md', () => {
     expect(strip(tree.navigation)).toEqual([
       { type: 'page', pageId: 'id', title: 'Welcome' },
       { type: 'group', label: 'Guides', children: [
-        { type: 'group', label: 'Install', children: [
-          { type: 'page', pageId: 'id', title: 'Install' },
+        { type: 'group', label: 'Install', pageId: 'id', children: [
           { type: 'page', pageId: 'id', title: 'Advanced' },
         ] },
       ] },

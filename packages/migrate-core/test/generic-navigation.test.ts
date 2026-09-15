@@ -56,8 +56,7 @@ describe('generic site navigation', () => {
     expect(nodes).toEqual([
       { type: 'group', label: 'Guides', children: [
         { type: 'page', url: `${origin}/guides/install`, title: 'Install' },
-        { type: 'group', label: 'Configure', children: [
-          { type: 'page', url: `${origin}/guides/configure`, title: 'Configure' },
+        { type: 'group', label: 'Configure', pageUrl: `${origin}/guides/configure`, children: [
           { type: 'page', url: `${origin}/guides/configure/env`, title: 'Environment' },
           { type: 'page', url: `${origin}/guides/configure/secrets`, title: 'Secrets' },
         ] },
