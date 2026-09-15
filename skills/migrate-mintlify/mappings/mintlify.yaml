@@ -93,11 +93,18 @@ rules:
   - id: mint/param-field
     tier: T1
     match: { name: ParamField }
-    to: { name: ParamField, props: { name: $name, type: $type, required: $required } }
+    # path, body, query and header name where the parameter lives and are content the target carries
+    to: { name: ParamField, props: { name: $name, type: $type, required: $required, path: $path, body: $body, query: $query, header: $header, deprecated: $deprecated } }
+    # the documented default value: no component in the contract carries one, so it is a declared loss.
+    # It is NOT written into the body as "Default: x" - that label is Mintlify's renderer, not the source,
+    # and reproducing it would trade a reported loss for source-platform chrome in the customer's content.
+    drop: [default]
   - id: mint/response-field
     tier: T1
     match: { name: ResponseField }
-    to: { name: ResponseField, props: { name: $name, type: $type, required: $required } }
+    to: { name: ResponseField, props: { name: $name, type: $type, required: $required, deprecated: $deprecated } }
+    # as with ParamField, the contract carries no default value
+    drop: [default]
   - id: mint/update
     tier: T1
     match: { name: Update }

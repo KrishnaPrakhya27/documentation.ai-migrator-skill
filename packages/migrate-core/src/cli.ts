@@ -19,7 +19,7 @@ import { nativeSourceManifest, liveSourceManifest } from './evidence/capture.js'
 import { requireSourceManifest } from './evidence/verify.js';
 import { nativeNavigationWitness } from './evidence/native-navigation.js';
 import { pinAcquisition, requireAcquisition } from './evidence/acquisition.js';
-import { ensureScopeDecisionsFile, scopeDecisionsPath } from './evidence/scope.js';
+import { ensureScopeDecisionsFile, readScopeDecisions, scopeDecisionsPath } from './evidence/scope.js';
 import { captureSpecGraph, writeSpecOutput, type SpecManifest } from './openapi/graph.js';
 import { readmeCatalogSpecs } from './openapi/readme.js';
 import { HELP, parseCommandLine } from './cli/options.js';
@@ -859,6 +859,8 @@ async function main() {
     case 'convert': {
       const workspace = ws(); const s = readSession(workspace);
       requireStages(s, 'plan', 'assets');
+      // Components a person recorded a substitution for; one decision covers every locale.
+      const substitutedComponents = new Set<string>(readScopeDecisions(workspace).substituted.map((entry) => entry.component));
       const blockExclusions = readBlockExclusions(workspace);
       // exact mode carries every authored block; an operator exclusion is refused before anything is read or written
       if ((s.fidelityMode ?? 'exact') === 'exact' && blockExclusions.length) fail(`block exclusions are not permitted in exact mode: plan/block-exclusions.yaml lists ${blockExclusions.length} (${blockExclusions.map((e) => `${e.pageId}:${e.nodeId}`).join(', ')}); remove them, or re-run init with --fidelity permissive`);
@@ -908,7 +910,7 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink), engine);
+        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), siteLink), engine, substitutedComponents);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
         const recordSiteLink = (url: string, source?: string): string => {
           const outcome = resolveSiteLink(url, source);

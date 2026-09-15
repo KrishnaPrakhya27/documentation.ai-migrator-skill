@@ -1,5 +1,6 @@
 /** Lossless, ID-independent representations used by exact migration gates. */
 import type { Block, DocIR, Inline } from '../ir/types.js';
+import { inlineText } from '../ir/types.js';
 
 export type FidelityValue = null | boolean | number | string | FidelityValue[] | { [key: string]: FidelityValue };
 
@@ -56,8 +57,19 @@ const VISUAL_PROPS = new Set(['arrow', 'class', 'className', 'color', 'columns',
 const PROP_ALIASES: Record<string, string> = { summary: 'title', label: 'title', date: 'title', img: 'image' };
 /** HTML data-* attributes are machine metadata (Mintlify's data-path is the asset's repository path), never rendered content. */
 const DATA_ATTRIBUTE = /^data-/;
-/** Source components whose only job is to frame one image; without a caption they are the image. */
-const FRAME_COMPONENTS = new Set(['Frame']);
+/**
+ * Source components whose only job is to frame one image; without a caption they are the image.
+ * `div` is here because published Markdown wraps an image in a styling div, and the migration
+ * unwraps it. Keyed to the name on purpose: "empty props and one image child" as a general shape
+ * test would also swallow a wrapper that should have carried something and lost it upstream.
+ */
+const FRAME_COMPONENTS = new Set(['Frame', 'div']);
+
+/** Wrappers that carry a published heading anchor and nothing else. Named, for the same reason. */
+const ANCHOR_WRAPPERS = new Set(['div']);
+
+/** The class the migration itself writes on a converted badge; it appears nowhere a migration did not put it. */
+const BADGE_MARKER = /^<span className="dai-mig-badge">([\s\S]*)<\/span>$/;
 
 function contentProps(props: Record<string, string | number | boolean | null>): FidelityValue {
   const semantic: Record<string, string | number | boolean> = {};
@@ -127,15 +139,40 @@ function framedImageShape(block: { name: string; props: Record<string, string | 
  * migration lifts the heading out carrying the id. The author wrote a heading with an anchor; the
  * wrapper was how the platform spelled the anchor, so the two say the same thing.
  *
- * Narrow on purpose: one heading, nothing else, and no prop that carries content. A wrapper holding
- * a heading *and* other blocks still has to match, because then the wrapper groups something.
+ * Narrow on purpose: a named wrapper, one heading, nothing else, and no prop that carries content.
+ * A wrapper holding a heading *and* other blocks still has to match, because then it groups something.
  */
-function anchorHeadingShape(block: { props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+function anchorHeadingShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (!ANCHOR_WRAPPERS.has(block.name)) return undefined;
   const content = block.children.filter((child) => !(child.type === 'paragraph' && !inlineShape(child.children).length));
   if (content.length !== 1 || content[0].type !== 'heading') return undefined;
   const props = contentProps(block.props) as Record<string, unknown>;
   const carries = Object.keys(props).filter((key) => key !== 'id');
   return carries.length ? undefined : blocksShape(content, false);
+}
+
+/**
+ * A prompt is text meant to be copied, introduced by a description the source renders as visible
+ * prose (`data-component-part="prompt-description"`), so it reads as that paragraph followed by the
+ * text as a code block - which is what the conversion writes.
+ *
+ * Keyed to the component name, not to "a component with a description": promoting any description
+ * prop to prose would invent text for components whose description the reader never sees.
+ */
+function promptShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (block.name !== 'Prompt') return undefined;
+  const description = typeof block.props.description === 'string' ? block.props.description.trim() : '';
+  const parts: string[] = [];
+  for (const child of block.children) {
+    if (child.type === 'paragraph' || child.type === 'heading') parts.push(inlineText(child.children));
+    else if (child.type === 'code') parts.push(child.value);
+  }
+  const value = parts.join('\n\n').trim();
+  if (!value) return undefined;
+  return [
+    ...(description ? [{ type: 'paragraph', children: [{ type: 'text', value: description }] } as FidelityValue] : []),
+    { type: 'code', lang: 'text', meta: '', title: '', value },
+  ];
 }
 
 function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[] {
@@ -179,13 +216,21 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
         if (framed) return framed;
         const anchored = anchorHeadingShape(block);
         if (anchored) return anchored;
+        const prompt = promptShape(block);
+        if (prompt) return prompt;
         const bare = bareUrlShape(contentProps(block.props), block.children);
         if (bare) return bare;
         const folded = titleFold(contentProps(block.props), block.children);
         return [{ type: 'component', props: folded.props, children: blocksShape(folded.children, false) }];
       }
       case 'html': return /^\s*<a\s+id=["'][^"']+["']\s*><\/a>\s*$/i.test(block.value) ? [] : [{ type: 'html', value: block.value.trim() }];
-      case 'rawHtml': return [{ type: 'html', value: block.value.trim() }];
+      case 'rawHtml': {
+        // The migration writes this class itself, so matching it cannot let an unrelated
+        // component-to-HTML conversion pass: the marker appears only where the migration put it.
+        const badge = exactComponents ? null : BADGE_MARKER.exec(block.value.trim());
+        if (badge) return [{ type: 'component', props: ordered({}), children: [{ type: 'paragraph', children: [{ type: 'text', value: badge[1] }] }] }];
+        return [{ type: 'html', value: block.value.trim() }];
+      }
       case 'snippetRef': return [{ type: 'snippetRef', token: block.token, children: blocksShape(block.body ?? [], exactComponents) }];
       case 'quarantined': return [{ type: 'quarantined', reason: block.reason, original: blocksShape([block.original], exactComponents) }];
     }

@@ -559,11 +559,15 @@ export function collectComponents(doc: DocIR): ComponentNode[] {
  * itself. So a handler that lost a paragraph, a rename that lost a prop, or any loss no approved
  * rule declared, all still fail the gate.
  */
-export function applyDeclaredLosses(doc: DocIR, engine: RulesEngine): DocIR {
+export function applyDeclaredLosses(doc: DocIR, engine: RulesEngine, substituted: ReadonlySet<string> = new Set()): DocIR {
   const strip = (blocks: Block[]): Block[] => blocks.flatMap((block): Block[] => {
     if (block.type === 'list') return [{ ...block, children: block.children.map((li) => ({ ...li, children: strip(li.children) })) }];
     if (block.type !== 'component') return isBlockWithChildren(block) ? [{ ...block, children: strip(block.children as Block[]) } as Block] : [block];
     const rule = engine.findRule(block);
+    // A component a named person recorded a substitution for is read as what replaces it, so the
+    // comparison measures everything else on the page. This is the only way invented content passes,
+    // and it passes because someone owned it - never because anything claimed the two were equal.
+    if (substituted.has(block.name)) return engine.resolveDoc({ ...doc, children: [block] }).children;
     // A handler decides this node's shape; leave it exactly as the source stated it.
     if (rule?.handler) return [{ ...block, children: strip(block.children) }];
     if (rule?.children === 'drop') return [];
