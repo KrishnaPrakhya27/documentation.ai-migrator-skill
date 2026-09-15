@@ -108,7 +108,14 @@ function framedImageShape(block: { name: string; props: Record<string, string | 
 function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[] {
   return blocks.flatMap((block): FidelityValue[] => {
     switch (block.type) {
-      case 'paragraph': return [{ type: 'paragraph', children: inlineShape(block.children) }];
+      case 'paragraph': {
+        // A paragraph with nothing in it is not something an author wrote. GitBook publishes spacer
+        // paragraphs (a lone `&#x20;`) between blocks; they serialise to a blank line and come back
+        // from a re-parse as nothing, which made a page differ from its own written file. Empty
+        // inline text is already dropped above, so this is the same rule one level up.
+        const children = inlineShape(block.children);
+        return children.length ? [{ type: 'paragraph', children }] : [];
+      }
       case 'heading': return [{ type: 'heading', depth: block.depth, children: inlineShape(block.children) }];
       case 'code': {
         const serializedMeta = exactComponents ? [`${block.title ? `title="${block.title.replace(/["\r\n`~]/g, ' ').trim()}"` : ''}`, block.meta ?? ''].filter(Boolean).join(' ') : block.meta ?? '';
@@ -119,9 +126,14 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
       case 'table': return [{ type: 'table', align: ordered(block.align ?? []), children: block.children.map((row) => ({ type: 'row', header: row.isHeader ?? false, children: row.children.map((cell) => inlineShape(cell.children)) })) }];
       case 'thematicBreak': return [{ type: 'thematicBreak' }];
       case 'image': return [{ type: 'image', url: block.url, alt: block.alt, title: block.title ?? '', width: block.width ?? null, height: block.height ?? null }];
-      case 'figure': return exactComponents
-        ? [blocksShape([block.image], true)[0], ...(block.caption?.length ? [{ type: 'paragraph', children: [{ type: 'emphasis', children: inlineShape(block.caption) }] } as FidelityValue] : [])]
-        : [{ type: 'figure', image: blocksShape([block.image], false)[0], caption: inlineShape(block.caption ?? []) }];
+      case 'figure': {
+        if (exactComponents) return [blocksShape([block.image], true)[0], ...(block.caption?.length ? [{ type: 'paragraph', children: [{ type: 'emphasis', children: inlineShape(block.caption) }] } as FidelityValue] : [])];
+        // Without a caption a figure says exactly what its image says, so it reads as the image -
+        // the same equivalence framedImageShape already applies to a component wrapping one image.
+        const caption = inlineShape(block.caption ?? []);
+        const image = blocksShape([block.image], false)[0];
+        return caption.length ? [{ type: 'figure', image, caption }] : [image];
+      }
       case 'component': case 'dai': {
         if (exactComponents) return [{ type: 'component', name: block.name, props: ordered(block.props), children: blocksShape(block.children, true) }];
         const framed = framedImageShape(block);

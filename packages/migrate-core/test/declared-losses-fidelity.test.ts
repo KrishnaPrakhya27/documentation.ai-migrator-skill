@@ -177,6 +177,36 @@ describe('authoredContentSnapshot: two spellings of the same words', () => {
   });
 });
 
+describe('blocks that say nothing', () => {
+  /** GitBook publishes spacer paragraphs between blocks; a re-parse of the written file returns none. */
+  it('reads a spacer paragraph as nothing, on both sides', () => {
+    const spacer: Block = { id: id(), type: 'paragraph', children: [{ id: id(), type: 'text', value: ' ' }] };
+    const source = doc([spacer, para('Real prose')]);
+    const output = doc([para('Real prose')]);
+    expect(fidelityEqual(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBe(true);
+  });
+
+  it('still fails when a paragraph with words in it disappears', () => {
+    const source = doc([para('Words'), para('Real prose')]);
+    const output = doc([para('Real prose')]);
+    expect(firstFidelityDifference(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBeDefined();
+  });
+
+  it('reads an uncaptioned figure as the image it frames', () => {
+    const image = { id: id(), type: 'image' as const, url: 'https://cdn.example.net/a.png', alt: '' };
+    const source = doc([{ id: id(), type: 'figure', image, caption: [] }]);
+    const output = doc([image]);
+    expect(fidelityEqual(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBe(true);
+  });
+
+  it('keeps a figure that carries a caption distinct from a bare image', () => {
+    const image = { id: id(), type: 'image' as const, url: 'https://cdn.example.net/a.png', alt: '' };
+    const source = doc([{ id: id(), type: 'figure', image, caption: [{ id: id(), type: 'text', value: 'Figure 1' }] }]);
+    const output = doc([image]);
+    expect(firstFidelityDifference(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBeDefined();
+  });
+});
+
 describe('the gate still fails on a loss no rule declared', () => {
   it('fails when a handler silently loses a paragraph', () => {
     const source = declared([component('step', {}, [heading(3, 'Deploy'), para('First.'), para('Second.')])]);
