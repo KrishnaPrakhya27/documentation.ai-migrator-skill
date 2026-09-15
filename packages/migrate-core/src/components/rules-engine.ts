@@ -310,8 +310,10 @@ const HANDLERS: Record<string, RestructureHandler> = {
     const href = typeof rule.to?.props?.href === 'string' ? rule.to.props.href : undefined;
     const props: Record<string, string | number | boolean | null> = { title };
     if (href) props.href = href;
+    // Whatever the widget wrapped is authored content and stays: a playground holds the very
+    // snippets and warnings the page teaches from, and only the live behaviour cannot come.
     return {
-      blocks: [{ id: node.id, type: 'dai', name: 'Card', props, children: [], rule: rule.id }],
+      blocks: [{ id: node.id, type: 'dai', name: 'Card', props, children: node.children, rule: rule.id }],
       lossy: [`<${node.name}> is a live demo and cannot be reproduced statically; it became a card linking to the working tool${rule.note ? ` — ${rule.note}` : ''}. Needs a customer-controlled home before cutover.`],
     };
   } },
