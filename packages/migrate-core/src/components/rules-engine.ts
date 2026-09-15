@@ -568,8 +568,14 @@ export function applyDeclaredLosses(doc: DocIR, engine: RulesEngine, substituted
     // comparison measures everything else on the page. This is the only way invented content passes,
     // and it passes because someone owned it - never because anything claimed the two were equal.
     if (substituted.has(block.name)) return engine.resolveDoc({ ...doc, children: [block] }).children;
-    // A handler decides this node's shape; leave it exactly as the source stated it.
-    if (rule?.handler) return [{ ...block, children: strip(block.children) }];
+    // A handler decides this node's shape; leave it exactly as the source stated it - except for a
+    // prop the rule declares dropped, which is dropped whoever shapes the node and stays reported.
+    if (rule?.handler) {
+      if (!rule.drop?.length) return [{ ...block, children: strip(block.children) }];
+      const kept = { ...block.props };
+      for (const prop of rule.drop) delete kept[prop];
+      return [{ ...block, props: kept, children: strip(block.children) }];
+    }
     if (rule?.children === 'drop') return [];
     if (rule?.children === 'unwrap') return strip(block.children);
     if (!rule?.drop?.length) return [{ ...block, children: strip(block.children) }];

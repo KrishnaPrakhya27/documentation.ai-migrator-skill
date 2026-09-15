@@ -68,6 +68,15 @@ const FRAME_COMPONENTS = new Set(['Frame', 'div']);
 /** Wrappers that carry a published heading anchor and nothing else. Named, for the same reason. */
 const ANCHOR_WRAPPERS = new Set(['div']);
 
+/** A heading written as raw HTML. The level is in the name, so the shape can state it. */
+const HTML_HEADINGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+
+/** A rule written as raw HTML: a divider with nothing in it. */
+const HTML_RULES = new Set(['hr']);
+
+/** Source components whose label prop the target spells `title`. Named, so `name` keeps its meaning on ParamField. */
+const RENAMED_LABEL = new Map([['Tree.Folder', 'name']]);
+
 /** The class the migration itself writes on a converted badge; it appears nowhere a migration did not put it. */
 const BADGE_MARKER = /^<span className="dai-mig-badge">([\s\S]*)<\/span>$/;
 
@@ -180,25 +189,99 @@ function promptShape(block: { name: string; props: Record<string, string | numbe
   ];
 }
 
-/** Source components whose label is their content and becomes the card's title. */
-const LABELLED_CARDS = new Set(['PreviewButton', 'GitHub.Repo']);
+/** Source components the conversion reads as a Card. Named, so this is not a licence for any component to become one. */
+const CARD_SOURCES = new Set(['PreviewButton', 'GitHub.Repo', 'ThemeCard', 'HeroCard', 'Tile']);
 
 /**
- * A button and a repository card are a link with a label. The conversion makes each a Card, whose
- * title is that label - so the words move from the children into a prop rather than disappearing,
- * and a repo name becomes the address it always pointed at.
+ * The card family. A themed card, a hero card, a tile, a button and a repository card are all a
+ * title, a link and some supporting text, which is what the target's Card is - so the conversion
+ * reads each as one, moving the description into the card's own text, an image child onto the card,
+ * and a repo name to the address it always pointed at.
  *
- * Keyed to these component names, so it cannot become a general rule that any component's text may
- * reappear as a title: that would let a conversion move content anywhere and still pass.
+ * This mirrors the conversion exactly rather than relaxing the comparison: every word still has to
+ * match, and a card that lost its description or its link still fails. Keyed to these names, so no
+ * other component may quietly become a Card.
  */
-function labelledCardShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
-  if (!LABELLED_CARDS.has(block.name)) return undefined;
-  const repo = typeof block.props.repo === 'string' ? block.props.repo.trim() : '';
-  const label = cleanText(block.children.map((child) => (child.type === 'paragraph' || child.type === 'heading' ? inlineText(child.children) : '')).join(' '));
-  const title = repo || label;
+function cardSourceShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (!CARD_SOURCES.has(block.name)) return undefined;
+  const str = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  const repo = str(block.props.repo);
+  const images = block.children.filter((child): child is Extract<Block, { type: 'image' }> => child.type === 'image');
+  const rest = block.children.filter((child) => child.type !== 'image');
+  const label = cleanText(rest.map((child) => (child.type === 'paragraph' || child.type === 'heading' ? inlineText(child.children) : '')).join(' '));
+  const title = str(block.props.title) ?? repo ?? label ?? 'Card';
   if (!title) return undefined;
-  const href = typeof block.props.href === 'string' ? block.props.href : repo ? `https://github.com/${repo}` : undefined;
-  return [{ type: 'component', props: ordered({ ...(href ? { href } : {}), title }), children: [] }];
+  const href = str(block.props.href) ?? (repo ? `https://github.com/${repo}` : undefined);
+  const image = str(block.props.image) ?? (images[0] ? images[0].url : undefined);
+  const description = str(block.props.description);
+  const body = str(block.props.title) || repo ? rest : [];
+  const props: Record<string, string | number | boolean> = { title };
+  if (href) props.href = href;
+  if (image) props.image = image;
+  const children: FidelityValue[] = [
+    ...(description ? [{ type: 'paragraph', children: [{ type: 'text', value: description }] } as FidelityValue] : []),
+    ...blocksShape(body, false),
+  ];
+  return [{ type: 'component', props: ordered(props), children }];
+}
+
+/**
+ * A row of swatches is a titled group, which the conversion states as a disclosure holding the row -
+ * so the row's own title survives rather than being dropped.
+ */
+function colorRowShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (block.name !== 'Color.Row') return undefined;
+  const title = typeof block.props.title === 'string' && block.props.title.trim() ? block.props.title.trim() : undefined;
+  const inner: FidelityValue = { type: 'component', props: ordered({}), children: blocksShape(block.children, false) };
+  return title ? [{ type: 'component', props: ordered({ title }), children: [inner] }] : [inner];
+}
+
+/**
+ * A heading written as raw HTML is a heading, and its level is its tag. The site root states its
+ * own title that way - `<h1 className="…">Documentation</h1>` - and reading the wrapper as a
+ * component rather than the heading it becomes left that page, and the whole site's initial route,
+ * unconverted. Keyed to the tag names, and only when the wrapper carries nothing of its own.
+ */
+function htmlHeadingShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (!HTML_HEADINGS.has(block.name)) return undefined;
+  if (Object.keys(contentProps(block.props) as Record<string, unknown>).length) return undefined;
+  const content = block.children.filter((child) => !(child.type === 'paragraph' && !inlineShape(child.children).length));
+  const [only] = content;
+  if (content.length !== 1 || (only.type !== 'paragraph' && only.type !== 'heading')) return undefined;
+  const depth = Number(block.name.slice(1));
+  return [{ type: 'heading', depth, children: inlineShape(only.children) }];
+}
+
+/** A divider written as raw HTML states nothing but itself. */
+function htmlRuleShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (!HTML_RULES.has(block.name) || block.children.length) return undefined;
+  return Object.keys(contentProps(block.props) as Record<string, unknown>).length ? undefined : [{ type: 'thematicBreak' }];
+}
+
+/** A container whose label the target spells `title`: the same words under a different prop name. */
+function renamedLabelShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  const from = RENAMED_LABEL.get(block.name);
+  const label = from && block.props[from];
+  if (typeof label !== 'string' || !label.trim()) return undefined;
+  const rest = Object.fromEntries(Object.entries(block.props).filter(([key]) => key !== from));
+  const props = contentProps({ ...rest, title: label }) as Record<string, FidelityValue>;
+  return [{ type: 'component', props: ordered(props), children: blocksShape(block.children, false) }];
+}
+
+/**
+ * A colour swatch is a named value. The conversion titles a card with the name and puts the value
+ * in a code block the reader can copy, so the hex the swatch states is still on the page - which is
+ * the whole content of a swatch, and why this is read rather than left to differ.
+ */
+function colorSwatchShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (block.name !== 'Color.Item') return undefined;
+  const label = typeof block.props.name === 'string' ? block.props.name : '';
+  const value = typeof block.props.value === 'string' ? block.props.value : '';
+  if (!label && !value) return undefined;
+  return [{
+    type: 'component', props: ordered({ title: label || value }),
+    children: value ? [{ type: 'code', lang: 'css', meta: '', title: '', value }] : [],
+  }];
 }
 
 function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[] {
@@ -244,8 +327,10 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
         if (anchored) return anchored;
         const prompt = promptShape(block);
         if (prompt) return prompt;
-        const labelled = labelledCardShape(block);
-        if (labelled) return labelled;
+        for (const read of [cardSourceShape, colorRowShape, htmlHeadingShape, htmlRuleShape, renamedLabelShape, colorSwatchShape]) {
+          const shaped = read(block);
+          if (shaped) return shaped;
+        }
         const bare = bareUrlShape(contentProps(block.props), block.children);
         if (bare) return bare;
         const folded = titleFold(contentProps(block.props), block.children);

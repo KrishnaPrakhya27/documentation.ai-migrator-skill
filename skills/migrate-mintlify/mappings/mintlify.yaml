@@ -74,6 +74,8 @@ rules:
     tier: T1
     match: { name: CodeGroup }
     to: { name: CodeGroup }
+    # rendering the group as a dropdown rather than tabs is presentation, and a declared loss
+    drop: [dropdown]
   - id: mint/tooltip
     tier: T4
     match: { name: Tooltip }
@@ -82,6 +84,8 @@ rules:
     tier: T4
     match: { name: Badge }
     handler: badge-to-span
+    # the badge's size is presentation; the target has no prop for it, so it is a declared loss
+    drop: [size, shape, stroke, disabled]
   - id: mint/request-example
     tier: T1
     match: { name: RequestExample }
