@@ -642,8 +642,9 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(new URL('quickstart', mintlifyNavBase(html, 'https://acme.example/docs')).toString()).toBe('https://acme.example/docs/quickstart');
     // A site published at the root is unchanged.
     expect(mintlifyNavBase('<a href="/sitemap.xml"></a>', 'https://acme.example/')).toBe('https://acme.example/');
-    // No declaration: fall back to the seed read as a directory.
-    expect(mintlifyNavBase('<p>no sitemap link</p>', 'https://acme.example/docs')).toBe('https://acme.example/docs/');
+    // No declaration: the origin root, never the seed - a deep seed is a page, not a root of its own.
+    expect(mintlifyNavBase('<p>no sitemap link</p>', 'https://acme.example/docs')).toBe('https://acme.example/');
+    expect(mintlifyNavBase('<p>no sitemap link</p>', 'https://acme.example/guides/setup')).toBe('https://acme.example/');
   });
   it('refuses same-origin pages outside the site base, and says which', async () => {
     const site = syntheticSiteFetcher({

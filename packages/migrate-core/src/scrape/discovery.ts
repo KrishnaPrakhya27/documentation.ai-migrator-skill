@@ -245,10 +245,17 @@ interface MintlifyNavigationExtraction {
   pages: Array<{ url: string; title?: string; sidebarTitle?: string; description?: string; groups: string[] }>;
 }
 
-/** Mintlify navigation entries are site-root paths (`quickstart`, `/quickstart`); the root page is authored as `index` and served at `/`. */
-function mintlifyNavigationUrl(entry: string, origin: string): string {
-  const url = new URL(entry.replace(/^\/+/, ''), origin + '/');
-  if (url.origin === origin && url.pathname === '/index') url.pathname = '/';
+/**
+ * Mintlify navigation entries are paths relative to the docs root (`quickstart`,
+ * `/quickstart`), not to the origin: a site published under a prefix states
+ * `quickstart` and serves it at `/docs/quickstart`. They are resolved against
+ * that root, so the prefix survives. The root page is authored as `index` and
+ * served at the root itself.
+ */
+function mintlifyNavigationUrl(entry: string, base: string): string {
+  const root = new URL(base);
+  const url = new URL(entry.replace(/^\/+/, ''), root);
+  if (url.origin === root.origin && url.pathname === `${root.pathname}index`) url.pathname = root.pathname.replace(/\/$/, '') || '/';
   return url.toString();
 }
 
@@ -316,7 +323,9 @@ export function mintlifyNavBase(html: string, seedUrl: string): string {
     const path = html.slice(start, marker);
     if (/^(?:\/[A-Za-z0-9._~-]+)*$/.test(path)) return new URL(`${path}/`, new URL(seedUrl).origin).toString();
   }
-  return siteBaseUrl(seedUrl);
+  // Nothing declared: the origin root, which is where a site that states no prefix lives. Never the
+  // seed - an operator may name any page, and a deep page would be read as a root of its own.
+  return new URL('/', seedUrl).toString();
 }
 
 export function siteFileBases(seedUrl: string, limit = 4): string[] {
@@ -456,7 +465,9 @@ async function fetchLlmsIndex(fetcher: Fetcher, bases: string[], seedHost: strin
  * labels, descriptions, order, and repeated placements.
  */
 export function extractMintlifyNavigation(html: string, baseUrl: string): MintlifyNavigationExtraction | undefined {
-  const base = new URL(baseUrl);
+  // The page states the docs root it is published under; a base without a trailing slash would
+  // resolve `quickstart` against the parent of its last segment and drop that prefix.
+  const base = new URL(mintlifyNavBase(html, baseUrl));
   const arrays: unknown[][] = [];
   const payloads = flightPayloads(html);
   // `scopedNav` is what the sidebar renders. `docsConfig.navigation` is stripped server-side on
@@ -494,14 +505,14 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
   const pages: MintlifyNavigationExtraction['pages'] = [];
   const walk = (items: unknown[], groups: string[]): DiscoveredNavigationNode[] => items.flatMap((value) => {
     if (typeof value === 'string') {
-      const url = mintlifyNavigationUrl(value, base.origin);
+      const url = mintlifyNavigationUrl(value, base.href);
       pages.push({ url, groups });
       return [{ type: 'page' as const, url }];
     }
     if (!value || typeof value !== 'object') return [];
     const node = value as Record<string, unknown>;
     if (typeof node.href === 'string' && !containerLabel(node)) {
-      const url = mintlifyNavigationUrl(node.href, base.origin);
+      const url = mintlifyNavigationUrl(node.href, base.href);
       const title = typeof node.title === 'string' ? node.title : undefined;
       const sidebarTitle = typeof node.sidebarTitle === 'string' ? node.sidebarTitle : undefined;
       const description = typeof node.description === 'string' ? node.description : undefined;
@@ -1093,7 +1104,7 @@ export async function discoverLiveSite(input: {
       if (input.profile.platform === 'mintlify') {
         siteConfig ??= extractMintlifyDocsConfig(response.body);
         if (!navigation) {
-          const extracted = extractMintlifyNavigation(response.body, mintlifyNavBase(response.body, input.seedUrl));
+          const extracted = extractMintlifyNavigation(response.body, input.seedUrl);
           if (extracted) {
             navigation = extracted.navigation;
             navigationCandidates['platform-metadata'] = extracted.navigation;
