@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { discoverLiveSite, navigationFromFrozenPages } from '../src/scrape/discovery.js';
+import { discoverLiveSite, navigationFromFrozenPages, siteNameFromTitleTags } from '../src/scrape/discovery.js';
 import { Fetcher, type FetchImpl } from '../src/scrape/fetcher.js';
 import { getProfile } from '../src/scrape/profiles.js';
 import { ensureWorkspace } from '../src/session/workspace.js';
@@ -275,6 +275,37 @@ describe('a live Flare site, crawled', () => {
     expect(manifest.issues).toContainEqual(expect.stringContaining('a second MadCap help system is published here'));
     // Its pages are still discovered: leaving them out of the crawl would hide them entirely.
     expect(found.pages.map((crawled) => crawled.url)).toContain('http://8.8.8.8/developer/API/auth.htm');
+    // Both systems are reported in machine-readable form, so the operator can answer which one this
+    // run migrates instead of only reading the refusal.
+    expect(found.helpSystems).toEqual([
+      expect.objectContaining({ root: 'http://8.8.8.8/', seed: true }),
+      expect.objectContaining({ root: 'http://8.8.8.8/developer/', seed: false, issue: expect.stringContaining('a second MadCap help system') }),
+    ]);
+    // The issue recorded on the second system is the one the manifest carries, verbatim.
+    expect(manifest.issues).toContain(found.helpSystems!.find((system) => !system.seed)!.issue);
+  });
+
+  it('reads the site name from the page its help system opens on', async () => {
+    const helpSystem = HELP_SYSTEM.replace('<WebHelpSystem', '<WebHelpSystem DefaultUrl="home.htm"');
+    const topic = (title: string, body: string) => `<html data-mc-path-to-help-system=""><head><title>${title}</title></head><body><div data-mc-content-body="True">${body}</div></body></html>`;
+    const files: Record<string, string> = {
+      '/home.htm': topic('SessionM Help Center', '<h1>Welcome</h1>'),
+      '/Data/HelpSystem.xml': helpSystem,
+      '/Data/Tocs/CurrentNav.js': `define({numchunks:1,prefix:'CurrentNav_Chunk',tree:{n:[{i:0,c:0}]}});`,
+      '/Data/Tocs/CurrentNav_Chunk0.js': `define({'/home.htm':{i:[0],t:['SessionM Help Center'],b:['']}});`,
+    };
+    const serve = (async (input: any) => {
+      const { pathname } = new URL(typeof input === 'string' ? input : input.toString());
+      const body = files[pathname];
+      if (body === undefined) return new Response('nope', { status: 404 });
+      return new Response(body, { status: 200, headers: { 'content-type': pathname.endsWith('.xml') ? 'application/xml' : pathname.endsWith('.js') ? 'application/javascript' : 'text/html; charset=utf-8' } });
+    }) as unknown as FetchImpl;
+    const workspace = mkdtempSync(join(tmpdir(), 'dai-flare-name-'));
+    ensureWorkspace(workspace);
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/home.htm', fetcher: new Fetcher({ workspace, rps: 1000, fetchImpl: serve }), profile: getProfile('madcap') });
+    // No title on this site carries a site-name suffix, so the usual reading finds nothing.
+    expect(siteNameFromTitleTags(['SessionM Help Center'])).toBeUndefined();
+    expect(found.siteName).toBe('SessionM Help Center');
   });
 
   it('leaves a site that is not Flare untouched', async () => {

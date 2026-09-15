@@ -370,7 +370,25 @@ export const PROFILES: Record<string, ScrapeProfile> = {
       { kind: 'archive', pattern: '.flprj', weight: 5 },
     ],
     articleSelector: '#mc-main-content, [data-mc-content-body]',
-    removeSelectors: ['.skip-to-content', '.title-bar-container', '.off-canvas', '.search-bar-container', '.central-account-wrapper', 'nav[data-mc-side-nav-menu]', 'footer'],
+    removeSelectors: [
+      '.skip-to-content', '.title-bar-container', '.off-canvas', '.search-bar-container', '.central-account-wrapper', 'nav[data-mc-side-nav-menu]', 'footer',
+      // Flare renders skin components *inside* the topic body and marks them `nocontent` — its own
+      // statement that they are not content. On a surveyed site these are the topic toolbar's
+      // Previous/Next buttons (406 pages) and the menu skins (18); not one is authored text.
+      // `mc-component` is required alongside so a topic that writes the word itself keeps it.
+      '.mc-component.nocontent',
+      // The skin's search boxes: one in the nav, one in the landing-page hero. `.search-bar-container`
+      // above takes their innards, which would otherwise leave the wrapper and an empty
+      // <form class="search"> behind as a component of its own. The hero's heading is left alone:
+      // it is the title those pages state, and stating it is the source's business, not this rule's.
+      '.nav-search-wrapper', 'form.search',
+      // A cookie-consent control the page template injects. Not Flare's, and never documentation.
+      '#ot-sdk-btn', '.ot-sdk-show-settings',
+      // The copy control Flare draws above a code snippet. Its javascript: href is stripped as an
+      // unsafe URL, which used to leave the bare word "Copy" sitting above the code as if authored.
+      // The snippet's caption beside it is authored text and stays.
+      '.codeSnippetCopyButton',
+    ],
     // Recorded as the independent witness verification cross-checks; it is empty on a live site,
     // and `navigationData` carries the tree the site actually renders.
     navSelector: 'nav[data-mc-side-nav-menu], .sidenav-wrapper',

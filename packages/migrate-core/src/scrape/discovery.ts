@@ -11,7 +11,7 @@ import { parseLlmsTxt, type LlmsEntry } from './published-markdown.js';
 import { mapConcurrent } from './concurrency.js';
 import { sha256 } from '../session/ids.js';
 import { sourceFingerprint } from './drift.js';
-import { fetchFlareData, flareNavigationFromData, helpSystemRoot, type FlareData } from './madcap-toc.js';
+import { defaultUrlFromHelpSystem, fetchFlareData, flareNavigationFromData, helpSystemRoot, type FlareData } from './madcap-toc.js';
 
 export interface DiscoveredUrl {
   url: string;
@@ -84,6 +84,25 @@ export interface DiscoveryResult {
    * verification re-derives the same tree offline.
    */
   navigationData?: Array<{ url: string; body: string }>;
+  /**
+   * The independent help systems this crawl found on the host, seed first. A host may publish
+   * several; the seed's states the site's navigation and another is reported rather than merged.
+   * Recorded in machine-readable form so the operator can answer the question that report asks —
+   * which help system this run migrates — instead of only reading it in an error message.
+   */
+  helpSystems?: HelpSystem[];
+}
+
+/** One MadCap help system published on the crawled host. */
+export interface HelpSystem {
+  /** Directory the help system is published under; its pages are the URLs beneath it. */
+  root: string;
+  /** Whether this is the help system the seed URL belongs to, whose sidebar the run states. */
+  seed: boolean;
+  /** How many pages its own sidebar places. */
+  sidebarPages: number;
+  /** The structural issue this help system raised, verbatim, when it is not the seed's. */
+  issue?: string;
 }
 
 /** How published MadCap Flare output declares the help system a page belongs to. */
@@ -701,6 +720,9 @@ export async function discoverLiveSite(input: {
   let navigation: DiscoveredNavigationNode[] | undefined;
   const navigationCandidates: NonNullable<DiscoveryResult['navigationCandidates']> = {};
   const structuralIssues: string[] = [];
+  const helpSystems: HelpSystem[] = [];
+  /** The page the seed's help system opens on; the site states its name in that page's title. */
+  let flareDefaultUrl: string | undefined;
   let sections: SiteSection[] | undefined;
   const sectionSidebars = new Map<string, DiscoveredNavigationNode[]>();
   let siteName: string | undefined;
@@ -904,16 +926,31 @@ export async function discoverLiveSite(input: {
           flareRoots.add(flareRoot);
           try {
             const data = await fetchFlareData(page, response.body, flareFetch);
+            // A help system names the page it opens on, and that page titles itself with the site's
+            // name — Flare's own way of stating it, where a theme that suffixes every <title> would
+            // have stated it there. Only the seed's own help system speaks for this site.
+            if (data && !flareDefaultUrl) {
+              for (const [dataUrl, body] of data) {
+                if (!/HelpSystem\.xml$|\.mcwebhelp$/i.test(dataUrl)) continue;
+                flareDefaultUrl = defaultUrlFromHelpSystem(body, flareRoot);
+                if (flareDefaultUrl) break;
+              }
+            }
             const read = data && flareNavigationFromData(page, response.body, data);
             if (data && read?.nodes.length) {
               for (const [dataUrl, body] of data) if (!navigationData.some((file) => file.url === dataUrl)) navigationData.push({ url: dataUrl, body });
               if (!navigation) {
                 navigation = read.nodes;
                 navigationCandidates['platform-metadata'] = read.nodes;
+                helpSystems.push({ root: flareRoot, seed: true, sidebarPages: placedPages(read.nodes).size });
               } else {
                 const error = `a second MadCap help system is published here, with its own ${placedPages(read.nodes).size}-page sidebar; the navigation this run states is the one at ${[...flareRoots][0]}, and the pages under this one are placed by neither`;
                 failures.push({ url: flareRoot, error });
-                structuralIssues.push(`${flareRoot}: ${error}`);
+                // The manifest issue is recorded verbatim on the help system, so a decision about
+                // this system can be matched to the issue it answers without parsing the message.
+                const issue = `${flareRoot}: ${error}`;
+                structuralIssues.push(issue);
+                helpSystems.push({ root: flareRoot, seed: false, sidebarPages: placedPages(read.nodes).size, issue });
               }
               // Its pages are discovered either way: a page the first sidebar never names is still
               // part of the site, and leaving it out of the crawl would hide it entirely.
@@ -983,11 +1020,14 @@ export async function discoverLiveSite(input: {
     })),
     failures,
     ...(structuralIssues.length ? { structuralIssues: [...new Set(structuralIssues)].sort() } : {}),
+    ...(helpSystems.length ? { helpSystems } : {}),
     sitemaps: { sources: sitemaps.sources, entries: sitemaps.entries, truncated: sitemaps.truncated },
     navigation: navigation ?? (domSidebarIsNavigation ? domSidebar : undefined),
     navigationSource: navigation ? 'platform-metadata' : domSidebarIsNavigation ? 'dom-sidebar' : undefined,
     navigationCandidates: Object.keys(navigationCandidates).length ? navigationCandidates : undefined,
-    siteName: siteName ?? siteNameFromTitleTags([...records.values()].map((value) => value.htmlTitleTag)),
+    siteName: siteName
+      ?? siteNameFromTitleTags([...records.values()].map((value) => value.htmlTitleTag))
+      ?? (flareDefaultUrl ? records.get(flareDefaultUrl)?.htmlTitleTag?.trim() || undefined : undefined),
     siteConfig,
     llms,
     canonicalHosts: canonicalHosts.list(),

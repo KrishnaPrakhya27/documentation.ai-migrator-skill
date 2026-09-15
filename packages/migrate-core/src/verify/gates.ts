@@ -2,7 +2,7 @@
  * Release gates. Any failure blocks release. Gates that need a preview or a
  * browser report `not-run` and count as failed unless explicitly allowed.
  */
-import { readdirSync, readFileSync, existsSync, statSync, lstatSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, statSync, lstatSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { validateMdx, validateNavigation } from '@dai/content-contract';
 import { Ledger, effectiveExclusions, summarize, type LedgerSummary } from '../ledger/dispositions.js';
@@ -24,7 +24,7 @@ import { fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from './f
 import { isConvertedFidelityRecord, readFidelityRecords } from './fidelity-records.js';
 import { describeMigrator, migratorDrift, type MigratorProvenance } from '../session/provenance.js';
 import { chromeAbsent, documentLinks, htmlReconciliation, sourceContentExact, sourceMetadataExact, type RawSourcePage, type SourceComparison } from './source-truth.js';
-import { documentAnchors, unresolvedFragments } from './fragments.js';
+import { documentAnchors, unresolvedFragments, htmlAnchors, splitInheritedFragments } from './fragments.js';
 import type { ScrapeProfile } from '../scrape/profiles.js';
 import { requireSourceManifest, sourceUniverseProblems } from '../evidence/verify.js';
 import { requireAcquisition } from '../evidence/acquisition.js';
@@ -615,7 +615,7 @@ export function runGates(input: GateInput): GateResult[] {
   };
   const sourcePages = exact && evidence ? evidence.pages : [];
   sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links, evidence!.assets, evidence!.declaredLosses)), (failures) => `${failures.length} page(s) differ from the published source`);
-  sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page, evidence?.platform ?? 'generic')), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);
+  sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page, evidence?.platform ?? 'generic', evidence?.profile)), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);
   sourceGate('html-reconciliation', evidence?.profile ? sourcePages.map((page) => htmlReconciliation(page, evidence.platform, evidence.profile!)) : sourcePages.map((page) => ({ pageId: page.pageId, path: page.path, pass: false, detail: `profile ${evidence?.platform ?? 'unknown'} declares no rendered-page selectors to reconcile against` })), (failures) => `${failures.length} page(s) disagree with the rendered source`);
   sourceGate('chrome-absent', sourcePages.map((page) => chromeAbsent(page, evidence?.profile?.chromeStrings ?? [])), (failures) => `${failures.length} page(s) contain platform chrome`);
 
@@ -701,14 +701,24 @@ export function runGates(input: GateInput): GateResult[] {
   const fragmentLinks = new Map<string, string[]>();
   for (const [file, urls] of outputLinks) fragmentLinks.set(relative(input.outputDir, file).replace(/\.mdx?$/, ''), urls);
   const fragmentProblems = unresolvedFragments(fragmentLinks, outputAnchors, outputRoute);
+  // A link the source site had already broken is not a loss this migration caused, and exact mode
+  // cannot invent the anchor it names. Those are reported for the customer to fix in their own
+  // content; anything the source did offer and the output does not still blocks.
+  const sourceAnchorsByRoute = new Map<string, ReadonlySet<string>>();
+  for (const page of sourcePages) if (page.html) sourceAnchorsByRoute.set(page.route.replace(/^\/+/, ''), htmlAnchors(page.html));
+  const { broken: fragmentsBroken, inherited: fragmentsInherited } = splitInheritedFragments(fragmentProblems, sourceAnchorsByRoute);
+  if (fragmentsInherited.length) {
+    mkdirSync(join(input.workspace, 'report'), { recursive: true });
+    writeFileSync(join(input.workspace, 'report', 'inherited-broken-links.json'), JSON.stringify(fragmentsInherited, null, 2), { mode: 0o600 });
+  }
   gates.push({
     id: 'fragments-resolve',
-    status: fragmentProblems.length ? 'fail' : 'pass',
-    detail: fragmentProblems.length
-      ? `${fragmentProblems.length} link(s) point at an anchor the target page does not have`
-      : 'every deep link lands on an anchor the target page has',
-    count: fragmentProblems.length,
-    samples: fragmentProblems.slice(0, 6).map((problem) => `${problem.from} → ${problem.link}: ${problem.reason}`),
+    status: fragmentsBroken.length ? 'fail' : 'pass',
+    detail: fragmentsBroken.length
+      ? `${fragmentsBroken.length} link(s) point at an anchor the target page does not have`
+      : `every deep link lands on an anchor the target page has${fragmentsInherited.length ? `; ${fragmentsInherited.length} link(s) were already broken on the source site and are reported in report/inherited-broken-links.json` : ''}`,
+    count: fragmentsBroken.length,
+    samples: fragmentsBroken.slice(0, 6).map((problem) => `${problem.from} → ${problem.link}: ${problem.reason}`),
   });
 
   // 6b. links that leave the migrated site for the source site, which usually moves to Documentation.AI

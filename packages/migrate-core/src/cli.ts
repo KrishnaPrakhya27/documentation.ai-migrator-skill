@@ -19,10 +19,12 @@ import { nativeSourceManifest, liveSourceManifest } from './evidence/capture.js'
 import { requireSourceManifest } from './evidence/verify.js';
 import { nativeNavigationWitness } from './evidence/native-navigation.js';
 import { pinAcquisition, requireAcquisition } from './evidence/acquisition.js';
-import { ensureScopeDecisionsFile, scopeDecisionsPath } from './evidence/scope.js';
+import { ensureScopeDecisionsFile, scopeDecisionsPath, excludeHelpSystems, recordScopeExclusions, answeredHelpSystemIssues, readScopeDecisions, type DiscoveredHelpSystem } from './evidence/scope.js';
 import { captureSpecGraph, writeSpecOutput, type SpecManifest } from './openapi/graph.js';
 import { readmeCatalogSpecs } from './openapi/readme.js';
 import { HELP, parseCommandLine } from './cli/options.js';
+import { titleHeading } from './ir/page-title.js';
+import { documentLinks } from './verify/source-truth.js';
 import { progressReporter } from './cli/progress.js';
 import { canonicalHostsPath, loadSnapshot, readJson, readSnapshotPage, resetDir, snapshotPageCount, snapshotPages, sourceFiles, writeJson } from './cli/io.js';
 import { buildSourceEvidence, expectedSidebar, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
@@ -31,7 +33,7 @@ import { buildCustomerReport } from './report/customer-data.js';
 import { renderCustomerReportHtml } from './report/customer-html.js';
 import { htmlToPdf, ChromeUnavailableError } from './report/pdf.js';
 import { acquiredHtml, readPlatformMeta, type PlatformMeta } from './cli/platform-meta.js';
-import { assertOutsidePlugin, ensureWorkspace, readSession, writeSession, markStage, type Session, fileHash } from './session/workspace.js';
+import { assertOutsidePlugin, ensureWorkspace, readSession, writeSession, markStage, type Session, fileHash, recordRevision } from './session/workspace.js';
 import { acquireWorkspaceLock, type WorkspaceLock } from './session/lock.js';
 import { newMigrationId, pageIdFromPlatform, sha256 } from './session/ids.js';
 import { captureMigratorProvenance, describeMigrator, migratorDrift } from './session/provenance.js';
@@ -44,6 +46,7 @@ import { CanonicalHosts, Fetcher, type FetchOptions } from './scrape/fetcher.js'
 import { Firecrawl, readFirecrawlPage, type FirecrawlOptions } from './scrape/firecrawl.js';
 import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
 import { discoverLiveSite, extractMintlifyNavigation, navigationFromFrozenPages, sidebarObserved, siteNameFromTitleTags, type DiscoveredNavigationNode, type DiscoveryResult } from './scrape/discovery.js';
+import { defaultUrlFromHelpSystem } from './scrape/madcap-toc.js';
 import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
 import { extractSeo, seoFrontmatter } from './scrape/seo.js';
 import { acquirePages, acquireFirecrawlPages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
@@ -67,7 +70,7 @@ import { DecisionLog } from './log/decisions.js';
 import { redact } from './log/redact.js';
 import { docToMdx } from './ir/to-dai-mdx.js';
 import type { DocIR } from './ir/types.js';
-import { walkBlocks, inlineText } from './ir/types.js';
+import { walkBlocks, inlineText, type Block } from './ir/types.js';
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
 import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
 import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';
@@ -249,13 +252,32 @@ function frozenDiscovery(workspace: string, session: Session, profile: ScrapePro
   ok(`${frozen.length} frozen page(s) re-read with no network; navigation from ${derived?.source ?? 'the frozen capture, unchanged'}`);
   // Re-read the site's name from the same frozen titles, so a capture taken before the migrator
   // could read it gains the name on rebuild instead of needing the site crawled again.
-  const siteName = discovery.siteName ?? siteNameFromTitleTags(discovery.pages.map((page) => page.htmlTitleTag));
+  const siteName = discovery.siteName
+    ?? siteNameFromTitleTags(discovery.pages.map((page) => page.htmlTitleTag))
+    // The help system frozen with the capture names the page it opens on, and that page's title is
+    // the site's name. Reading it here means a capture taken before the migrator could read it
+    // gains the name on a rebuild, instead of needing the site crawled again.
+    ?? flareSiteName(discovery);
   const rebuilt = { ...discovery, ...(siteName ? { siteName } : {}) };
   return { frozen: discovery, derived: derived ? { ...rebuilt, navigation: derived.nodes, navigationSource: derived.source } : rebuilt };
 }
 
 
 
+
+/** The site name a frozen MadCap capture states: the title of the page its help system opens on. */
+function flareSiteName(discovery: DiscoveryResult): string | undefined {
+  const root = discovery.helpSystems?.find((system) => system.seed)?.root;
+  if (!root) return undefined;
+  for (const file of discovery.navigationData ?? []) {
+    if (!/HelpSystem\.xml$|\.mcwebhelp$/i.test(file.url)) continue;
+    const defaultUrl = defaultUrlFromHelpSystem(file.body, root);
+    const page = defaultUrl ? discovery.pages.find((entry) => entry.url === defaultUrl) : undefined;
+    const title = page?.htmlTitleTag?.trim();
+    if (title) return title;
+  }
+  return undefined;
+}
 
 /** The Documentation.AI renderer's sidebar container, used to check the deployed navigation. */
 const DAI_PREVIEW_NAV_SELECTOR = 'nav, aside, [role=navigation]';
@@ -317,12 +339,18 @@ async function main() {
       if (existsSync(sourceManifestPath(workspace)) && !v.offline) fail('source evidence is already frozen; review the existing tree, or re-derive it from those frozen bytes with --offline after "rebase"');
       if (v.offline) {
         if (s.source.kind !== 'url') fail('--offline re-derives a live-site capture; a repository or export source is already local, so discover it in a new workspace');
-        requireStages(s, 'discover', 'acquire');
+        // A completed acquisition is the precondition: it exists only where discover produced a tree
+        // to acquire, and it is what --offline re-reads. The last discover's own status is not,
+        // because a re-derivation that failed certification must stay retryable — stranding the
+        // workspace on a failed rebuild would force exactly the re-crawl --offline exists to avoid.
+        requireStages(s, 'acquire');
       }
       const platform = s.source.platform ?? v.platform;
       let tree: Tree;
       let sourceManifest: SourceManifest | undefined;
       let frozen: FreezeResult | undefined;
+      /** The help systems the crawl found, so a scope decision can name one. Empty for non-live sources. */
+      let discoveryHelpSystems: DiscoveredHelpSystem[] = [];
       const captureContext = { location: s.source.location, platform: platform ?? 'generic', contentContractVersion: s.versions.contentContract, capturedAt: new Date().toISOString() };
       if (v.export ?? (s.source.kind === 'export' ? s.source.location : undefined)) {
         const src = v.export ?? s.source.location;
@@ -398,6 +426,7 @@ async function main() {
           if (!Number.isInteger(limit) || limit < 1 || limit > 50_000) fail('--discovery-limit must be an integer from 1 to 50000');
           const reread = v.offline ? frozenDiscovery(workspace, s, profile, url, platform ?? 'generic') : undefined;
           const discovery = reread ? reread.derived : await discoverLiveSite({ seedUrl: url, fetcher: f, profile, limit, concurrency: Number(v.concurrency), map: fc ? (u, n) => fc!.map(u, { limit: n }) : undefined });
+          discoveryHelpSystems = discovery.helpSystems ?? [];
           // The manifest describes the capture, so it is built from the frozen crawl and keeps its
           // timestamp; only the tree below is rebuilt from it. A re-derivation that would alter the
           // manifest is a different capture, and writeSourceManifest refuses it.
@@ -504,13 +533,50 @@ async function main() {
           if (previous && previous.migrate !== page.migrate) { page.migrate = previous.migrate; page.reason = previous.reason; carried++; }
         }
         const absent = [...reviewed.values()].filter((page) => !tree.pages.some((entry) => entry.id === page.id));
+        // Where the operator decided pages the source never placed should go is a gate 1 decision
+        // like any other, and the rebuild derives structure, not decisions. Dropping it would put
+        // those pages back outside the navigation — where the renderer answers 404 for them —
+        // quietly, on the next rebuild after the one that fixed it.
+        const previous = readTree(workspace);
+        if (previous.unlistedPlacement) {
+          tree.unlistedPlacement = previous.unlistedPlacement;
+          tree.navigationSource = 'manual';
+          ok(`the reviewed placement of pages the source never named carried onto the rebuilt tree (by ${previous.unlistedPlacement.approvedBy})`);
+        }
         if (carried) ok(`${carried} reviewed scope decision(s) carried onto the rebuilt tree`);
         for (const page of absent.slice(0, 5)) console.log(`· page in the reviewed tree is absent from the rebuilt tree: ${page.source}`);
       }
+      // A host that publishes several independent help systems asks the operator a question rather
+      // than presenting a defect: which one does this run migrate? The answer is recorded here as
+      // ordinary attributed exclusions, so the source universe still reconciles page for page and
+      // the report says who decided. An unanswered system still stops the run below.
+      const excludedHelpSystems = v['exclude-help-system'] ?? [];
+      let answeredIssues: string[] = [];
+      if (excludedHelpSystems.length) {
+        const by = (v.by ?? '').trim();
+        if (!by) fail('--exclude-help-system needs --by "<who>": leaving a published help system out of a migration is a decision that records its approver');
+        const decided = excludeHelpSystems({
+          roots: excludedHelpSystems,
+          helpSystems: discoveryHelpSystems,
+          manifestPages: sourceManifest.pages,
+          approvedBy: by,
+          approvedAt: new Date().toISOString(),
+        });
+        if (decided.refusals.length) fail(`--exclude-help-system refused:\n${decided.refusals.map((r) => `  ${r}`).join('\n')}`);
+        const excludedIds = new Set(decided.exclusions.map((entry) => entry.pageId));
+        for (const page of tree.pages) if (excludedIds.has(page.id)) { page.migrate = false; page.reason = 'help system out of scope'; }
+        const recorded = recordScopeExclusions(workspace, decided.exclusions, decided.decisions);
+        answeredIssues = decided.answeredIssues;
+        ok(`${excludedHelpSystems.length} help system(s) recorded out of scope by ${by}: ${recorded} page(s) excluded with attribution in ${scopeDecisionsPath(workspace)}`);
+      }
       writeTree(workspace, tree);
-      if (sourceManifest.issues?.length && (s.fidelityMode ?? 'exact') === 'exact') {
+      // Decisions already recorded in this workspace answer their issues on every later
+      // re-derivation, so an offline rebuild after a migrator fix does not ask again.
+      const settled = new Set([...answeredIssues, ...answeredHelpSystemIssues(readScopeDecisions(workspace), sourceManifest.issues ?? [])]);
+      const blockingIssues = (sourceManifest.issues ?? []).filter((issue) => !settled.has(issue));
+      if (blockingIssues.length && (s.fidelityMode ?? 'exact') === 'exact') {
         markStage(workspace, 'discover', 'failed', 'source universe unproven');
-        fail(`source discovery cannot be certified: ${sourceManifest.issues.slice(0, 8).join('; ')}. See ${sourceManifestPath(workspace)}; fix the source or adapter and discover in a new workspace`);
+        fail(`source discovery cannot be certified: ${blockingIssues.slice(0, 8).join('; ')}. See ${sourceManifestPath(workspace)}; fix the source or adapter and discover in a new workspace`);
       }
       markStage(workspace, 'discover', 'done');
       humanGate(1, 'scope and structure', `review ${join(workspace, 'plan', 'tree.yaml')} plus source-specific inventory; confirm pages, groups, order, versions and locales before acquisition/inventory`);
@@ -537,7 +603,12 @@ async function main() {
       // Rebasing keeps the frozen bytes and their pins, stales every derivation, and records the
       // build change so the certificate shows each build that touched this migration.
       const workspace = ws(); const s = readSession(workspace);
-      requireStages(s, 'discover');
+      // A discover that froze the source and then failed is exactly what a migrator fix is made for:
+      // the bytes are captured, only the reading of them was wrong. Requiring a *complete* discover
+      // would strand that workspace, forcing the site to be crawled again to apply the fix. What has
+      // to hold is that the frozen evidence and the tree are present and unchanged, which
+      // requireSourceManifest and requireAcquisition below enforce on their own.
+      if (!s.stages.discover) fail('this workspace has not discovered a source yet; there is nothing to rebase');
       const reason = (v.reason ?? '').trim();
       if (!reason) fail('--reason is required: record why this workspace moves onto a new migrator build');
       const current = captureMigratorProvenance({ repoRoot: PLUGIN_ROOT, packageVersion: CORE_VERSION });
@@ -633,6 +704,8 @@ async function main() {
       const tree = readTree(workspace);
       const inScope = tree.pages.filter((p) => p.migrate);
       const docs: DocIR[] = [];
+      /** Pages whose title heading carried its own anchor, which must survive the heading leaving the body. */
+      const titleAnchors = new Map<string, string>();
       /** Pages whose URL-derived placeholder title the source's own H1 replaced here. */
       let statedTitles = 0;
       let root = sourceManifest.frozenRoot ? frozenRootPath(workspace) : resolve(s.source.location);
@@ -688,21 +761,34 @@ async function main() {
           else {
             if (page.html === undefined) fail(`acquired record for ${p.source} holds neither published Markdown nor HTML; run dai-migrate acquire again`);
             const ir = htmlToIr(page.html, htmlAdapterOptions(profile, { platform: tree.platform, file: p.source }));
-            // No published Markdown here, so the page's own H1 is the H1 of the rendered article.
-            const firstHeading = ir.children.find((block) => block.type === 'heading' && block.depth === 1);
+            // No published Markdown here, so the page's own title heading is the one the rendered
+            // article states: its H1, or the heading it opens with on a generator that reserves H1
+            // for the page masthead.
+            const firstHeading = titleHeading(ir.children);
             const h1 = firstHeading?.type === 'heading' ? inlineText(firstHeading.children).trim() || undefined : undefined;
-            // The site's own statements only: its llms.txt entry, then the rendered article's H1, then platform metadata.
-            // A URL-derived placeholder is never a title, so exact mode stops rather than inventing one.
+            // The site's own statements only: its llms.txt entry, then the rendered article's title
+            // heading, then platform metadata. A URL-derived placeholder is never a title, so exact
+            // mode stops rather than inventing one.
             const stated = p.llms?.title ?? h1 ?? (p.titleSource && p.titleSource !== 'path' ? p.title : undefined);
-            if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry, rendered <h1> and platform metadata all lack one (titleSource ${p.titleSource ?? 'unset'}); re-run init with --fidelity permissive to fall back to the URL`);
+            if (!stated && (s.fidelityMode ?? 'exact') === 'exact') fail(`no source title for ${p.source}: its llms.txt entry, the heading the rendered article opens with, and platform metadata all lack one (titleSource ${p.titleSource ?? 'unset'}); exclude the page in plan/scope-decisions.yaml if it states no title because it publishes no article, or re-run init with --fidelity permissive to fall back to the URL`);
             const title = stated ?? p.title;
-            if (stated && p.titleSource === 'path') { p.title = stated; p.titleSource = p.llms?.title ? 'llms-txt' : 'rendered-h1'; statedTitles++; }
+            if (stated && p.titleSource === 'path') {
+              p.title = stated;
+              p.titleSource = p.llms?.title ? 'llms-txt' : firstHeading?.type === 'heading' && firstHeading.depth === 1 ? 'rendered-h1' : 'rendered-heading';
+              statedTitles++;
+            }
             const description = page.llms?.description ?? page.description ?? p.description;
             // The target renders the frontmatter title as the page heading. The source H1 that stated
             // that title would then print a second time under it, so it becomes the title and leaves
             // the body — exactly what unwrapPublishedMarkdown does with a published page's leading H1.
             // Only that one heading goes, and only when it is the title: any other H1 is still content.
-            const children = firstHeading && h1 && h1 === title ? ir.children.filter((block) => block !== firstHeading) : ir.children;
+            const titleLeaves = firstHeading && h1 && h1 === title;
+            // A Flare topic names its own top with an anchor inside that heading (`#top`), and other
+            // pages link to it. The heading goes, but the address it published must not: the anchor is
+            // recorded against the page and written back at the head of the body when something links
+            // to it. It is not put in the IR — it is a link target, not a block the page states.
+            if (titleLeaves && firstHeading.type === 'heading' && firstHeading.sourceId) titleAnchors.set(p.id, firstHeading.sourceId);
+            const children = titleLeaves ? ir.children.filter((block) => block !== firstHeading) : ir.children;
             const seo = seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined);
             docs.push({ pageId: p.id, platform: tree.platform, source: p.source, frontmatter: { title, ...(description ? { description } : {}), ...seo }, children });
           }
@@ -724,7 +810,7 @@ async function main() {
         for (const entry of unreadableDimensions) console.log(`· ${describeUnreadableDimension(entry)}; permissive mode migrates the image without it`);
       }
       const comps: Array<{ pageId: string; node: any; depth: number; source?: string }> = [];
-      const anchors: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }> }> = [];
+      const anchors: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }>; titleAnchor?: string }> = [];
       const links: Array<{ pageId: string; url: string }> = [];
       const snapDir = join(workspace, 'snapshot', 'pages'); resetDir(snapDir);
       for (const doc of docs) {
@@ -733,9 +819,14 @@ async function main() {
         walkBlocks(doc.children, (n, depth) => {
           if (n.type === 'component') comps.push({ pageId: doc.pageId, node: n, depth, source: doc.source });
           if (n.type === 'heading') heads.push({ id: n.id, text: inlineText(n.children), sourceId: n.sourceId });
-          if (n.type === 'paragraph') for (const i of n.children) if (i.type === 'link') links.push({ pageId: doc.pageId, url: i.url });
         });
-        anchors.push({ pageId: doc.pageId, headings: heads });
+        // Every link the document holds, not only those directly in a paragraph: a page's own
+        // contents links to its sections from inside table cells and list items, and a link nested
+        // in bold or a component prop is still a link. Anchor shims are kept only for anchors
+        // something points at, so a link counted here is the difference between an inbound
+        // cross-reference landing on its section and landing nowhere.
+        for (const url of documentLinks(doc)) links.push({ pageId: doc.pageId, url });
+        anchors.push({ pageId: doc.pageId, headings: heads, ...(titleAnchors.has(doc.pageId) ? { titleAnchor: titleAnchors.get(doc.pageId) } : {}) });
       }
       const clusters = clusterComponents(comps);
       writeJson(join(workspace, 'inventory', 'components.json'), clusters);
@@ -873,11 +964,11 @@ async function main() {
       const blockedTokens = new Set(snippets.filter((x) => x.resolution === 'blocked' && !x.body).map((x) => x.token));
       const outDir = join(workspace, 'output'); const qDir = join(workspace, 'quarantine');
       resetDir(outDir); resetDir(qDir);
-      const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }> }>>(join(workspace, 'inventory', 'anchors.json')) : [];
+      const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }>; titleAnchor?: string }>>(join(workspace, 'inventory', 'anchors.json')) : [];
       const links = existsSync(join(workspace, 'inventory', 'links.json')) ? readJson<Array<{ pageId: string; url: string }>>(join(workspace, 'inventory', 'links.json')) : [];
       const inbound = new Map<string, number>();
       for (const l of links) { const h = l.url.split('#')[1]; if (h) inbound.set(`#${h}`, (inbound.get(`#${h}`) ?? 0) + 1); }
-      const shims = anchorMap(anchors, inbound).shims;
+      const { shims, leading: leadingAnchors } = anchorMap(anchors, inbound);
       let converted = 0; let heldForSnippets = 0; let quarantinedForFidelity = 0;
       // every snapshot page gets a record, so verify can tell a page convert skipped on purpose from one it never saw
       const fidelityRecords: FidelityRecord[] = [];
@@ -911,7 +1002,7 @@ async function main() {
           writeQuarantine(workspace, doc.pageId, { kind: 'exact-fidelity', reason: `exact-fidelity violation at ${difference ?? 'unknown location'}`, page: page.newPath, sourceSnapshot, resolvedSnapshot });
           continue;
         }
-        const mdx = docToMdx(resolved, { anchorShims: shims.get(doc.pageId) });
+        const mdx = docToMdx(resolved, { anchorShims: shims.get(doc.pageId), leadingAnchor: leadingAnchors.get(doc.pageId) });
         const outPath = join(outDir, `${page.newPath}.mdx`);
         mkdirSync(dirname(outPath), { recursive: true, mode: 0o700 });
         writeFileSync(outPath, mdx, { mode: 0o600 });
@@ -963,6 +1054,19 @@ async function main() {
         fail(`${unplaced.length} migrated page(s) have no placement in the source navigation and are not marked unlisted:\n${unplaced.map((page) => `  ${page.source} (${page.id})`).join('\n')}\nre-run discover so the navigation covers them, mark them unlisted in plan/tree.yaml, or re-run init with --fidelity permissive`);
       }
       const unlisted = pagesWithoutPlacement(tree).filter((page) => page.navMembership === 'unlisted');
+      // The renderer serves only routes the navigation names, so a page written as a file and left
+      // out of it answers 404. Placing those pages states a structure the source's sidebar does not,
+      // so it is an operator's decision: it records who made it and marks the navigation reviewed,
+      // which is the same footing as a tree recovered by hand.
+      if (v['place-unlisted']) {
+        const by = (v.by ?? '').trim();
+        if (!by) fail('--place-unlisted needs --by "<who>": placing pages the source never placed is a decision that records its approver');
+        if (!unlisted.length) fail('--place-unlisted was given, but the source navigation already places every migrated page');
+        tree.unlistedPlacement = { strategy: 'source-path', approvedBy: by, approvedAt: new Date().toISOString() };
+        tree.navigationSource = 'manual';
+        writeTree(workspace, tree);
+        ok(`${unlisted.length} page(s) the source never placed will be grouped under the folders it publishes them in, by ${by}; navigation is now operator-reviewed, so approve gate 1 again`);
+      }
       const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta);
       // The documentation's name travels with it; the source's logo, favicon, colours and theme do not,
       // so the migrated site shows Documentation.AI's own branding.
@@ -979,7 +1083,7 @@ async function main() {
       writeJson(join(workspace, 'report', 'redirects.exact.json'), r.exact);
       writeJson(join(workspace, 'report', 'redirects.wildcard.json'), r.wildcard);
       if (meta.openapi?.length) console.log(`· copied ${meta.openapi.length} OpenAPI spec(s) into output and attached them to their groups`);
-      const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }> }>>(join(workspace, 'inventory', 'anchors.json')) : [];
+      const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }>; titleAnchor?: string }>>(join(workspace, 'inventory', 'anchors.json')) : [];
       const links = existsSync(join(workspace, 'inventory', 'links.json')) ? readJson<Array<{ pageId: string; url: string }>>(join(workspace, 'inventory', 'links.json')) : [];
       const inbound = new Map<string, number>();
       for (const l of links) { const h = l.url.split('#')[1]; if (h) inbound.set(`#${h}`, (inbound.get(`#${h}`) ?? 0) + 1); }
@@ -1043,6 +1147,18 @@ async function main() {
         // cheap and side-effect free; turns a cryptic git failure after a full build into a one-line fix
         const probe = await probePushAccess(remote);
         if (!probe.ok) fail(`cannot push to ${remote}: ${probe.detail}. Fix: ${probe.fix}. The branch can still be written locally without --push.`);
+      }
+      // A migration branch is evidence of what was pushed and is never rewritten. A build corrected
+      // after the rendered preview showed something — which is what gate 4 is for — is a new
+      // revision of the same migration: it takes a new id, and every branch already reviewed stays
+      // exactly as it was.
+      if (v.revision !== undefined) {
+        const reason = String(v.revision).trim();
+        if (!reason) fail('--revision needs the reason this build supersedes the last push, e.g. --revision "the preview showed unlisted pages answering 404"');
+        const previous = s.migrationId;
+        Object.assign(s, recordRevision(s, reason, newMigrationId()));
+        writeSession(workspace, s);
+        ok(`revision ${s.migrationId} supersedes ${previous}: ${reason}; the earlier branch and its preview are left untouched`);
       }
       const r = writeMigrationBranch({ repoDir, outputDir: join(workspace, 'output'), sessionId: s.migrationId, remote, allowedRemoteOrgs: allowed, push: !!v.push });
       s.target.repoRemote = remote ?? s.target.repoRemote; writeSession(workspace, s);

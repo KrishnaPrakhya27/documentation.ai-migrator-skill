@@ -16,7 +16,7 @@ export interface TreePage {
    * is a placeholder the page's own H1 must replace at inventory; exact mode refuses
    * to migrate a page still holding one.
    */
-  titleSource?: 'llms-txt' | 'platform-metadata' | 'source-config' | 'published-markdown' | 'rendered-h1' | 'path';
+  titleSource?: 'llms-txt' | 'platform-metadata' | 'source-config' | 'published-markdown' | 'rendered-h1' | 'rendered-heading' | 'path';
   /** Exact label shown in source navigation. It may intentionally differ from the page title. */
   sidebarTitle?: string;
   icon?: string;
@@ -95,6 +95,15 @@ export interface Tree {
   navigation?: SourceNavigationNode[];
   /** How the navigation was obtained. `manual` means an operator supplied/reviewed it. */
   navigationSource?: 'source-config' | 'platform-metadata' | 'dom-sidebar' | 'sitemap-hint' | 'url-path' | 'manual';
+  /**
+   * Where pages the source's own sidebar never placed go in the navigation.
+   *
+   * The renderer serves only routes the navigation names, so a page written as a file and left out
+   * of it is not reachable at all. `source-path` places those pages under the folders the source
+   * publishes them in — the source's own hierarchy, not an invented one. Recorded by an operator,
+   * because it states a structure the source's sidebar does not.
+   */
+  unlistedPlacement?: { strategy: 'source-path'; approvedBy: string; approvedAt: string };
   /** Version and locale served at the root paths; others are prefixed. */
   defaultVersion?: string;
   defaultLocale?: string;
@@ -133,7 +142,7 @@ export function pagesWithoutPlacement(tree: Tree): TreePage[] {
   return tree.pages.filter((page) => page.migrate && page.newPath && !placed.has(page.id));
 }
 
-function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]): Record<string, unknown> {
+function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[], placeUnlisted = false): Record<string, unknown> {
   type PageRef = { title: string; path: string };
   type Node = { group: string; pages: Array<PageRef | Node>; _order: number };
   const eligible = new Map(pages.filter((p) => p.migrate && p.newPath).map((p) => [p.id, p]));
@@ -153,6 +162,15 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
       return out;
     };
     const top = convert(sourceNavigation);
+    if (placeUnlisted) {
+      const placed = new Set<string>();
+      const mark = (nodes: SourceNavigationNode[]): void => {
+        for (const node of nodes) { if (node.type === 'page') placed.add(node.pageId); else mark(node.children); }
+      };
+      mark(sourceNavigation);
+      const rest = pages.filter((page) => page.migrate && page.newPath && !placed.has(page.id));
+      if (rest.length) top.push(...groupsBySourcePath(rest));
+    }
     return collection(top, 'navigation');
   }
   const roots: Array<PageRef | Node> = [];
@@ -205,23 +223,23 @@ function collection(items: Record<string, unknown>[], parent: string): Record<st
  * languages → versions → groups/pages, each level present only when the tree uses it.
  * The schema has no `default` flag: the default version or language is listed first.
  */
-export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: string; defaultLocale?: string; sourceNavigation?: SourceNavigationNode[] } = {}): { navigation: Record<string, unknown> } {
+export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: string; defaultLocale?: string; sourceNavigation?: SourceNavigationNode[]; placeUnlisted?: boolean } = {}): { navigation: Record<string, unknown> } {
   const inScope = pages.filter((p) => p.migrate && p.newPath);
   const hasDimensions = (nodes: SourceNavigationNode[]): boolean => nodes.some((node) => node.type === 'group' && (node.kind === 'language' || node.kind === 'version' || hasDimensions(node.children)));
-  if (hasDimensions(defaults.sourceNavigation ?? [])) return { navigation: buildSlice(inScope, defaults.sourceNavigation) };
+  if (hasDimensions(defaults.sourceNavigation ?? [])) return { navigation: buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted) };
   const locales = [...new Set(inScope.map((p) => p.locale).filter((x): x is string => !!x))];
   const versions = [...new Set(inScope.map((p) => p.version).filter((x): x is string => !!x))];
   const orderFirst = <T,>(items: T[], first?: T) => (first && items.includes(first) ? [first, ...items.filter((x) => x !== first)] : items);
   const byVersion = (subset: TreePage[]): Record<string, unknown> => {
     const vs = orderFirst([...new Set(subset.map((p) => p.version).filter((x): x is string => !!x))], defaults.defaultVersion);
-    if (vs.length < 2 && !(vs.length === 1 && subset.some((p) => !p.version))) return buildSlice(subset, defaults.sourceNavigation);
-    return { versions: vs.map((v) => ({ version: v, ...buildSlice(subset.filter((p) => p.version === v), defaults.sourceNavigation) })) };
+    if (vs.length < 2 && !(vs.length === 1 && subset.some((p) => !p.version))) return buildSlice(subset, defaults.sourceNavigation, defaults.placeUnlisted);
+    return { versions: vs.map((v) => ({ version: v, ...buildSlice(subset.filter((p) => p.version === v), defaults.sourceNavigation, defaults.placeUnlisted) })) };
   };
   if (locales.length >= 2) {
     const ls = orderFirst(locales, defaults.defaultLocale);
     return { navigation: { languages: ls.map((l) => ({ language: l, ...byVersion(inScope.filter((p) => p.locale === l)) })) } };
   }
-  return { navigation: versions.length >= 2 ? byVersion(inScope) : buildSlice(inScope, defaults.sourceNavigation) };
+  return { navigation: versions.length >= 2 ? byVersion(inScope) : buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted) };
 }
 
 /** Attach a group-level `openapi` property to the group at `groupPath` (DAI group-level OpenAPI connection). */
@@ -261,7 +279,7 @@ export interface DocumentationNavigationMeta { openapi?: GroupOpenapiRef[] }
  */
 export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlySet<string>, platformMeta: DocumentationNavigationMeta): { navigation: Record<string, unknown> } {
   const written = tree.pages.filter((page) => page.newPath !== undefined && writtenPaths.has(page.newPath));
-  let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation });
+  let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation, placeUnlisted: !!tree.unlistedPlacement });
   for (const ref of platformMeta.openapi ?? []) {
     try {
       navigation = attachGroupOpenapi(navigation, ref.groupPath, ref.spec, ref.version, ref.locale);
@@ -270,6 +288,33 @@ export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlyS
     }
   }
   return navigation;
+}
+
+/**
+ * Pages the source's sidebar never named, grouped under the folders the source publishes them in.
+ *
+ * The renderer serves only what the navigation names, so these pages exist as files and nothing
+ * more until they are placed. Their groups are read from the source's own URL hierarchy — the
+ * structure the site already has — rather than composed here.
+ */
+function groupsBySourcePath(pages: TreePage[]): Record<string, unknown>[] {
+  type Node = { group: string; pages: Array<Record<string, unknown> | Node>; order: number };
+  const roots: Array<Record<string, unknown> | Node> = [];
+  const byPath = new Map<string, Node>();
+  for (const page of [...pages].sort((a, b) => a.order - b.order)) {
+    let container = roots;
+    let key = '';
+    for (const name of page.group.filter((value) => value && value !== '(uncategorised)')) {
+      key = key ? `${key}/${name}` : name;
+      let node = byPath.get(key);
+      if (!node) { node = { group: name, pages: [], order: page.order }; byPath.set(key, node); container.push(node); }
+      container = node.pages;
+    }
+    container.push({ ...pageMetadata(page), ...pageLayout(page), title: page.sidebarTitle ?? page.title, path: page.newPath! });
+  }
+  const clean = (items: Array<Record<string, unknown> | Node>): Record<string, unknown>[] =>
+    items.map((item) => ('group' in item && Array.isArray((item as Node).pages) ? { group: (item as Node).group, pages: clean((item as Node).pages) } : item as Record<string, unknown>));
+  return clean(roots);
 }
 
 /** Default new path from the group path and title (restructure mode). */

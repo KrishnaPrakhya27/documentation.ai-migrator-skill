@@ -102,6 +102,25 @@ describe('rebasing a frozen workspace onto a fixed migrator', () => {
     expect(readTree(workspace).pages.find((page) => page.id === excluded)?.migrate).toBe(false);
   }, 60_000);
 
+  it('still re-derives after a rebuild that failed certification, instead of stranding the workspace', () => {
+    const { workspace } = frozenWorkspace();
+    // What a failed exact re-derivation leaves behind. The frozen bytes are untouched by it, so the
+    // retry after the fix must not need another crawl.
+    const session = readSession(workspace);
+    session.stages.discover = { status: 'failed', note: 'source universe unproven' };
+    writeSession(workspace, session);
+    expect(cli(workspace, 'discover', '--offline')).toContain('4 frozen page(s) re-read with no network');
+    expect(readSession(workspace).stages.discover.status).toBe('done');
+  }, 60_000);
+
+  it('refuses an offline re-derivation before anything has been acquired to re-read', () => {
+    const { workspace } = frozenWorkspace();
+    const session = readSession(workspace);
+    session.stages.acquire = { status: 'pending' };
+    writeSession(workspace, session);
+    expect(() => cli(workspace, 'discover', '--offline')).toThrow(/required stage\(s\) not complete: acquire/);
+  }, 60_000);
+
   it('records the build change, stales only the derivations, and refuses without a reason or a change', () => {
     const { workspace, manifestHash } = frozenWorkspace();
     const session = readSession(workspace);

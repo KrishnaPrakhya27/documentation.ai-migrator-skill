@@ -9,6 +9,8 @@ import { isSafeUrl } from '../components/sanitize.js';
 export interface SerializeOptions {
   /** heading node id → old anchor id to emit as a shim before the heading. */
   anchorShims?: Map<string, string>;
+  /** An anchor the page's title heading published, written at the head of the body because that heading became the title. */
+  leadingAnchor?: string;
   /** Text to emit for quarantined blocks. */
   quarantinePlaceholder?: (reason: string) => string;
 }
@@ -31,11 +33,14 @@ const MDX_TEXT_ESCAPES: Array<[RegExp, string]> = [
   [/(\*|_)(?=\S)/g, '\\$1'],
 ];
 
+
+
 export function escapeText(s: string): string {
   let out = s;
   for (const [re, rep] of MDX_TEXT_ESCAPES) out = out.replace(re, rep);
   return out;
 }
+
 
 export function propValue(v: string | number | boolean | null): string | null {
   if (v === null || v === undefined) return null;
@@ -75,7 +80,7 @@ function wrapEmphasis(inner: string, marker: string): string {
   return core ? `${lead}${marker}${core}${marker}${trail}` : inner;
 }
 
-export function inlineToMdx(nodes: Inline[]): string {
+export function inlineToMdx(nodes: Inline[], insideLink = false): string {
   return nodes.map((n) => {
     switch (n.type) {
       case 'text': return escapeText(n.value);
@@ -85,17 +90,17 @@ export function inlineToMdx(nodes: Inline[]): string {
         const pad = /^[ `]|[ `]$/.test(n.value) ? ' ' : '';
         return `${fence}${pad}${n.value}${pad}${fence}`;
       }
-      case 'strong': return wrapEmphasis(inlineToMdx(n.children), '**');
-      case 'emphasis': return wrapEmphasis(inlineToMdx(n.children), '*');
-      case 'delete': return wrapEmphasis(inlineToMdx(n.children), '~~');
+      case 'strong': return wrapEmphasis(inlineToMdx(n.children, insideLink), '**');
+      case 'emphasis': return wrapEmphasis(inlineToMdx(n.children, insideLink), '*');
+      case 'delete': return wrapEmphasis(inlineToMdx(n.children, insideLink), '~~');
       case 'link': {
         const url = markdownUrl(n.url, 'link');
-        const label = inlineToMdx(n.children);
+        const label = inlineToMdx(n.children, true);
         const title = n.title?.replace(/["\r\n]/g, ' ').trim();
         return url ? `[${label}](${url}${title ? ` "${title}"` : ''})` : label;
       }
       case 'break': return '<br />';
-      case 'kbd': return `<kbd>${inlineToMdx(n.children)}</kbd>`;
+      case 'kbd': return `<kbd>${inlineToMdx(n.children, insideLink)}</kbd>`;
       case 'inlineHtml': return n.value;
       case 'image': return imageToMdx(n);
     }
@@ -130,15 +135,31 @@ function tableToMdx(t: TableNode): string {
   return [line(header.children), sep, ...body.map((r) => line(r.children))].join('\n');
 }
 
+/** A fence long enough to hold this code, with nothing claimed about its language. */
+function fencedCode(value: string): string {
+  const longestRun = Math.max(0, ...Array.from(value.matchAll(/`+/g), (m) => m[0].length));
+  const fence = '`'.repeat(Math.max(3, longestRun + 1));
+  return `${fence}\n${value}\n${fence}`;
+}
+
 export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): string {
   const out: string[] = [];
   for (const b of blocks) {
     switch (b.type) {
-      case 'paragraph': out.push(inlineToMdx(b.children)); break;
+      case 'paragraph': {
+        // A code span holding several lines is a block of code. Written inline it picks up whatever
+        // indentation surrounds it — inside a component, two spaces on every line of a certificate —
+        // so it is written as a fence, which carries its lines exactly as they are.
+        const only = b.children.length === 1 ? b.children[0] : undefined;
+        if (only?.type === 'inlineCode' && only.value.includes('\n')) { out.push(fencedCode(only.value)); break; }
+        out.push(inlineToMdx(b.children));
+        break;
+      }
       case 'heading': {
         const shim = opts.anchorShims?.get(b.id);
         if (shim) out.push(`<a id="${shim}"></a>`);
-        out.push(`${'#'.repeat(b.depth)} ${inlineToMdx(b.children)}`);
+        // Trailing space is not part of a heading, and writing it changes the id a renderer gives it.
+        out.push(`${'#'.repeat(b.depth)} ${inlineToMdx(b.children).trim()}`);
         break;
       }
       case 'code': {
@@ -197,5 +218,6 @@ export function frontmatterToYaml(fm: Frontmatter): string {
 
 export function docToMdx(doc: DocIR, opts: SerializeOptions = {}): string {
   const body = blocksToMdx(doc.children, opts);
-  return `${frontmatterToYaml(doc.frontmatter)}\n${body}\n`;
+  const leading = opts.leadingAnchor ? `<a id="${opts.leadingAnchor}"></a>\n\n` : '';
+  return `${frontmatterToYaml(doc.frontmatter)}\n${leading}${body}\n`;
 }

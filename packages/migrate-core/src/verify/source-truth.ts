@@ -17,6 +17,7 @@ import { htmlToIr } from '../ir/from-html.js';
 import { unwrapPublishedMarkdown } from '../scrape/published-markdown.js';
 import { extractSeo, seoFrontmatter } from '../scrape/seo.js';
 import { htmlAdapterOptions, type ScrapeProfile } from '../scrape/profiles.js';
+import { titleHeading } from '../ir/page-title.js';
 import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { authoredContentSnapshot, firstFidelityDifference } from './fidelity.js';
 import { inlineText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
@@ -157,12 +158,17 @@ export function sourceContentExact(page: RawSourcePage, platform: string, profil
 }
 
 /** Frontmatter title and description must be byte-equal to what the source states, and absent where it states none. */
-export function sourceMetadataExact(page: RawSourcePage, platform = 'generic'): SourceComparison {
+export function sourceMetadataExact(page: RawSourcePage, platform = 'generic', profile?: ScrapeProfile): SourceComparison {
   const output = outputIr(page);
   if (!output) return { pageId: page.pageId, path: page.path, pass: false, detail: `no output file at ${page.outputFile}` };
   const published = page.markdown === undefined ? undefined : unwrapPublishedMarkdown(page.markdown, platform, { expectedDescription: page.description });
   const stated = published ? splitFrontmatter(published.body, page.path).data : {};
-  const declaredTitle = page.llms?.title ?? (typeof stated.title === 'string' ? stated.title : undefined) ?? published?.title ?? page.title;
+  // A platform that publishes no Markdown states its title in the rendered page: the heading the
+  // article opens with. `page.title` is what the tree called the page when the crawler froze it —
+  // a URL-derived placeholder on a site whose titles are only in its HTML — so it is the last
+  // resort here and never evidence that the source "states" anything.
+  const rendered = !published && page.html && profile ? renderedTitle(page.html, platform, page.path, profile) : undefined;
+  const declaredTitle = page.llms?.title ?? (typeof stated.title === 'string' ? stated.title : undefined) ?? published?.title ?? rendered ?? page.title;
   const declaredDescription = page.llms?.description ?? (typeof stated.description === 'string' ? stated.description : undefined) ?? published?.description ?? page.description;
   const problems: string[] = [];
   if (declaredTitle && output.frontmatter.title !== declaredTitle) problems.push(`title is ${JSON.stringify(output.frontmatter.title)}, source states ${JSON.stringify(declaredTitle)}`);
@@ -171,6 +177,12 @@ export function sourceMetadataExact(page: RawSourcePage, platform = 'generic'): 
   const robots = unsupportedRobots(page.html, page.url);
   if (robots) problems.push(`robots directive ${JSON.stringify(robots)} has no supported Documentation.AI page mapping; preserve it through a target contract change or an explicit publishing decision`);
   return { pageId: page.pageId, path: page.path, pass: !problems.length, detail: problems.join('; ') || undefined };
+}
+
+/** The title the rendered page states: the text of the heading its article opens with. */
+function renderedTitle(html: string, platform: string, file: string, profile: ScrapeProfile): string | undefined {
+  const heading = titleHeading(htmlToIr(html, htmlAdapterOptions(profile, { platform, file })).children);
+  return heading?.type === 'heading' ? inlineText(heading.children).trim() || undefined : undefined;
 }
 
 /** Ordered link targets of a document, as authored. */
@@ -257,7 +269,10 @@ export function htmlReconciliation(page: RawSourcePage, platform: string, profil
   const problems: string[] = [];
   const robots = unsupportedRobots(page.html, page.url);
   if (robots) problems.push(`robots directive ${JSON.stringify(robots)} has no supported Documentation.AI page mapping`);
-  const renderedHeadings = headingWords(renderedDoc);
+  // The heading that states the page title leaves the body to become the frontmatter title, so the
+  // output is not expected to repeat it. An H1 is skipped by headingWords already; a generator that
+  // reserves H1 for its own masthead states the title in the heading the article opens with.
+  const renderedHeadings = headingWords(renderedDoc, titleHeading(rendered.children)?.id);
   const outputHeadings = headingWords(output);
   const missingHeadings = headingsNotInOrder(renderedHeadings, outputHeadings);
   if (missingHeadings.length) {
@@ -325,9 +340,10 @@ function headingsNotInOrder(rendered: string[], output: string[]): string[] {
   return missing;
 }
 
-function headingWords(doc: DocIR): string[] {
+function headingWords(doc: DocIR, skipId?: string): string[] {
   const words: string[] = [];
   walkBlocks(doc.children, (block) => {
+    if (skipId !== undefined && block.id === skipId) return;
     if (block.type === 'heading' && block.depth > 1) words.push(normaliseProse(inlineText(block.children)));
     else if (block.type === 'component' || block.type === 'dai') {
       const title = block.props.title;

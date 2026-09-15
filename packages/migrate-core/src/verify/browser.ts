@@ -217,6 +217,36 @@ function unrenderedBlockIds(doc: DocIR, interactive = false): Set<string> {
   return ids;
 }
 
+/**
+ * Where an image the page authored now lives.
+ *
+ * A page writes its images the way its author did — `../../Resources/Images/x.png` — while the
+ * asset manifest keys them by the address they were fetched from. Looking the raw reference up in
+ * that manifest finds nothing, and the check then compares the rendered image against a relative
+ * path it can never equal, which failed 323 of 428 routes whose images were hosted correctly.
+ * Resolving the reference against the page it appears on asks the manifest the question it answers.
+ */
+export function hostedAssetUrl(ref: string, pageSource: string | undefined, assetUrls: ReadonlyMap<string, string>): string | undefined {
+  const direct = assetUrls.get(ref);
+  if (direct) return direct;
+  if (!pageSource) return undefined;
+  for (const candidate of resolvedSpellings(ref, pageSource)) {
+    const hosted = assetUrls.get(candidate);
+    if (hosted) return hosted;
+  }
+  return undefined;
+}
+
+/** The spellings one reference can have once resolved: as written, and with its escapes read. */
+function resolvedSpellings(ref: string, pageSource: string): string[] {
+  const out: string[] = [];
+  const add = (value: string | undefined): void => { if (value && !out.includes(value)) out.push(value); };
+  try { add(new URL(ref, pageSource).toString()); } catch { /* not resolvable against this page */ }
+  try { add(new URL(decodeURI(ref), pageSource).toString()); } catch { /* the reference is not valid escaped text */ }
+  try { add(decodeURI(new URL(ref, pageSource).toString())); } catch { /* nothing more to try */ }
+  return out;
+}
+
 interface DocumentSegment { text: string; optional: boolean }
 
 /**
@@ -407,7 +437,7 @@ export async function runBrowserContentGate(
       if (normaliseVisible(alt) !== normaliseVisible(expected.alt ?? '')) problems.push(`image ${index + 1} alt is ${JSON.stringify(alt)}, source states ${JSON.stringify(expected.alt ?? '')}`);
       const src = image.attribs.src ?? '';
       if (opts.assetUrls?.size) {
-        const hosted = opts.assetUrls.get(expected.src) ?? expected.src;
+        const hosted = hostedAssetUrl(expected.src, page.doc?.source, opts.assetUrls) ?? expected.src;
         if (src && hosted && !src.startsWith(hosted) && src !== hosted) problems.push(`image ${index + 1} renders ${src}, expected the hosted ${hosted}`);
       }
     });

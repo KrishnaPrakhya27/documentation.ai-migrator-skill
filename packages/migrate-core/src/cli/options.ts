@@ -12,8 +12,11 @@ Commands (run in order; the workflow has exactly four standard human gates):
   init         --workspace <dir> --source <url|path> --target customer-org|demo-org --remote <git url> [--platform p] [--export <zip|dir>] [--fidelity exact|permissive] [--allowed-orgs a,b] [--customer-authorised]
                verifies the remote, the API key, the connected repository, previews and the media API up front; records the asset provider
   fingerprint  [--url <u>] [--export <zip|dir>] [--repo <dir>]     → plan/fingerprint.json
-  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] [--offline] → plan/tree.yaml [gate 1: scope]
+  discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] [--offline] [--exclude-help-system <root> --by "<who>"] → plan/tree.yaml [gate 1: scope]
                --offline rebuilds the tree and navigation from the frozen source already in the workspace; it fetches nothing
+               --exclude-help-system (repeatable) records that a second help system published on the host is out of
+               scope, with --by naming who decided; its pages are excluded with attribution instead of being placed by
+               a sidebar that does not name them. The seed's own help system can never be excluded.
   approve      --gate <1-4> --by "<who>" [--note "<why>"]           records a human gate against the state it approves
   rebase       --reason "<why>"                                     re-pins the migrator build after a fix, keeps the frozen source
                and its acquisition pin, and stales every derivation; follow it with "discover --offline"
@@ -22,8 +25,14 @@ Commands (run in order; the workflow has exactly four standard human gates):
   plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml [gate 2: conversion plan]
   assets       [--provider none|local|s3|dai-api]                   → plan/assets.json, assets-original/
   convert                                                           → output/, ledger/, quarantine/
-  nav                                                               → output/documentation.json, report/redirects.*.json, report/anchors.json
-  write        [--repo <dir>] [--remote <url>] [--push] [--allow-lossy] [--no-wait] [--preview-timeout min] → refs/heads/migration/<session>; with --push waits for the preview deployment and records its URL
+  nav          [--place-unlisted --by "<who>"]                      → output/documentation.json, report/redirects.*.json, report/anchors.json
+               --place-unlisted puts pages the source's own sidebar never named under the folders the source
+               publishes them in, because the renderer serves only routes the navigation names. It states a
+               structure the source's sidebar does not, so it records who decided and marks the navigation
+               operator-reviewed; gate 1 must then be approved again for the tree it produced.
+  write        [--repo <dir>] [--remote <url>] [--push] [--allow-lossy] [--no-wait] [--preview-timeout min] [--revision "<why>"] → refs/heads/migration/<session>; with --push waits for the preview deployment and records its URL
+               --revision takes a new migration id for a build that supersedes the last push, recording why;
+               a branch already pushed is evidence and is never rewritten
                --allow-lossy (permissive sessions only) pushes an exploratory branch with unproven exactness gates waived; failed gates still block
   verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
   release                                                            validates all four approvals and writes an immutable release certificate
@@ -51,6 +60,9 @@ export function parseCommandLine() {
     'max-concurrency': { type: 'string', default: process.env.FIRECRAWL_MAX_CONCURRENCY },
     'firecrawl-timeout-min': { type: 'string', default: process.env.FIRECRAWL_TIMEOUT_MIN ?? '360' },
     openapi: { type: 'string', multiple: true },
+    'exclude-help-system': { type: 'string', multiple: true },
+    'place-unlisted': { type: 'boolean', default: false },
+    revision: { type: 'string' },
     concurrency: { type: 'string', default: process.env.MIGRATION_CONCURRENCY ?? '4' },
     rps: { type: 'string', default: process.env.MIGRATION_RPS ?? '2' },
     refresh: { type: 'boolean', default: false },

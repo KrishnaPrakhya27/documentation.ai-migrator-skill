@@ -49,6 +49,13 @@ export function tocPathFromHelpSystem(xml: string): string | undefined {
   return /<WebHelpSystem[^>]*\sToc=["']([^"']+)["']/i.exec(xml)?.[1];
 }
 
+/** The page a help system opens on, which is where it states its own name. */
+export function defaultUrlFromHelpSystem(xml: string, helpSystemRootUrl: string): string | undefined {
+  const declared = /<WebHelpSystem[^>]*\sDefaultUrl=["']([^"']+)["']/i.exec(xml)?.[1];
+  if (!declared) return undefined;
+  try { return new URL(declared, helpSystemRootUrl).toString(); } catch { return undefined; }
+}
+
 /**
  * A `define({...})` data file as a value.
  *
