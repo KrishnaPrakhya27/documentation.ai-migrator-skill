@@ -715,6 +715,12 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(sourceFingerprint(page('39316fc2055b46cd1e13ff22ae9a36'))).toBe(sourceFingerprint(page('05cff0a03bebe979929823b1d69828')));
     // an actual edit is still a difference
     expect(sourceFingerprint(page('a').replace('The words a reader sees.', 'Different words.'))).not.toBe(sourceFingerprint(page('a')));
+    // a streaming renderer numbering the same blocks differently, and a highlighter theme recolouring
+    // the same token, are the platform rendering — not the customer writing
+    const rendered = (sid: string, colour: string) => `<div id="_S_${sid}_"><code><span style="color:var(--${colour})">render</span></code></div>`;
+    expect(sourceFingerprint(rendered('1', 'tint-11'))).toBe(sourceFingerprint(rendered('2', 'primary-9')));
+    // an authored anchor id is not a generated one, and survives
+    expect(sourceFingerprint('<h2 id="installing-the-cli">Install</h2>')).toContain('installing-the-cli');
   });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);

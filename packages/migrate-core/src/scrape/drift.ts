@@ -32,6 +32,14 @@ const VOLATILE = [
   // The generator meta names the platform and the build that rendered the page; the build half moves
   // with every deploy. What generated a page is not what a page says.
   /<meta[^>]+name=["']generator["'][^>]*>/gi,
+  // Ids a streaming renderer hands out in the order it finishes each part of the page. Two loads of
+  // one page number the same blocks differently, so they say nothing about what changed. Only the
+  // framework's own generated shapes are dropped; an authored id is an anchor target and is kept.
+  /\sid="_[A-Za-z]+_[0-9a-z]*_"/gi,
+  // Inline styles: presentation the platform writes, not words the page says. A syntax highlighter
+  // paints the same token a different colour when the theme it ships with changes, which recolours
+  // every code block on the site without a line of the code changing. <style> is dropped already.
+  /\sstyle="[^"]*"/gi,
 ];
 
 /**
