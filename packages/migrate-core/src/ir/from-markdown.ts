@@ -326,6 +326,27 @@ function parseEscapingRejectedText(source: string, parse: (text: string, locatin
   return { tree, text };
 }
 
+/**
+ * Anything in a `{...}` attribute that is data rather than code. `tags={["a","b"]}`
+ * and `rss={{ title: "x" }}` are values a component was given, not behaviour to run,
+ * and refusing them keeps a whole component unresolved over its decoration. Code is
+ * still refused: an arrow, a call, a bare identifier, a template literal or JSX has
+ * no value until something evaluates it, and this never evaluates anything.
+ */
+const EXECUTABLE_SYNTAX = /=>|`|\bfunction\b|\bnew\b|\+\+|--|\.\.\./;
+
+function dataLiteral(text: string): unknown {
+  if (EXECUTABLE_SYNTAX.test(text)) return undefined;
+  try { return JSON.parse(text) as unknown; } catch { /* JS object syntax, tried next */ }
+  // A JS data literal differs from JSON only in unquoted keys and single quotes; both are
+  // rewritten before parsing, and a bare identifier anywhere else still fails the parse.
+  const json = text
+    .replace(/'((?:[^'\\]|\\.)*)'/g, (_m, inner: string) => JSON.stringify(inner.replace(/\\'/g, "'")))
+    .replace(/([{,]\s*)([A-Za-z_$][\w$]*)(\s*:)/g, '$1"$2"$3')
+    .replace(/,(\s*[}\]])/g, '$1');
+  try { return JSON.parse(json) as unknown; } catch { return undefined; }
+}
+
 function literalExpression(value: string): string | number | boolean | null | undefined {
   const v = value.trim();
   if (/^-?(?:\d+\.?\d*|\.\d+)$/.test(v)) return Number(v);
@@ -334,6 +355,13 @@ function literalExpression(value: string): string | number | boolean | null | un
   if (v === 'null') return null;
   const quoted = v.match(/^(?:"([\s\S]*)"|'([\s\S]*)')$/);
   if (quoted) return quoted[1] ?? quoted[2] ?? '';
+  // An array or object of literals is data the component was given, not code. It is recorded as its
+  // canonical JSON text, because a prop holds a scalar here: what matters is that the component is
+  // resolved rather than held back by a value no rule keeps, and the value stays exactly readable.
+  if (/^[[{]/.test(v)) {
+    const data = dataLiteral(v);
+    return data === undefined ? undefined : JSON.stringify(data);
+  }
   return undefined;
 }
 

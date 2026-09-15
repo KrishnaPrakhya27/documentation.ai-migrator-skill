@@ -100,6 +100,31 @@ rules:
     tier: T1
     match: { name: Update }
     to: { name: Update, props: { label: $label, description: $description } }
+    # the changelog feed and its filter chips are Mintlify's own indexing, not page content
+    drop: [tags, rss]
+  - id: mint/anchor-div
+    tier: T3
+    # a published custom heading anchor: <div id="..."> wrapping the heading it names
+    match: { name: div, props: { id: any } }
+    handler: anchor-div-to-heading
+  - id: mint/expandable
+    tier: T1
+    # Mintlify's own Expandable, which the target has too: the disclosure stays a disclosure
+    match: { name: Expandable }
+    to: { name: Expandable, props: { title: $title, defaultOpen: $defaultOpen } }
+  - id: mint/columns
+    tier: T2
+    match: { name: Columns }
+    # cols is clamped to the contract enum [2,3,4] by the same handler CardGroup uses
+    to: { name: Columns, props: { cols: $cols } }
+  - id: mint/danger
+    tier: T1
+    match: { name: Danger }
+    to: { name: Callout, props: { kind: danger } }
+  - id: mint/callout
+    tier: T1
+    match: { name: Callout }
+    to: { name: Callout, props: { kind: $kind, collapsed: $collapsed } }
   - id: mint/video
     tier: T2
     match: { name: video }

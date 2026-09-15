@@ -57,6 +57,35 @@ describe('Markdown/MDX → IR', () => {
     expect(doc.children.some((x) => x.type === 'table')).toBe(true);
   });
 
+  it('reads a data literal as data and still refuses code', () => {
+    // tags={["a","b"]} and rss={{title:"x"}} are values a component was given, not behaviour,
+    // and holding a whole component back over decoration it never keeps is the worse answer.
+    const doc = markdownToIr('<Update label="v2" tags={["New releases","Bug fixes"]} rss={{ title: "Feed" }}>\nBody\n</Update>\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' });
+    const update = collectComponents(doc).find((x) => x.name === 'Update');
+    expect(update?.props).toMatchObject({ label: 'v2', tags: '["New releases","Bug fixes"]', rss: '{"title":"Feed"}' });
+    expect(JSON.stringify(doc)).not.toContain('expression:tags');
+    // Code has no value until something runs it, and nothing here ever runs anything.
+    const code = markdownToIr('<Button onClick={() => copy(x)} value={input} id={`k-${i}`} />\n', { platform: 'mintlify', file: 'b.mdx', pageId: 'p' });
+    const button = collectComponents(code).find((x) => x.name === 'Button');
+    expect(button?.props).toMatchObject({ onClick: null, value: null, id: null });
+    for (const prop of ['onClick', 'value', 'id']) expect(JSON.stringify(code)).toContain(`expression:${prop}`);
+  });
+
+  it('lifts a published heading anchor out of the div that carries it', () => {
+    const doc = markdownToIr('<div id="openapi-overlays">\n  ## OpenAPI Overlays\n</div>\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' });
+    const w = mkdtempSync(join(tmpdir(), 'dai-anchor-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const out = engine.resolveDoc(doc);
+    rmSync(w, { recursive: true, force: true });
+    const headings: any[] = [];
+    walkBlocks(out.children, (n: any) => { if (n.type === 'heading') headings.push(n); });
+    expect(headings).toHaveLength(1);
+    // the anchor lands in the same field the authored {#custom-id} form lifts into
+    expect((headings[0] as any).sourceId).toBe('openapi-overlays');
+    // and the wrapper itself does not reach the output
+    expect(JSON.stringify(out.children)).not.toContain('"name":"div"');
+  });
+
   it('converts Document360 snippet tokens to non-executable references', () => {
     const doc = markdownToIr('Before\n\n{{snippet.Shared plan}}\n', { platform: 'document360', file: 'a.md', pageId: 'p' });
     expect(doc.children.some((x) => x.type === 'snippetRef' && x.token === 'Shared plan')).toBe(true);

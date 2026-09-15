@@ -183,6 +183,20 @@ const HANDLERS: Record<string, RestructureHandler> = {
     const text = blocksToMdx(node.children).trim() || String(node.props.text ?? node.props.label ?? '');
     return { blocks: [{ id: node.id, type: 'rawHtml', value: `<span className="dai-mig-badge">${text.replace(/</g, '&lt;')}</span>`, reviewFlag: 'T4 compose: badge → span (custom CSS)' }] };
   } },
+  /**
+   * Mintlify publishes a custom heading anchor as a div wrapping the heading:
+   * `<div id="openapi-overlays">` around `## OpenAPI Overlays`. The div is not content -
+   * it carries the anchor the source states for that heading, which is what an inbound
+   * deep link resolves against. The heading is lifted out carrying that id in the same
+   * `sourceId` the authored `{#custom-id}` form lifts into, so one anchor map serves
+   * both and no wrapper reaches the output.
+   */
+  'anchor-div-to-heading': { reads: ['id'], run: (node) => {
+    const id = typeof node.props.id === 'string' ? node.props.id.trim() : '';
+    const [first, ...rest] = node.children;
+    if (!id || first?.type !== 'heading') return quarantined(node, 'a div carrying an id is a heading anchor only when a heading leads it; this one does not');
+    return { blocks: [{ ...first, sourceId: id }, ...rest] };
+  } },
   /** Frame around one image: a figure when it carries a caption, otherwise the bare image (the frame itself is presentation). */
   'frame-to-image': { reads: ['caption'], run: (node) => {
     const caption = typeof node.props.caption === 'string' && node.props.caption.trim() ? node.props.caption : undefined;
