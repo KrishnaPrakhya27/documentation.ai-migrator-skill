@@ -207,6 +207,9 @@ rules:
     match: { name: AssistantWidgetPlayground }
     handler: live-demo-to-card
     to: { name: Card, props: { title: "Assistant widget playground", href: "https://www.mintlify.com/docs/assistant/widget" } }
+    # the playground renders its code blocks through a component reference; the card replaces the whole
+    # widget, so the reference is dropped and reported, never evaluated
+    dropWhenExpression: [CodeBlockComponent]
     note: "convenience only: the installation snippets are adjacent on the same page"
   - id: mint/demo-download-pdf
     tier: T3

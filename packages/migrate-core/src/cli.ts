@@ -773,7 +773,10 @@ async function main() {
         // cluster back; the engine applies the same test, and the two must agree or the plan and the
         // conversion would disagree about what needed a person to look at it.
         const droppedByRule = new Set([...(rule?.drop ?? []), ...(rule?.dropWhenExpression ?? [])]);
-        const hasExpression = c.signature.styleDeps.some((x) => x.startsWith('expression:') && !droppedByRule.has(x.slice('expression:'.length)));
+        // A rule that emits nothing cannot carry an expression into the output, so such a cluster is
+        // resolved rather than waiting on a person - the same test the engine applies.
+        const emitsNothing = rule?.children === 'drop' && !rule.to && !rule.handler;
+        const hasExpression = !emitsNothing && c.signature.styleDeps.some((x) => x.startsWith('expression:') && !droppedByRule.has(x.slice('expression:'.length)));
         const entry: ComponentPlanEntry & { count: number; signature: unknown } = {
           cluster: c.cluster, count: c.count, signature: c.signature,
           tier: hasExpression ? 'T7' : rule?.tier ?? 'T7', rule: rule?.id,
