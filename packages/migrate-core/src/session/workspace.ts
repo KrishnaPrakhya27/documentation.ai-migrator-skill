@@ -79,6 +79,14 @@ export interface Session {
   migrator: MigratorProvenance;
   /** Builds this workspace has been rebased onto, oldest first. Empty for a session that never was. */
   rebases?: RebaseRecord[];
+  /**
+   * Migration ids this workspace pushed before, oldest first.
+   *
+   * A migration branch is evidence of what was pushed and is never rewritten. When the rendered
+   * preview shows something to fix — the reason gate 4 exists — the corrected build is a new
+   * revision of the same migration, and each earlier branch stays exactly as it was reviewed.
+   */
+  revisions?: Array<{ migrationId: string; at: string; reason: string; previewUrl?: string }>;
   /** The four human gates, by gate number, each pinning the state the approver saw. */
   approvals?: Partial<Record<1 | 2 | 3 | 4, GateApproval>>;
   versions: {
@@ -155,6 +163,21 @@ export function writeSession(workspace: string, session: Session): void {
   const temporary = `${path}.tmp`;
   writeFileSync(temporary, JSON.stringify(session, null, 2) + '\n', { mode: 0o600 });
   renameSync(temporary, path);
+}
+
+/**
+ * Takes a new migration id for a build that supersedes one already pushed.
+ *
+ * A migration branch records what was pushed and reviewed, so it is never rewritten: the corrected
+ * build is a new revision, the id it replaces is kept with the reason, and the preview of the build
+ * being replaced stops being this build's preview.
+ */
+export function recordRevision(session: Session, reason: string, nextId: string, at = new Date().toISOString()): Session {
+  const previous = session.migrationId;
+  const revisions = [...(session.revisions ?? []), { migrationId: previous, at, reason, ...(session.target.previewUrl ? { previewUrl: session.target.previewUrl } : {}) }];
+  const target = { ...session.target };
+  delete target.previewUrl; delete target.previewDeploymentId;
+  return { ...session, migrationId: nextId, revisions, target };
 }
 
 export function markStage(workspace: string, stage: string, status: 'pending' | 'done' | 'failed', note?: string): Session {

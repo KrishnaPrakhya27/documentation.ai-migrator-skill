@@ -158,6 +158,23 @@ export interface HtmlToIrResult {
 }
 
 const VOID = new Set(['br', 'hr', 'img', 'input', 'meta', 'link', 'source', 'wbr']);
+/**
+ * The anchor a heading is linked to when it is not the heading's own `id`.
+ *
+ * Older HTML, and every MadCap Flare build, names a cross-reference target with an empty anchor
+ * inside the heading — `<h2><a name="Member"></a>Member activity information</h2>` — and the
+ * page's own links point at `#Member`. Reading only the heading's `id` leaves those links with
+ * nothing to land on, so the first named anchor inside the heading counts as its source anchor.
+ */
+function namedAnchorIn(heading: El): string | undefined {
+  for (const child of heading.children ?? []) {
+    if (child.type !== 'tag' || child.name !== 'a') continue;
+    const named = child.attribs.name || child.attribs.id;
+    if (named) return named;
+  }
+  return undefined;
+}
+
 const INLINE = new Set(['a', 'strong', 'b', 'em', 'i', 'del', 's', 'strike', 'code', 'br', 'kbd', 'span', 'sup', 'sub', 'u', 'mark', 'small', 'abbr', 'img', 'time', 'label']);
 
 export function find(el: El, selector: string): El | undefined {
@@ -281,7 +298,16 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
           // script call goes nowhere: it is a disclosure toggle, a skip link, or a named anchor
           // marking a spot in the page. None survives as a link, and emitting one would put a dead
           // link in the output, so the text it wraps is kept and the anchor itself is dropped.
-          if (!url || url === '#' || /^javascript:/i.test(url)) { out.push(...kids()); break; }
+          if (!url || url === '#' || /^javascript:/i.test(url)) {
+            // A named anchor marks a spot other pages link to, and Flare writes plenty of them
+            // around ordinary sentences. The anchor is not a link and must not become one, but the
+            // address it publishes is real: it is kept as an empty target before the text it
+            // wrapped, so `page#spot` still lands where the source put it.
+            const named = (n.attribs.name ?? n.attribs.id ?? '').trim();
+            if (named) out.push({ id: id(p, `anchor:${named}`), type: 'inlineHtml', value: `<a id="${named}"></a>` });
+            out.push(...kids());
+            break;
+          }
           const children = kids();
           // HTML parsing closes an open <a> when another <a> starts, so an anchor written inside
           // another is a sibling of it, never its content. Keeping the nesting would emit a link
@@ -381,8 +407,13 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
     }
     const hm = n.name.match(/^h([1-6])$/);
     if (hm) {
-      const children = inlineOf(n.children, p);
-      const node: HeadingNode = { id: id(p, textOf(n)), type: 'heading', depth: Number(hm[1]) as 1, children, sourceId: n.attribs.id || undefined };
+      // A heading records one anchor as its own source id, and the serializer writes that before the
+      // heading — so keeping it in the text too would put the same address there twice. A heading
+      // that names several spots (Flare writes a second when a section is linked under an older
+      // name) keeps the rest as empty targets, because each is an address something links to.
+      const sourceId = n.attribs.id || namedAnchorIn(n);
+      const children = inlineOf(n.children, p).filter((inline) => !(inline.type === 'inlineHtml' && inline.value === `<a id="${sourceId}"></a>`));
+      const node: HeadingNode = { id: id(p, textOf(n)), type: 'heading', depth: Number(hm[1]) as 1, children, sourceId };
       headings.push(node);
       return [node];
     }

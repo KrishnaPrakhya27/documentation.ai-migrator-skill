@@ -125,23 +125,40 @@ export function redirectMaps(plan: UrlPlan): { exact: RedirectRule[]; wildcard: 
     if (r.destination === r.source) issues.push(`loop: ${r.source}`);
   }
   for (const r of exact) if (classifyRedirect(r.source) === 'needs-wildcard') issues.push(`unsupported pattern in ${r.source}`);
-  // subtree candidates: old prefix → new prefix shared by ≥ 3 pages
-  const prefixPairs = new Map<string, number>();
+  // Subtree candidates: an old prefix → new prefix shared by ≥ 3 pages, offered so an operator can
+  // collapse many exact rules into one. A wildcard copies the splat verbatim, so it only says the
+  // same thing as the rules it covers where the part after the prefix survives unchanged. Where the
+  // filenames change too — preserve mode slugifies them, so `p_a_Step1.htm` becomes `p-a-step1` —
+  // no single wildcard expresses the move, and proposing one would send every path it covers to a
+  // page nobody wrote. Those subtrees keep their exact rules and get no candidate.
+  const prefixPairs = new Map<string, { covered: number; splatSurvives: boolean }>();
   for (const r of exact) {
     const o = r.source.split('/').slice(0, -1).join('/'); const n = r.destination.split('/').slice(0, -1).join('/');
-    if (o && n && o !== n) prefixPairs.set(`${o}|${n}`, (prefixPairs.get(`${o}|${n}`) ?? 0) + 1);
+    if (!o || !n || o === n) continue;
+    const key = `${o}|${n}`;
+    const entry = prefixPairs.get(key) ?? { covered: 0, splatSurvives: true };
+    entry.covered++;
+    if (r.source.slice(o.length + 1) !== r.destination.slice(n.length + 1)) entry.splatSurvives = false;
+    prefixPairs.set(key, entry);
   }
-  const wildcard: RedirectRule[] = [...prefixPairs.entries()].filter(([, c]) => c >= 3).map(([k]) => { const [o, n] = k.split('|'); return { source: `${o}/*`, destination: `${n}/:splat`, statusCode: 308 }; });
+  const wildcard: RedirectRule[] = [...prefixPairs.entries()]
+    .filter(([, entry]) => entry.covered >= 3 && entry.splatSurvives)
+    .map(([k]) => { const [o, n] = k.split('|'); return { source: `${o}/*`, destination: `${n}/:splat`, statusCode: 308 }; });
   return { exact, wildcard, issues };
 }
 
 export interface AnchorEntry { pageId: string; headingText: string; oldId?: string; newId: string; needsShim: boolean; inboundLinks: number }
 
 /** Compare source heading ids with the renderer's slugs; shim where an inbound link targets a differing id. */
-export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }> }>, inbound: Map<string, number>): { entries: AnchorEntry[]; shims: Map<string, Map<string, string>> } {
+export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }>; titleAnchor?: string }>, inbound: Map<string, number>): { entries: AnchorEntry[]; shims: Map<string, Map<string, string>>; leading: Map<string, string> } {
   const entries: AnchorEntry[] = [];
   const shims = new Map<string, Map<string, string>>();
+  /** pageId → the anchor its title heading published, for pages something still links to by it. */
+  const leading = new Map<string, string>();
   for (const p of pages) {
+    // The title heading became the frontmatter title, so its anchor has no heading left to sit
+    // before. It is written at the head of the body instead, and only where a link still uses it.
+    if (p.titleAnchor && (inbound.get(`${p.pageId}#${p.titleAnchor}`) ?? inbound.get(`#${p.titleAnchor}`) ?? 0) > 0) leading.set(p.pageId, p.titleAnchor);
     const slugger = new GithubSlugger();
     for (const h of p.headings) {
       const newId = headingSlug(h.text, slugger);
@@ -152,5 +169,5 @@ export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: s
       if (needsShim) { if (!shims.has(p.pageId)) shims.set(p.pageId, new Map()); shims.get(p.pageId)!.set(h.id, h.sourceId!); }
     }
   }
-  return { entries, shims };
+  return { entries, shims, leading };
 }

@@ -11,7 +11,7 @@ import { parseLlmsIndex, type LlmsEntry, type ParsedLlmsIndex } from './publishe
 import { mapConcurrent } from './concurrency.js';
 import { sha256 } from '../session/ids.js';
 import { sourceFingerprint } from './drift.js';
-import { fetchFlareData, flareNavigationFromData, helpSystemRoot, type FlareData } from './madcap-toc.js';
+import { defaultUrlFromHelpSystem, fetchFlareData, flareNavigationFromData, helpSystemRoot, type FlareData } from './madcap-toc.js';
 
 export interface DiscoveredUrl {
   url: string;
@@ -1000,11 +1000,6 @@ export async function discoverLiveSite(input: {
   const canonicalHosts = input.fetcher.canonicalHosts ?? new CanonicalHosts(origin);
   if (canonicalHosts.seedOrigin !== origin) throw new Error(`fetcher canonical hosts are bound to ${canonicalHosts.seedOrigin}, not the seed origin ${origin}`);
   const limit = Math.max(1, Math.min(input.limit ?? 5000, 50_000));
-  // Where the site publishes its own index is where the site begins. The seed cannot say: an
-  // operator may name any page, and a deep page of a root-published site would confine it to a
-  // directory. Until the site states a base, nothing is confined - which is the behaviour of a site
-  // published at the origin root.
-  let siteBase = new URL('/', origin).toString();
   const refusedOutsideBase = new Set<string>();
   const records = new Map<string, { reasons: Set<string>; title?: string; description?: string; sidebarTitle?: string; htmlTitleTag?: string; domSidebarTitle?: string; llms?: LlmsEntry; discoveredOrder: number; sidebarOrder?: number; platformOrder?: number; sitemap?: SitemapEntry; groupHint?: string[]; locale?: string; version?: string; sidebarPages?: number; contentSha256?: string }>();
   const queue: string[] = [];
@@ -1018,6 +1013,8 @@ export async function discoverLiveSite(input: {
   const navigationCandidates: NonNullable<DiscoveryResult['navigationCandidates']> = {};
   const structuralIssues: string[] = [];
   const helpSystems: HelpSystem[] = [];
+  /** The page the seed's help system opens on; the site states its name in that page's title. */
+  let flareDefaultUrl: string | undefined;
   let sections: SiteSection[] | undefined;
   const sectionSidebars = new Map<string, DiscoveredNavigationNode[]>();
   /** Each space's own label as the source states it, including variant roots that are not site sections. */
@@ -1057,7 +1054,13 @@ export async function discoverLiveSite(input: {
     if (!normalised || !isDocumentCandidate(normalised, input.profile.platform)) return;
     // Outside the site's own path prefix is another site on the same host. The site's own index is
     // exempt: if llms.txt names a page, the site published it as documentation whatever its path.
-    if (reason !== 'llms-txt' && !withinSiteBase(normalised, siteBase)) { refusedOutsideBase.add(normalised); return; }
+    if (reason !== 'llms-txt' && siteBase && !withinSiteBase(normalised, siteBase)) {
+      // A sitemap the site serves under its own base is the site's statement, and what it declares
+      // is admitted wherever it lives. One served outside the base belongs to another site on the
+      // host — the marketing site's root sitemap — and confines nothing.
+      const declaredBySite = (reason === 'sitemap' || reason === 'sitemap-hreflang') && !!meta.sitemap && withinSiteBase(meta.sitemap.sitemap, siteBase);
+      if (!declaredBySite) { refusedOutsideBase.add(normalised); return; }
+    }
     // GitBook and other themes link to a page's published-Markdown representation.
     // It is acquisition evidence for the extensionless page, never another page entity,
     // and admitting it here wastes the crawl budget before it can be discarded.
@@ -1067,7 +1070,6 @@ export async function discoverLiveSite(input: {
     // belongs to whatever else the host publishes rather than to this site: one host serves a
     // marketing site at its root and the documentation under /docs. What the site declares for
     // itself — its sitemap, its llms.txt — is admitted wherever it lives.
-    if (reason === 'link-graph' && siteBase && !records.has(url) && !withinSiteBase(url, siteBase)) return;
     let record = records.get(url);
     if (!record) {
       if (records.size >= limit) { refusedByLimit++; return; }
@@ -1124,6 +1126,8 @@ export async function discoverLiveSite(input: {
   catch { /* discoverSitemaps and page acquisition report an unverifiable robots policy */ }
   const walkedLlms = await fetchLlmsIndex(input.fetcher, siteFileBases(input.seedUrl), seed.hostname.toLowerCase(), canonicalHosts, input.profile.llmsIndexSegment, failures, structuralIssues);
   const llms = walkedLlms ? { url: walkedLlms.url, entries: walkedLlms.entries } : undefined;
+  // The site's own index names where it is rooted: llms.txt is the documentation's statement of itself,
+  // and a marketing site sharing the host publishes none under this path.
   if (llms) siteBase = new URL('.', llms.url).toString();
   const externalLlmsLinks = walkedLlms?.external ?? [];
   if (llms) {
@@ -1131,17 +1135,10 @@ export async function discoverLiveSite(input: {
     for (const entry of llms.entries) add(pageUrlOfLlmsEntry(entry), 'llms-txt', llms.url, { title: entry.title, description: entry.description, llms: entry });
   }
   const sitemaps = await discoverSitemaps(input.fetcher, origin, { maxUrls: limit, bases: siteFileBases(input.seedUrl) });
-  // The shallowest directory that served a declaration is the site root; when two levels both answer,
-  // the shallower wins so the crawl is widened rather than narrowed.
-  const declarationDirs = [
-    ...(llms ? [llms.url] : []),
-    ...sitemaps.sources.filter((source) => new URL(source).hostname.toLowerCase() === seed.hostname.toLowerCase()),
-  ].map((source) => new URL('.', source).toString());
-  siteBase = declarationDirs.sort((a, b) => new URL(a).pathname.split('/').length - new URL(b).pathname.split('/').length)[0];
   failures.push(...sitemaps.failures.map((failure) => ({ ...failure, error: `sitemap: ${failure.error}` })));
   // No llms.txt: the deepest base that serves a sitemap is the site's own, and a host serving one at
   // its root only says the site is the root, so nothing is confined.
-  if (!llms) siteBase = siteFileBases(input.seedUrl).find((base) => sitemaps.sources.some((source) => source.startsWith(base))) ?? siteBase;
+  if (!llms) siteBase = siteFileBases(input.seedUrl).find((base) => sitemaps.sources.some((source) => source.startsWith(base)));
   for (const entry of sitemaps.entries) {
     add(entry.url, 'sitemap', input.seedUrl, { sitemap: entry });
     for (const alternate of entry.alternates) add(alternate.href, 'sitemap-hreflang', entry.url, { sitemap: entry, locale: alternate.hreflang === 'x-default' ? undefined : alternate.hreflang });
@@ -1256,6 +1253,16 @@ export async function discoverLiveSite(input: {
           flareRoots.add(flareRoot);
           try {
             const data = await fetchFlareData(page, response.body, flareFetch);
+            // A help system names the page it opens on, and that page titles itself with the site's
+            // name — Flare's own way of stating it, where a theme that suffixes every <title> would
+            // have stated it there. Only the seed's own help system speaks for this site.
+            if (data && !flareDefaultUrl) {
+              for (const [dataUrl, body] of data) {
+                if (!/HelpSystem\.xml$|\.mcwebhelp$/i.test(dataUrl)) continue;
+                flareDefaultUrl = defaultUrlFromHelpSystem(body, flareRoot);
+                if (flareDefaultUrl) break;
+              }
+            }
             const read = data && flareNavigationFromData(page, response.body, data);
             if (data && read?.nodes.length) {
               for (const [dataUrl, body] of data) if (!navigationData.some((file) => file.url === dataUrl)) navigationData.push({ url: dataUrl, body });
@@ -1361,7 +1368,9 @@ export async function discoverLiveSite(input: {
     navigation: navigation ?? (domSidebarIsNavigation ? domSidebar : undefined),
     navigationSource: navigation ? 'platform-metadata' : domSidebarIsNavigation ? 'dom-sidebar' : undefined,
     navigationCandidates: Object.keys(navigationCandidates).length ? navigationCandidates : undefined,
-    siteName: siteName ?? siteNameFromTitleTags([...records.values()].map((value) => value.htmlTitleTag)),
+    siteName: siteName
+      ?? siteNameFromTitleTags([...records.values()].map((value) => value.htmlTitleTag))
+      ?? (flareDefaultUrl ? records.get(flareDefaultUrl)?.htmlTitleTag?.trim() || undefined : undefined),
     siteConfig,
     llms,
     ...(externalLlmsLinks.length ? { externalLlmsLinks } : {}),

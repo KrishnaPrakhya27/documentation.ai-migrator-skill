@@ -21,9 +21,18 @@ export function requireSourceManifest(workspace: string, pinnedHash: string | un
 }
 
 export function sourceUniverseProblems(input: { workspace: string; manifest: SourceManifest; treePages: readonly UniversePage[]; written: ReadonlySet<string>; quarantined: ReadonlySet<string> }): string[] {
-  const account = accountSourceUniverse({ ...input, decisions: readScopeDecisions(input.workspace) });
+  const decisions = readScopeDecisions(input.workspace);
+  const account = accountSourceUniverse({ ...input, decisions });
+  const issues = input.manifest.issues ?? [];
+  // A help system the operator left out of this run answers the issue it raised: the observation
+  // stays in the frozen manifest, and the attributed decision beside it says who resolved it and
+  // how. A decision naming an issue this capture never recorded resolves nothing and is reported,
+  // so a waiver cannot be carried across captures.
+  const answered = new Set(decisions.helpSystems.filter((entry) => issues.includes(entry.issue)).map((entry) => entry.issue));
+  const stale = decisions.helpSystems.filter((entry) => !issues.includes(entry.issue)).map((entry) => `${entry.root}: help system decision names an issue the frozen source manifest does not record`);
   return [
-    ...(input.manifest.issues ?? []),
+    ...issues.filter((issue) => !answered.has(issue)),
+    ...stale,
     ...(!input.manifest.pages.length ? ['source manifest contains no page evidence'] : []),
     ...universeProblems(account),
     // Quarantine is an accounted failure, never permission to release an incomplete migration.

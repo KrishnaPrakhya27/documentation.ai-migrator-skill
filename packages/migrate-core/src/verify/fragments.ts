@@ -27,6 +27,22 @@ export function documentAnchors(doc: DocIR, text: string): Set<string> {
   return anchors;
 }
 
+/**
+ * Anchors a frozen source page offers a deep link: every `id`/`name` it writes, plus the slug the
+ * renderer gives each heading. Read from the bytes the site served, so it can be said whether a
+ * link was already broken before the migration touched it.
+ */
+export function htmlAnchors(html: string): Set<string> {
+  const anchors = new Set<string>();
+  for (const match of html.matchAll(/\b(?:id|name)=["']([^"']+)["']/g)) anchors.add(match[1]);
+  const slugger = new GithubSlugger();
+  for (const match of html.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)) {
+    const text = match[1].replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;|&#\d+;/gi, ' ').replace(/\s+/g, ' ').trim();
+    if (text) anchors.add(headingSlug(text, slugger));
+  }
+  return anchors;
+}
+
 export interface FragmentProblem {
   from: string;
   link: string;
@@ -41,6 +57,31 @@ export interface FragmentProblem {
  * migration did not write is not judged here — `internal-links` already reports that — so a page
  * missing from the map is skipped rather than reported twice.
  */
+/**
+ * Splits fragment problems into the ones this migration caused and the ones it inherited.
+ *
+ * A deep link whose anchor the source page never had was already broken on the source site: the
+ * output reproduces the page faithfully, and exact mode cannot invent a target that never existed.
+ * Those are reported so the customer can fix their own content, and they do not fail the gate.
+ * A link whose anchor the source *did* have and the output does not is a loss the migration caused,
+ * and that still blocks. Where no frozen source is available for a route, nothing is excused.
+ */
+export function splitInheritedFragments(
+  problems: readonly FragmentProblem[],
+  sourceAnchorsByRoute: ReadonlyMap<string, ReadonlySet<string>>,
+): { broken: FragmentProblem[]; inherited: FragmentProblem[] } {
+  const broken: FragmentProblem[] = []; const inherited: FragmentProblem[] = [];
+  for (const problem of problems) {
+    const hash = problem.link.indexOf('#');
+    const fragment = hash < 0 ? '' : decodeURIComponent(problem.link.slice(hash + 1));
+    const target = problem.reason.slice(0, problem.reason.indexOf(' has no anchor'));
+    const sourceAnchors = sourceAnchorsByRoute.get(target);
+    if (fragment && sourceAnchors && !sourceAnchors.has(fragment)) inherited.push(problem);
+    else broken.push(problem);
+  }
+  return { broken, inherited };
+}
+
 export function unresolvedFragments(
   links: ReadonlyMap<string, readonly string[]>,
   anchorsByRoute: ReadonlyMap<string, ReadonlySet<string>>,

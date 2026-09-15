@@ -54,5 +54,8 @@ export function legalisePath(path: string, opts: { case: 'preserve' | 'lower' })
 
 /** Heading id as the renderer computes it: github-slugger, then dashes collapsed. */
 export function headingSlug(text: string, slugger = new GithubSlugger()): string {
-  return slugger.slug(text).replace(/-{2,}/g, '-');
+  // Space around a heading is not part of its name. A Flare topic that wrote "Steps " would
+  // otherwise be asked for `#steps-` while every renderer, reading the heading as trimmed text,
+  // gives it `#steps` — and every link to it would land nowhere.
+  return slugger.slug(text.trim()).replace(/-{2,}/g, '-');
 }

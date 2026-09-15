@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { freezeDirectory, frozenRootPath, writeSourceManifest, sourceManifestPath, type SourceManifest } from '../src/evidence/manifest.js';
 import { nativeSourceManifest, liveSourceManifest } from '../src/evidence/capture.js';
 import { requireSourceManifest, sourceUniverseProblems } from '../src/evidence/verify.js';
-import { ensureScopeDecisionsFile, readScopeDecisions } from '../src/evidence/scope.js';
+import { ensureScopeDecisionsFile, readScopeDecisions, excludeHelpSystems, recordScopeExclusions, answeredHelpSystemIssues } from '../src/evidence/scope.js';
 import { ensureWorkspace, readSession } from '../src/session/workspace.js';
 import { pageIdFromPlatform, sha256 } from '../src/session/ids.js';
 import { pinAcquisition, requireAcquisition } from '../src/evidence/acquisition.js';
@@ -199,5 +199,122 @@ describe('a declared substitution', () => {
     // and a file that predates the field still reads
     writeFileSync(path, 'excluded: []\n');
     expect(readScopeDecisions(workspace).substituted).toEqual([]);
+  });
+});
+
+/**
+ * A host can publish several independent MadCap help systems. Discovery reports every one and
+ * refuses to merge their sidebars, which leaves the operator a question rather than a defect:
+ * which help system does this run migrate? These cover the answer — recorded as ordinary
+ * attributed exclusions, so the source universe still reconciles page for page.
+ */
+describe('help systems out of scope', () => {
+  const SEED = 'https://learn.example.com/';
+  const SECOND = 'https://learn.example.com/developer/';
+  const ISSUE = `${SECOND}: a second MadCap help system is published here, with its own 50-page sidebar`;
+  const systems = [
+    { root: SEED, seed: true },
+    { root: SECOND, seed: false, issue: ISSUE },
+  ];
+  const page = (location: string) => ({ pageId: pageIdFromPlatform('madcap', location), sourceId: location, location, published: true, evidence: ['crawl' as const] });
+  const manifestPages = [
+    page(`${SEED}home.htm`),
+    page(`${SEED}Procedures/one.htm`),
+    page(SECOND),
+    page(`${SECOND}API/auth.htm`),
+    page('https://learn.example.com/developer-guide.htm'),
+  ];
+  const decide = (roots: string[]) => excludeHelpSystems({ roots, helpSystems: systems, manifestPages, approvedBy: 'operator', approvedAt: '2026-09-15T00:00:00.000Z' });
+
+  it('excludes every page the named help system publishes, and answers the issue it raised', () => {
+    const decided = decide([SECOND]);
+    expect(decided.refusals).toEqual([]);
+    expect(decided.answeredIssues).toEqual([ISSUE]);
+    expect(decided.exclusions.map((entry) => entry.sourceId).sort()).toEqual([SECOND, `${SECOND}API/auth.htm`]);
+    for (const entry of decided.exclusions) {
+      expect(entry.approvedBy).toBe('operator');
+      expect(entry.reason).toContain(SECOND);
+    }
+  });
+
+  it('does not take a sibling whose path merely starts with the same letters', () => {
+    expect(decide([SECOND]).exclusions.map((entry) => entry.sourceId)).not.toContain('https://learn.example.com/developer-guide.htm');
+  });
+
+  it('accepts the root however the operator spells it', () => {
+    expect(decide(['https://learn.example.com/developer']).exclusions).toHaveLength(2);
+  });
+
+  it('refuses the seed\'s own help system: a run cannot exclude the system it migrates', () => {
+    const decided = decide([SEED]);
+    expect(decided.exclusions).toEqual([]);
+    expect(decided.refusals.join(' ')).toContain('cannot be excluded from its own migration');
+  });
+
+  it('refuses a root that matches nothing discovered, rather than silently dropping nothing', () => {
+    const decided = decide(['https://learn.example.com/partners/']);
+    expect(decided.refusals.join(' ')).toContain('names no help system found on this host');
+    expect(decided.exclusions).toEqual([]);
+  });
+
+  it('records the decision in scope-decisions.yaml and keeps approvals already there', () => {
+    const workspace = temp(); ensureWorkspace(workspace);
+    const decided = decide([SECOND]);
+    expect(recordScopeExclusions(workspace, decided.exclusions, decided.decisions)).toBe(2);
+    const first = readScopeDecisions(workspace);
+    expect(first.excluded).toHaveLength(2);
+    expect(first.excluded[0].approvedBy).toBe('operator');
+    // Re-running decides nothing new: an approval is never rewritten.
+    expect(recordScopeExclusions(workspace, decided.exclusions, decided.decisions)).toBe(0);
+    expect(readScopeDecisions(workspace).helpSystems).toEqual([expect.objectContaining({ root: SECOND, issue: ISSUE, approvedBy: 'operator' })]);
+    expect(readScopeDecisions(workspace).excluded).toHaveLength(2);
+  });
+
+  it('accounts the excluded pages against the frozen manifest instead of leaving them undecided', () => {
+    const workspace = temp(); ensureWorkspace(workspace);
+    const manifest: SourceManifest = { schemaVersion: 1, capturedAt: context.capturedAt, source: { kind: 'url', platform: 'madcap', location: SEED }, contentContractVersion: '0.1.0', indexes: [], pages: manifestPages, issues: [ISSUE] };
+    writeSourceManifest(workspace, manifest);
+    const decided = decide([SECOND]);
+    recordScopeExclusions(workspace, decided.exclusions, decided.decisions);
+    const excludedIds = new Set(decided.exclusions.map((entry) => entry.pageId));
+    const treePages = manifestPages.map((entry) => ({ id: entry.pageId, source: entry.location, migrate: !excludedIds.has(entry.pageId), newPath: excludedIds.has(entry.pageId) ? undefined : `/${entry.pageId}` }));
+    const written = new Set(treePages.filter((entry) => entry.migrate).map((entry) => entry.newPath!));
+    expect(sourceUniverseProblems({ workspace, manifest, treePages, written, quarantined: new Set() })).toEqual([]);
+  });
+
+  it('still leaves the pages undecided when no decision was recorded', () => {
+    const workspace = temp(); ensureWorkspace(workspace); ensureScopeDecisionsFile(workspace);
+    const manifest: SourceManifest = { schemaVersion: 1, capturedAt: context.capturedAt, source: { kind: 'url', platform: 'madcap', location: SEED }, contentContractVersion: '0.1.0', indexes: [], pages: manifestPages, issues: [ISSUE] };
+    writeSourceManifest(workspace, manifest);
+    const treePages = manifestPages.map((entry) => ({ id: entry.pageId, source: entry.location, migrate: !entry.location.startsWith(SECOND), newPath: entry.location.startsWith(SECOND) ? undefined : `/${entry.pageId}` }));
+    const written = new Set(treePages.filter((entry) => entry.migrate).map((entry) => entry.newPath!));
+    const problems = sourceUniverseProblems({ workspace, manifest, treePages, written, quarantined: new Set() });
+    expect(problems).toHaveLength(3);
+    expect(problems).toContain(ISSUE);
+    expect(problems.join(' ')).toContain('neither migrated nor excluded');
+  });
+
+  it('answers its issue again on a later re-derivation, without being re-stated', () => {
+    const workspace = temp(); ensureWorkspace(workspace);
+    const decided = decide([SECOND]);
+    recordScopeExclusions(workspace, decided.exclusions, decided.decisions);
+    // What discover asks on an offline rebuild, where no --exclude-help-system flag is given.
+    expect(answeredHelpSystemIssues(readScopeDecisions(workspace), [ISSUE])).toEqual([ISSUE]);
+    // An issue this capture never recorded is not answered by a decision about a different one.
+    expect(answeredHelpSystemIssues(readScopeDecisions(workspace), ['discovery was truncated'])).toEqual([]);
+  });
+
+  it('reports a decision carried from another capture instead of honouring it', () => {
+    const workspace = temp(); ensureWorkspace(workspace);
+    const manifest: SourceManifest = { schemaVersion: 1, capturedAt: context.capturedAt, source: { kind: 'url', platform: 'madcap', location: SEED }, contentContractVersion: '0.1.0', indexes: [], pages: manifestPages, issues: ['a different issue this capture recorded'] };
+    writeSourceManifest(workspace, manifest);
+    const decided = decide([SECOND]);
+    recordScopeExclusions(workspace, decided.exclusions, decided.decisions);
+    const excludedIds = new Set(decided.exclusions.map((entry) => entry.pageId));
+    const treePages = manifestPages.map((entry) => ({ id: entry.pageId, source: entry.location, migrate: !excludedIds.has(entry.pageId), newPath: excludedIds.has(entry.pageId) ? undefined : `/${entry.pageId}` }));
+    const written = new Set(treePages.filter((entry) => entry.migrate).map((entry) => entry.newPath!));
+    const problems = sourceUniverseProblems({ workspace, manifest, treePages, written, quarantined: new Set() });
+    expect(problems).toContain('a different issue this capture recorded');
+    expect(problems.join(' ')).toContain('names an issue the frozen source manifest does not record');
   });
 });

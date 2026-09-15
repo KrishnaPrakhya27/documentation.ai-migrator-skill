@@ -584,6 +584,27 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         if (opts.platform === 'readme' && (name === 'strong' || name === 'b')) return [{ ...base, type: 'strong', children: inline(node.children ?? [], p) }];
         if (opts.platform === 'readme' && (name === 'em' || name === 'i')) return [{ ...base, type: 'emphasis', children: inline(node.children ?? [], p) }];
         if (opts.platform === 'gitbook' && isGitbookHtmlInline(name)) return htmlInline(node, p);
+        // Reading back a file this tool wrote, an inline HTML element it emitted verbatim reads back
+        // as what was written. The marker below exists so a *source* platform's component reaches a
+        // person; an element in this tool's own output was decided when it was written, and turning
+        // it into a marker made the file disagree with the IR it was serialized from.
+        if (opts.platform === 'dai') {
+          const attrs = (node.attributes ?? []).filter((a: any) => a.type === 'mdxJsxAttribute');
+          const attrValue = (key: string): string | undefined => {
+            const found = attrs.find((a: any) => a.name === key);
+            return typeof found?.value === 'string' ? found.value : undefined;
+          };
+          const kids = node.children ?? [];
+          // An empty `<a id="…">` is an anchor target kept so an address the source published still works.
+          if (name === 'a' && !kids.length && !attrValue('href')) {
+            const anchorId = attrValue('id') ?? attrValue('name');
+            if (anchorId) return [{ ...base, type: 'inlineHtml', value: `<a id="${anchorId}"></a>` }];
+          }
+          // An element with no attributes wrapping plain text is rebuilt exactly as it was written.
+          if (!attrs.length && kids.length && kids.every((c: any) => c.type === 'text')) {
+            return [{ ...base, type: 'inlineHtml', value: `<${name}>${kids.map((c: any) => c.value).join('')}</${name}>` }];
+          }
+        }
         const text = inline(node.children ?? [], p);
         // Inline source components need a human decision; preserve their visible
         // text and leave a blocking marker rather than silently changing meaning.

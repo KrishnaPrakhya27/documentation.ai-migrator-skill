@@ -745,6 +745,7 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(() => ir('````markdown\n{% prompt a="b" %}\n```\ntext\n```\n{% endprompt %}\n````\n')).not.toThrow();
     // TeX braces are not JavaScript
     expect(() => ir('$$f(x) = e^{2 pi i}$$\n')).not.toThrow();
+  });
   it('keeps a site published under a path prefix apart from the marketing site at the same origin', () => {
     expect(siteBaseUrl('https://acme.example/docs')).toBe('https://acme.example/docs/');
     expect(siteBaseUrl('https://acme.example/docs/')).toBe('https://acme.example/docs/');

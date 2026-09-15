@@ -31,18 +31,94 @@ function mergeText(nodes: Inline[]): Inline[] {
   }, []);
 }
 
-function inlineShape(nodes: Inline[]): FidelityValue[] {
+function inlineShape(nodes: Inline[], insideLink = false): FidelityValue[] {
   return mergeText(nodes).map((node): FidelityValue => {
     switch (node.type) {
-      case 'text': return { type: 'text', value: cleanText(node.value) };
+      // Left as written for now: a sentence the reader split at an address it linked is put back
+      // together below, and trimming the pieces first would swallow the spaces at the seam.
+      case 'text': return { type: 'text', value: node.value };
       case 'inlineCode': return { type: 'inlineCode', value: node.value };
       case 'break': return { type: 'break' };
-      case 'image': return { type: 'image', url: node.url, alt: node.alt, title: node.title ?? '', width: node.width ?? null, height: node.height ?? null };
-      case 'link': return { type: 'link', url: node.url, title: node.title ?? '', children: inlineShape(node.children) };
+      case 'image': return { type: 'image', url: sameAddress(node.url), alt: node.alt, title: node.title ?? '', width: node.width ?? null, height: node.height ?? null };
+      case 'link': {
+        // A bare address sitting in text is linked by the reader as soon as it reads the file back,
+        // so the text the page wrote and the link made of it are the same address said once. A link
+        // that shows nothing but its own address reads as that address; a link with a label of its
+        // own is a reference the page made, and is compared as one.
+        const children = inlineShape(node.children, true);
+        const only = children.length === 1 ? (children[0] as { type?: string; value?: string }) : undefined;
+        const url = sameAddress(node.url);
+        // The label has already had its character references read; the address must be read the same
+        // way before the two can be compared at all.
+        const address = decodeCharacterReferences(url);
+        const label = only?.type === 'text' && only.value ? decodeCharacterReferences(only.value).trim() : undefined;
+        if (label && (address === label || address === `mailto:${label}` || address === `http://${label}`)) return { type: 'text', value: only!.value ?? '' };
+        return { type: 'link', url, title: node.title ?? '', children };
+      }
       case 'inlineHtml': return { type: 'html', value: node.value.trim() };
-      default: return { type: node.type, children: inlineShape(node.children) };
+      case 'strong': case 'emphasis': {
+        // `***x***` is bold and italic together; nothing in it says which wraps which, so a re-parse
+        // is free to choose the other order. Both say the same thing, so the pair is always written
+        // here with the bold outside.
+        const children = inlineShape(node.children, insideLink);
+        const only = children.length === 1 ? (children[0] as { type?: string; children?: FidelityValue[] }) : undefined;
+        if (node.type === 'emphasis' && only?.type === 'strong') return { type: 'strong', children: [{ type: 'emphasis', children: only.children ?? [] }] };
+        return { type: node.type, children };
+      }
+      default: return { type: node.type, children: inlineShape(node.children, insideLink) };
     }
-  }).filter((value) => !(typeof value === 'object' && !Array.isArray(value) && value && value.type === 'text' && value.value === ''));
+  }).reduce<FidelityValue[]>((out, value) => {
+    // Collapsing a reader's autolink back to text leaves the address beside the words that followed
+    // it, split where the link ended — and the braces the writer escaped are still character
+    // references on that side of the split. Joining the pieces and reading the references as the
+    // characters they stand for puts the sentence back the way the page states it.
+    const previous = out[out.length - 1] as { type?: string; value?: string } | undefined;
+    const current = value as { type?: string; value?: string };
+    if (previous?.type === 'text' && current?.type === 'text') { previous.value = `${previous.value ?? ''}${current.value ?? ''}`; return out; }
+    out.push(value);
+    return out;
+  }, []).map((value) => {
+    const current = value as { type?: string; value?: string };
+    return current?.type === 'text' ? { type: 'text', value: cleanText(decodeCharacterReferences(current.value ?? '')) } : value;
+  }).filter((value) => {
+    if (typeof value !== 'object' || Array.isArray(value) || !value) return true;
+    // An `<a id="x"></a>` marking a spot mid-sentence is a link target, not something the page says.
+    // It is written verbatim and comes back from a re-parse as a JSX element; neither is content.
+    if (value.type === 'html' && /^<a\s+(?:id|name)=["'][^"']+["']\s*>\s*<\/a>$/i.test(String(value.value ?? ''))) return false;
+    if (value.type === 'a' && Array.isArray(value.children) && !value.children.length) return false;
+    return !(value.type === 'text' && value.value === '');
+  });
+}
+
+/**
+ * `&#123;` and the brace it stands for are the same character, and so are `&lt;` and `<`. A file may
+ * spell either way: the writer escapes what Markdown would otherwise read as syntax, and a reader
+ * gives the character back. Reading both sides the same way compares the characters, not the
+ * spelling — which is what the page shows.
+ */
+const NAMED_REFERENCES: Record<string, string> = { lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0', amp: '&' };
+function decodeCharacterReferences(value: string): string {
+  return value
+    .replace(/&#(\d{1,7});/g, (whole, code: string) => {
+      const point = Number(code);
+      return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : whole;
+    })
+    .replace(/&#[xX]([0-9a-fA-F]{1,6});/g, (whole, code: string) => {
+      const point = Number.parseInt(code, 16);
+      return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : whole;
+    })
+    // `&amp;` last, so a reference written through it is not decoded twice into something else.
+    .replace(/&(lt|gt|quot|apos|nbsp);/g, (whole, name: string) => NAMED_REFERENCES[name] ?? whole)
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * One address, one spelling. A link the source wrote with a literal space comes back from a
+ * re-parse percent-encoded; both name the same page, and reading that as a difference failed pages
+ * whose links were right. Anything that does not parse as a URL is compared as written.
+ */
+function sameAddress(url: string): string {
+  try { return decodeURI(url); } catch { return url; }
 }
 
 /**
@@ -130,7 +206,9 @@ function bareUrlShape(props: FidelityValue, children: Block[]): FidelityValue[] 
   if (children.length || stated.length !== 1) return undefined;
   const [[key, value]] = stated;
   if (!URL_PROPS.includes(key) || typeof value !== 'string' || !/^https?:\/\//i.test(value)) return undefined;
-  return [{ type: 'paragraph', children: [{ type: 'link', url: value, title: '', children: [{ type: 'text', value }] }] }];
+  // An embed shows its address and nothing else, which is what a link to it shows too; both read as
+  // that address, the same way the reader's own autolink of it does.
+  return [{ type: 'paragraph', children: [{ type: 'text', value }] }];
 }
 
 /** A frame (or any captioned wrapper) around exactly one image, as the author sees it: a figure with a caption, or the bare image. */
@@ -284,7 +362,41 @@ function colorSwatchShape(block: { name: string; props: Record<string, string | 
   }];
 }
 
+/** An `<a id="x"></a>` with no content: a link target, never something the page says. */
+function isAnchorShim(block: Block): boolean {
+  if (block.type !== 'component' && block.type !== 'dai') return false;
+  if (block.name !== 'a' || block.children.length) return false;
+  const keys = Object.keys(block.props ?? {});
+  return keys.length > 0 && keys.every((key) => key === 'id' || key === 'name');
+}
+
 function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[] {
+  return mergeAdjacentLists(blocksShapeRaw(blocks, exactComponents));
+}
+
+/**
+ * Two lists written one after another are one list when read back: Markdown has no way to end a
+ * list and start another of the same kind. The items are still compared one for one, so a list
+ * item that went missing still fails; only the split between two adjacent lists is let go.
+ */
+function mergeAdjacentLists(values: FidelityValue[]): FidelityValue[] {
+  const out: FidelityValue[] = [];
+  for (const value of values) {
+    const previous = out[out.length - 1] as { type?: string; ordered?: boolean; start?: unknown; children?: FidelityValue[] } | undefined;
+    const current = value as { type?: string; ordered?: boolean; start?: unknown; children?: FidelityValue[] };
+    // A list written after another of the same kind continues it, whatever number it says it starts
+    // at: Flare writes `<ol start="2">` to resume after an interruption, and Markdown has no way to
+    // say that except by carrying on. The items are still compared one for one.
+    if (previous?.type === 'list' && current?.type === 'list' && previous.ordered === current.ordered) {
+      previous.children = [...(previous.children ?? []), ...(current.children ?? [])];
+      continue;
+    }
+    out.push(value);
+  }
+  return out;
+}
+
+function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValue[] {
   return blocks.flatMap((block): FidelityValue[] => {
     switch (block.type) {
       case 'paragraph': {
@@ -293,6 +405,20 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
         // from a re-parse as nothing, which made a page differ from its own written file. Empty
         // inline text is already dropped above, so this is the same rule one level up.
         const children = inlineShape(block.children);
+        // A code span that runs over several lines is a block of code, not a phrase: it is written
+        // as a fence, and a fence reads back as a code block. Comparing it either way as the block
+        // it is keeps the two spellings equal.
+        const loneCode = children.length === 1 ? (children[0] as { type?: string; value?: string }) : undefined;
+        if (loneCode?.type === 'inlineCode' && loneCode.value?.includes('\n')) return [{ type: 'code', lang: '', meta: '', title: '', value: loneCode.value.replace(/\r\n/g, '\n') }];
+        // A paragraph holding only line breaks is blank space, not something the page says: written
+        // out it is a `<br />` on its own line, which reads back as a bare element rather than a
+        // paragraph around one.
+        if (children.length && children.every((child) => (child as { type?: string }).type === 'break')) return [];
+        // An image alone in a paragraph is written as a line holding only that image, and comes back
+        // from a re-parse as a block image: Markdown has no way to say "this image is wrapped". The
+        // paragraph is the wrapper, not the content, so a lone image reads as the image either way.
+        // A paragraph with an image *and* text keeps its shape, because that text is content.
+        if (children.length === 1 && (children[0] as { type?: string }).type === 'image') return [children[0]];
         return children.length ? [{ type: 'paragraph', children }] : [];
       }
       case 'heading': return [{ type: 'heading', depth: block.depth, children: inlineShape(block.children) }];
@@ -307,10 +433,32 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
         return [{ type: 'code', lang: block.lang ?? '', meta: serializedMeta, title: '', value: block.value.replace(/\r\n/g, '\n') }];
       }
       case 'blockquote': return [{ type: 'blockquote', children: blocksShape(block.children, exactComponents) }];
-      case 'list': return [{ type: 'list', ordered: block.ordered, start: block.start ?? null, children: block.children.map((item) => ({ type: 'listItem', checked: item.checked ?? null, children: blocksShape(item.children, exactComponents) })) }];
-      case 'table': return [{ type: 'table', align: ordered(block.align ?? []), children: block.children.map((row) => ({ type: 'row', header: row.isHeader ?? false, children: row.children.map((cell) => inlineShape(cell.children)) })) }];
+      case 'list': {
+        // Markdown cannot write an ordered list that does not start somewhere, so `1. ` re-parses as
+        // start 1 where the source stated no start at all. They are the same list. A start the source
+        // *did* state is still compared, so a list that begins at 5 and loses it still fails.
+        const start = block.ordered && block.start !== undefined && block.start !== 1 ? block.start : null;
+        // A list with no items writes no lines at all, so it cannot come back from a re-parse. It
+        // states nothing either; a list that *lost* its items fails on the items, not on the list.
+        if (!block.children.length) return [];
+        return [{ type: 'list', ordered: block.ordered, start, children: block.children.map((item) => ({ type: 'listItem', checked: item.checked ?? null, children: blocksShape(item.children, exactComponents) })) }];
+      }
+      case 'table': {
+        // A GFM table must write a delimiter row, which re-parses as one unaligned entry per column
+        // where the source stated no alignment. A table that aligns nothing and a table whose every
+        // column takes the default are the same table; any column the source did align is compared.
+        const stated = (block.align ?? []).map((value) => value ?? null);
+        const align = stated.some((value) => value !== null) ? stated : [];
+        // GFM cannot write a table without a header row, so a source table that has none grows an
+        // empty one on the way out and back. An empty header states nothing; a header with words in
+        // it is content and is compared like any other row.
+        const rows = block.children
+          .map((row) => ({ type: 'row', header: row.isHeader ?? false, children: row.children.map((cell) => inlineShape(cell.children)) }))
+          .filter((row, index) => !(index === 0 && row.header && row.children.every((cell) => !cell.length)));
+        return [{ type: 'table', align: ordered(align), children: rows }];
+      }
       case 'thematicBreak': return [{ type: 'thematicBreak' }];
-      case 'image': return [{ type: 'image', url: block.url, alt: block.alt, title: block.title ?? '', width: block.width ?? null, height: block.height ?? null }];
+      case 'image': return [{ type: 'image', url: sameAddress(block.url), alt: block.alt, title: block.title ?? '', width: block.width ?? null, height: block.height ?? null }];
       case 'figure': {
         if (exactComponents) return [blocksShape([block.image], true)[0], ...(block.caption?.length ? [{ type: 'paragraph', children: [{ type: 'emphasis', children: inlineShape(block.caption) }] } as FidelityValue] : [])];
         // Without a caption a figure says exactly what its image says, so it reads as the image -
@@ -320,6 +468,12 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
         return caption.length ? [{ type: 'figure', image, caption }] : [image];
       }
       case 'component': case 'dai': {
+        // An empty `<a id="...">` is an anchor shim the migrator wrote so a renamed heading keeps the
+        // link target the source gave it. It holds nothing an author wrote, and the resolved IR does
+        // not carry it, so counting it as a block made every page with a shim differ from its own file.
+        if (isAnchorShim(block)) return [];
+        // The same blank space, read back from the file as a bare `br` element.
+        if (block.name === 'br' && !block.children.length) return [];
         if (exactComponents) return [{ type: 'component', name: block.name, props: ordered(block.props), children: blocksShape(block.children, true) }];
         const framed = framedImageShape(block);
         if (framed) return framed;
