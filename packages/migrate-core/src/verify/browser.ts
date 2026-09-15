@@ -430,14 +430,35 @@ export async function runBrowserContentGate(
       }
       if (opts.navigation?.length) {
         if (!opts.navSelector) problems.push('the target platform declares no navigation selector, so the rendered sidebar cannot be checked');
+        else if (!find(root, opts.navSelector)) problems.push(`no rendered navigation matched ${opts.navSelector}`);
         else {
-          const container = find(root, opts.navSelector);
-          if (!container) problems.push(`no rendered navigation matched ${opts.navSelector}`);
-          else {
-            const labels = findAll(container, 'a[href]').map((anchor) => normaliseVisible(visibleText(anchor))).filter(Boolean);
-            const expected = opts.navigation.map((entry) => normaliseVisible(entry.label));
-            if (labels.join('|') !== expected.join('|')) problems.push(`sidebar labels differ: rendered ${JSON.stringify(labels)}, source ${JSON.stringify(expected)}`);
+          // A tabbed site shows one tab's pages at a time, so no single route's sidebar lists the
+          // whole navigation: the demo-64 root page sits in a tab of its own and rendered ["home"]
+          // against all 41 source labels. Each distinct rendered sidebar is one such surface, so
+          // they are read across the routes this gate already rendered (renders are cached, so
+          // reading them again costs nothing), deduplicated, and counted together.
+          //
+          // Counted, not merely present: a page the navigation places twice has to appear twice, or
+          // one of its placements was lost. Summing over distinct sidebars keeps that, and keeps a
+          // label a source states under several tabs - "Getting started" sits under three here -
+          // from having to appear three times in any one of them.
+          const surfaces = new Map<string, string[]>();
+          for (const entry of pages) {
+            if (!entry.migrate || !entry.newPath) continue;
+            try {
+              const container = find(parseHtml(await render(routeUrl(previewUrl, entry.newPath))), opts.navSelector);
+              if (!container) continue;
+              const labels = findAll(container, 'a[href]').map((anchor) => normaliseVisible(visibleText(anchor))).filter(Boolean);
+              if (labels.length) surfaces.set(labels.join('|'), labels);
+            } catch { /* a route that will not load is already reported as that route's own failure */ }
           }
+          const shown = new Map<string, number>();
+          for (const labels of surfaces.values()) for (const label of labels) shown.set(label, (shown.get(label) ?? 0) + 1);
+          const wanted = new Map<string, number>();
+          for (const entry of opts.navigation) { const label = normaliseVisible(entry.label); if (label) wanted.set(label, (wanted.get(label) ?? 0) + 1); }
+          const missing = [...wanted.entries()].filter(([label, count]) => (shown.get(label) ?? 0) < count)
+            .map(([label, count]) => `${JSON.stringify(label)} placed ${count}\u00d7, shown ${shown.get(label) ?? 0}\u00d7`);
+          if (missing.length) problems.push(`sidebar labels differ: navigation placements the rendered sidebars never show: ${missing.slice(0, 12).join('; ')}`);
         }
       }
     } catch (error) {

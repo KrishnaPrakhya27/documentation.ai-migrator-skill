@@ -615,6 +615,37 @@ describe('gates', () => {
     expect(once.gate.status).toBe('fail');
     expect(once.routes.find((route) => route.route === '(site)')!.problems.join(' ')).toContain('sidebar labels differ');
   });
+  /**
+   * A tabbed target shows one tab's pages at a time, so no single route's sidebar lists the whole
+   * navigation. The demo-64 root page sits in a tab of its own and rendered ["home"] against all 41
+   * source labels, which read as a lost sidebar on a site whose navigation was intact.
+   */
+  it('reads the sidebar across tabs, where no one route shows the whole navigation', async () => {
+    const doc = (title: string) => markdownToIr(`---\ntitle: ${title}\n---\n\nOne.\n`, { platform: 'gitbook', file: `${title}.md`, pageId: title });
+    const sidebars: Record<string, string[]> = { home: ['Home'], guides: ['Quickstart', 'Guides', 'Getting started'], help: ['Help Center', 'Getting started'] };
+    const render = async (url: string) => {
+      const route = url.split('/').pop()!;
+      const labels = sidebars[route] ?? [];
+      return `<html><head><title>Home - Acme Docs</title></head><body><nav>${labels.map((label) => `<a href="/x">${label}</a>`).join('')}</nav><main><h1>${route}</h1><p>One.</p></main></body></html>`;
+    };
+    const pages = ['home', 'guides', 'help'].map((name) => ({ id: name, newPath: name, migrate: true, doc: doc(name) }));
+    // "Getting started" is placed under two tabs and appears once in each rendered sidebar.
+    const navigation = [
+      { groupPath: ['Home'], label: 'Home' }, { groupPath: ['Guides'], label: 'Quickstart' }, { groupPath: ['Guides'], label: 'Guides' },
+      { groupPath: ['Guides'], label: 'Getting started' }, { groupPath: ['Help'], label: 'Help Center' }, { groupPath: ['Help'], label: 'Getting started' },
+    ];
+    const options = { navigation, navSelector: 'nav', siteName: 'Acme Docs' };
+    const whole = await runBrowserContentGate('https://preview.example/', pages, { ...options, render });
+    expect(whole.routes.find((route) => route.route === '(site)')!.problems).toEqual([]);
+
+    // A tab whose sidebar drops an entry is still a lost placement.
+    const lost = await runBrowserContentGate('https://preview.example/', pages, {
+      ...options,
+      render: async (url: string) => (url.endsWith('/help') ? render(url).then((html) => html.replace('<a href="/x">Getting started</a>', '')) : render(url)),
+    });
+    expect(lost.routes.find((route) => route.route === '(site)')!.problems.join(' ')).toContain('"getting started" placed 2\u00d7, shown 1\u00d7');
+  });
+
   it('rejects a private preview target unless local testing is explicitly enabled', async () => {
     const previous = process.env.DAI_ALLOW_LOCAL_PREVIEW;
     delete process.env.DAI_ALLOW_LOCAL_PREVIEW;
