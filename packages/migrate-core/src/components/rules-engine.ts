@@ -127,6 +127,17 @@ function matches(rule: MappingRule, node: ComponentNode): boolean {
   return true;
 }
 
+/** The plain text a run of blocks states, as one string; undefined when they state none. */
+function blocksText(blocks: readonly Block[]): string | undefined {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === 'paragraph' || block.type === 'heading') parts.push(inlineText(block.children));
+    else if (block.type === 'code') parts.push(block.value);
+  }
+  const text = parts.join('\n\n').trim();
+  return text || undefined;
+}
+
 /** Restructure handlers (T3). */
 const HANDLERS: Record<string, RestructureHandler> = {
   /** Wrapper whose children are cards: <CardGroup cols={3}> → <Columns cols={3}> with Card children. */
@@ -209,6 +220,59 @@ const HANDLERS: Record<string, RestructureHandler> = {
     const [first, ...rest] = node.children;
     if (!id || first?.type !== 'heading') return quarantined(node, 'a div carrying an id is a heading anchor only when a heading leads it; this one does not');
     return { blocks: [{ ...first, sourceId: id }, ...rest] };
+  } },
+  /**
+   * The card-shaped families. Mintlify spells a linked card several ways - ThemeCard, HeroCard,
+   * Tile, PreviewButton, GitHub.Repo - and each is a title, a link and some supporting text, which
+   * is what the target's Card is. The description is a prop here and a child there, so it becomes
+   * the card's own text; an image child becomes the card image; a GitHub repo becomes its URL.
+   * None of this is decoration: the link is the point of the component, and a fragment loses it.
+   */
+  'to-card': { reads: ['title', 'href', 'description', 'icon', 'image', 'cta', 'repo', 'horizontal'], run: (node, rule) => {
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+    const repo = str(node.props.repo);
+    const images = node.children.filter((child): child is Extract<Block, { type: 'image' }> => child.type === 'image');
+    const rest = node.children.filter((child) => child.type !== 'image');
+    const title = str(node.props.title) ?? repo ?? blocksText(rest) ?? 'Card';
+    const href = str(node.props.href) ?? (repo ? `https://github.com/${repo}` : undefined);
+    const description = str(node.props.description);
+    // The label of a button-shaped card became its title, so it is not repeated as body text.
+    const body = str(node.props.title) || repo ? rest : [];
+    const children: Block[] = [
+      ...(description ? [{ id: `${node.id}:desc`, type: 'paragraph' as const, children: [{ id: `${node.id}:desc:t`, type: 'text' as const, value: description }] }] : []),
+      ...body,
+    ];
+    const props: Record<string, string | number | boolean | null> = { title };
+    if (href) props.href = href;
+    const image = str(node.props.image) ?? (images[0] ? images[0].url : undefined);
+    if (image) props.image = image;
+    if (str(node.props.icon)) props.icon = str(node.props.icon)!;
+    const lossy = repo ? ['the repository card no longer reads live stars and forks from the GitHub API'] : [];
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Card', props, children, rule: rule.id }], lossy };
+  } },
+  /** A colour swatch is a named value: the name titles a card and the value is a code block, which the target renders with a copy button. */
+  'color-item-to-card': { reads: ['name', 'value'], run: (node, rule) => {
+    const name = typeof node.props.name === 'string' ? node.props.name : '';
+    const value = typeof node.props.value === 'string' ? node.props.value : '';
+    if (!name && !value) return quarantined(node, 'a colour swatch states neither a name nor a value');
+    const code: Block = { id: `${node.id}:val`, type: 'code', value, lang: 'css' };
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Card', props: { title: name || value }, children: value ? [code] : [], rule: rule.id }], lossy: ['the swatch no longer paints its colour; its value is shown as a copyable code block'] };
+  } },
+  /** A file in a tree is a leaf: its name is the content, and the folder around it carries the disclosure. */
+  'tree-file-to-text': { reads: ['name'], run: (node) => {
+    const name = typeof node.props.name === 'string' ? node.props.name : '';
+    if (!name) return quarantined(node, 'a tree file states no name');
+    return { blocks: [{ id: node.id, type: 'paragraph', children: [{ id: `${node.id}:t`, type: 'inlineCode', value: name }] }] };
+  } },
+  /** A prompt is text meant to be copied, which is what a code block is; its description becomes the line introducing it. */
+  'prompt-to-code': { reads: ['description', 'actions'], run: (node) => {
+    const description = typeof node.props.description === 'string' ? node.props.description.trim() : '';
+    const value = blocksText(node.children) ?? '';
+    if (!value) return quarantined(node, 'a prompt holds no text to copy');
+    const blocks: Block[] = [];
+    if (description) blocks.push({ id: `${node.id}:desc`, type: 'paragraph', children: [{ id: `${node.id}:desc:t`, type: 'text', value: description }] });
+    blocks.push({ id: `${node.id}:code`, type: 'code', value, lang: 'text' });
+    return { blocks, lossy: ['the prompt\'s "open in editor" actions are not carried; the text stays copyable'] };
   } },
   /** Frame around one image: a figure when it carries a caption, otherwise the bare image (the frame itself is presentation). */
   'frame-to-image': { reads: ['caption'], run: (node) => {

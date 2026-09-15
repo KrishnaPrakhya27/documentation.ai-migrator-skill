@@ -57,6 +57,46 @@ describe('Markdown/MDX → IR', () => {
     expect(doc.children.some((x) => x.type === 'table')).toBe(true);
   });
 
+  it('maps a component by what it does when the target spells it differently', () => {
+    // A file tree is a group of disclosures; a swatch is a named value; a themed card is a link.
+    // Reporting these as "no target equivalent" would ship dead HTML where the target has the behaviour.
+    const md = [
+      '<Tree>',
+      '  <Tree.Folder name="app" defaultOpen>',
+      '    <Tree.File name="page.tsx" />',
+      '  </Tree.Folder>',
+      '</Tree>',
+      '',
+      '<Color.Row title="Primary">',
+      '  <Color.Item name="primary-500" value="#3B82F6" />',
+      '</Color.Row>',
+      '',
+      '<ThemeCard title="Mint" value="mint" description="Classic theme." href="https://mint.example" />',
+      '',
+      '<GitHub.Repo repo="anthropics/claude-code" />',
+    ].join('\n');
+    const doc = markdownToIr(md + '\n', { platform: 'mintlify', file: 'a.mdx', pageId: 'p' });
+    const w = mkdtempSync(join(tmpdir(), 'dai-semantic-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: loadMappings([join(repoRoot, 'skills/migrate-mintlify/mappings/mintlify.yaml'), join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w) });
+    const out = engine.resolveDoc(doc);
+    rmSync(w, { recursive: true, force: true });
+    const named: Array<{ name: string; props: any }> = [];
+    walkBlocks(out.children, (n: any) => { if (n.type === 'dai') named.push({ name: n.name, props: n.props }); });
+    const byName = (n: string) => named.filter((x) => x.name === n);
+    // the tree keeps a real disclosure rather than flattening into a fragment
+    expect(byName('ExpandableGroup')).toHaveLength(1);
+    expect(byName('Expandable')[0].props).toMatchObject({ title: 'app', defaultOpen: true });
+    // the swatch row becomes columns of cards, each value copyable
+    expect(byName('Columns')).toHaveLength(1);
+    expect(byName('Card').some((c) => c.props.title === 'primary-500')).toBe(true);
+    // the themed card keeps the link that is the point of it
+    expect(byName('Card').some((c) => c.props.title === 'Mint' && c.props.href === 'https://mint.example')).toBe(true);
+    // a repo card becomes a link to the repository
+    expect(byName('Card').some((c) => c.props.href === 'https://github.com/anthropics/claude-code')).toBe(true);
+    // and nothing survives as an unmapped source component
+    expect(JSON.stringify(out.children)).not.toContain('"name":"Tree.Folder"');
+  });
+
   it('keeps an operator decision across re-planning and recomputes a derivation', () => {
     // A rule added after the plan was written must take effect, or a migrator fix silently does nothing.
     expect(planEntryIsDecided(undefined)).toBe(false);
