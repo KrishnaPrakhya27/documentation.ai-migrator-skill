@@ -126,11 +126,16 @@ function bareUrlShape(props: FidelityValue, children: Block[]): FidelityValue[] 
 
 /** A frame (or any captioned wrapper) around exactly one image, as the author sees it: a figure with a caption, or the bare image. */
 function framedImageShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
-  if (block.children.length !== 1 || block.children[0].type !== 'image') return undefined;
+  // Published Markdown leaves blank paragraphs between blocks inside a wrapper; they are not content,
+  // which is the rule the paragraph branch already applies one level down.
+  const content = block.children.filter((child) => !(child.type === 'paragraph' && !inlineShape(child.children).length));
+  // A frame commonly holds the light and dark spellings of one picture, so a frame whose whole
+  // content is images reads as those images - which is what unwrapping it produces.
+  if (!content.length || !content.every((child) => child.type === 'image')) return undefined;
   const caption = typeof block.props.caption === 'string' ? cleanText(block.props.caption) : '';
-  const image = blocksShape(block.children, false)[0];
-  if (caption) return [{ type: 'figure', image, caption: [{ type: 'text', value: caption }] }];
-  return FRAME_COMPONENTS.has(block.name) ? [image] : undefined;
+  const images = blocksShape(content, false);
+  if (caption) return content.length === 1 ? [{ type: 'figure', image: images[0], caption: [{ type: 'text', value: caption }] }] : undefined;
+  return FRAME_COMPONENTS.has(block.name) ? images : undefined;
 }
 
 /**
@@ -173,6 +178,27 @@ function promptShape(block: { name: string; props: Record<string, string | numbe
     ...(description ? [{ type: 'paragraph', children: [{ type: 'text', value: description }] } as FidelityValue] : []),
     { type: 'code', lang: 'text', meta: '', title: '', value },
   ];
+}
+
+/** Source components whose label is their content and becomes the card's title. */
+const LABELLED_CARDS = new Set(['PreviewButton', 'GitHub.Repo']);
+
+/**
+ * A button and a repository card are a link with a label. The conversion makes each a Card, whose
+ * title is that label - so the words move from the children into a prop rather than disappearing,
+ * and a repo name becomes the address it always pointed at.
+ *
+ * Keyed to these component names, so it cannot become a general rule that any component's text may
+ * reappear as a title: that would let a conversion move content anywhere and still pass.
+ */
+function labelledCardShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (!LABELLED_CARDS.has(block.name)) return undefined;
+  const repo = typeof block.props.repo === 'string' ? block.props.repo.trim() : '';
+  const label = cleanText(block.children.map((child) => (child.type === 'paragraph' || child.type === 'heading' ? inlineText(child.children) : '')).join(' '));
+  const title = repo || label;
+  if (!title) return undefined;
+  const href = typeof block.props.href === 'string' ? block.props.href : repo ? `https://github.com/${repo}` : undefined;
+  return [{ type: 'component', props: ordered({ ...(href ? { href } : {}), title }), children: [] }];
 }
 
 function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[] {
@@ -218,6 +244,8 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
         if (anchored) return anchored;
         const prompt = promptShape(block);
         if (prompt) return prompt;
+        const labelled = labelledCardShape(block);
+        if (labelled) return labelled;
         const bare = bareUrlShape(contentProps(block.props), block.children);
         if (bare) return bare;
         const folded = titleFold(contentProps(block.props), block.children);
