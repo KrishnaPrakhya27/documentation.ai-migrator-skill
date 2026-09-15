@@ -691,6 +691,21 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(flatten(tabs[0].children)).toEqual(['http://8.8.8.8/docs', 'http://8.8.8.8/docs/guides/one']);
     expect(flatten(tabs[2].children)).toEqual(['http://8.8.8.8/docs/documentation/fr', 'http://8.8.8.8/docs/documentation/fr/demarrage']);
   });
+  it('resolves a host once per run, so a crawl does not put one query per request through the resolver', async () => {
+    const { assertPublicHost } = await import('../src/scrape/fetcher.js');
+    let calls = 0;
+    const lookup = async (hostname: string) => { calls++; return [{ address: '8.8.4.4', family: 4 }]; };
+    const host = `once-${Math.random().toString(36).slice(2)}.example`;
+    await assertPublicHost(new URL(`https://${host}/a`), lookup);
+    await assertPublicHost(new URL(`https://${host}/b`), lookup);
+    await assertPublicHost(new URL(`https://${host}/c`), lookup);
+    expect(calls).toBe(1);
+    // a private address is still refused, and refusing it caches nothing
+    const bad = `bad-${Math.random().toString(36).slice(2)}.example`;
+    const privateLookup = async () => [{ address: '127.0.0.1', family: 4 }];
+    await expect(assertPublicHost(new URL(`https://${bad}/a`), privateLookup)).rejects.toThrow(/non-public address/);
+    await expect(assertPublicHost(new URL(`https://${bad}/b`), privateLookup)).rejects.toThrow(/non-public address/);
+  });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);
     expect(siteFileBases('https://acme.example/docs/')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);

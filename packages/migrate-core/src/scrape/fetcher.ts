@@ -130,6 +130,13 @@ export async function assertPublicHost(url: URL, resolveHost: HostLookup = dnsLo
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`refused non-http url ${url}`);
   const host = url.hostname;
   if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) throw new Error(`refused local host ${host}`);
+  // A host validated earlier in this run is not resolved again. The dispatcher already connects
+  // only to the addresses validated the first time, so re-resolving decided nothing — and asking
+  // the resolver once per request put a thousand queries through it for one crawl, which a local
+  // stub resolver answers with EAI_AGAIN partway through, losing pages to a fault that is not the
+  // site's.
+  const validated = validatedAddresses.get(host.toLowerCase());
+  if (validated?.length) return validated[0].address;
   const addresses = isIP(host) ? [{ address: host }] : await resolveHost(host);
   if (!addresses.length) throw new Error(`no DNS addresses for ${host}`);
   const blocked = addresses.find((x) => !isPublicAddress(x.address));
