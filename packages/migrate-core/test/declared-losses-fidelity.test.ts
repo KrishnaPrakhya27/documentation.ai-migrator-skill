@@ -128,6 +128,29 @@ describe('authoredContentSnapshot: two spellings of the same words', () => {
     expect(firstFidelityDifference(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBeDefined();
   });
 
+  /**
+   * A GitBook `<update date="…">` opens with a heading the author wrote and the conversion keeps as
+   * a heading; its date becomes the Update's label. Reading that heading as the update's title made
+   * the source disagree with an output that was correct.
+   */
+  it('leaves an update\'s own leading heading a heading, and reads its date as the label', () => {
+    const source = doc([component('update', { date: '2025-12-03' }, [heading(2, 'Product update'), para('See what is new.')])]);
+    const output = doc([component('Update', { label: '2025-12-03' }, [heading(2, 'Product update'), para('See what is new.')])]);
+    expect(fidelityEqual(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBe(true);
+  });
+
+  it("still fails when an update's leading heading is lost", () => {
+    const source = doc([component('update', { date: '2025-12-03' }, [heading(2, 'Product update'), para('See what is new.')])]);
+    const output = doc([component('Update', { label: '2025-12-03' }, [para('See what is new.')])]);
+    expect(firstFidelityDifference(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBeDefined();
+  });
+
+  it('still fails when an update label carries a date the source never stated', () => {
+    const source = doc([component('update', { date: '2025-12-03' }, [para('See what is new.')])]);
+    const output = doc([component('Update', { label: '2024-01-01' }, [para('See what is new.')])]);
+    expect(firstFidelityDifference(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBeDefined();
+  });
+
   it('keeps both when a component states a title and opens with a heading', () => {
     const source = doc([component('card', { title: 'Stated' }, [heading(3, 'Also a heading'), para('Body.')])]);
     const output = doc([component('Card', { title: 'Stated' }, [para('Body.')])]);

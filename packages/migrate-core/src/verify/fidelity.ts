@@ -37,7 +37,7 @@ function inlineShape(nodes: Inline[]): FidelityValue[] {
  */
 const VISUAL_PROPS = new Set(['arrow', 'class', 'className', 'color', 'columns', 'cols', 'defaultOpen', 'horizontal', 'icon', 'iconType', 'kind', 'style', 'theme', 'titleType', 'type']);
 /** Source spellings of a target prop. An alias stands in only while the canonical prop is absent, so the two can never collide. */
-const PROP_ALIASES: Record<string, string> = { summary: 'title', label: 'title', img: 'image' };
+const PROP_ALIASES: Record<string, string> = { summary: 'title', label: 'title', date: 'title', img: 'image' };
 /** HTML data-* attributes are machine metadata (Mintlify's data-path is the asset's repository path), never rendered content. */
 const DATA_ATTRIBUTE = /^data-/;
 /** Source components whose only job is to frame one image; without a caption they are the image. */
@@ -62,12 +62,15 @@ function contentProps(props: Record<string, string | number | boolean | null>): 
  * absent title canonicalises both spellings, on both sides of the comparison, so the words still
  * have to match and a heading the conversion simply lost still fails.
  *
- * Only an absent title is filled: a component that states both keeps both, so neither can mask the other.
+ * Only a component that states no content of its own is folded. One that states anything - a title,
+ * an Update's date - keeps its leading heading as a heading, which is what the author wrote: a
+ * GitBook `<update date="…">` opens with an `## Product update` heading that stays a heading, and
+ * folding it would have read that heading as the update's label.
  */
 function titleFold(props: FidelityValue, children: Block[]): { props: FidelityValue; children: Block[] } {
   const stated = props as Record<string, FidelityValue>;
   const [first, ...rest] = children;
-  if (stated.title !== undefined || first?.type !== 'heading') return { props, children };
+  if (Object.keys(stated).length || first?.type !== 'heading') return { props, children };
   const words = cleanText(inlineShape(first.children).map((node) => ((node as { value?: string }).value ?? '')).join(' '));
   if (!words) return { props, children };
   return { props: ordered({ ...stated, title: words }), children: rest };
