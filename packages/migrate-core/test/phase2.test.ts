@@ -6,11 +6,11 @@ import { gzipSync } from 'node:zlib';
 import { Response as UndiciResponse } from 'undici';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { CanonicalHosts, Fetcher, discoverSitemaps, type FetchImpl } from '../src/scrape/fetcher.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, sitemapStructureHint } from '../src/scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, normaliseDiscoveryUrl, siteFileBases, sitemapStructureHint } from '../src/scrape/discovery.js';
 import { getProfile, profileHostAliases } from '../src/scrape/profiles.js';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { htmlAdapterOptions } from '../src/scrape/profiles.js';
-import { markdownAlternateUrl, parseLlmsTxt, publishedMarkdownProblem, unwrapPublishedMarkdown } from '../src/scrape/published-markdown.js';
+import { markdownAlternateUrl, parseLlmsIndex, parseLlmsTxt, publishedMarkdownProblem, unwrapPublishedMarkdown } from '../src/scrape/published-markdown.js';
 import { acquirePages, acquiredPath, type AcquiredPage } from '../src/scrape/acquire.js';
 import { sha256 } from '../src/session/ids.js';
 import { offlineFetcher, syntheticSiteFetcher } from './helpers/fixture-fetcher.js';
@@ -530,6 +530,186 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(() => parseLlmsTxt('- [Rel](/rel.md): r\n')).toThrow(/unresolvable URL \/rel\.md/);
     expect(() => parseLlmsTxt(`- [A](${APP}/x.md): one\n- [B](${APP}/x.md): two\n`)).toThrow(/lists \/x twice with different metadata/);
   });
+  it('separates the nested indexes an llms.txt points at from the pages it lists', () => {
+    // Mintlify publishes most of a multi-locale site's page list under /_llms/ and links those
+    // indexes from llms.txt: an entry under that segment is a route to follow, not a page.
+    const body = [
+      `- [Documentation (181 pages)](${APP}/_llms/en/documentation.md): Documentation for Documentation.`,
+      `- [Quickstart](${APP}/quickstart.md): Start here.`,
+      `- [English / Documentation (181 pages)](${APP}/_llms/en/documentation.md): Documentation for English / Documentation.`,
+      `- [French (255 pages)](${APP}/_llms/fr.md): Documentation for French.`,
+    ].join('\n');
+    const parsed = parseLlmsIndex(body, `${APP}/llms.txt`, { indexSegment: '_llms' });
+    expect(parsed.entries).toEqual([{ title: 'Quickstart', description: 'Start here.', mdUrl: `${APP}/quickstart.md`, path: '/quickstart' }]);
+    // One index listed twice under different labels is one index; a label naming a route is not a page title to reconcile.
+    expect(parsed.indexes).toEqual([
+      { title: 'Documentation (181 pages)', url: `${APP}/_llms/en/documentation.md` },
+      { title: 'French (255 pages)', url: `${APP}/_llms/fr.md` },
+    ]);
+    // Without a declared segment every entry is a page, so the same two listings are a contradiction.
+    expect(() => parseLlmsIndex(body, `${APP}/llms.txt`)).toThrow(/lists \/_llms\/en\/documentation twice with different metadata/);
+    expect(parseLlmsIndex(`- [Quickstart](${APP}/quickstart.md): Start here.`, `${APP}/llms.txt`).indexes).toEqual([]);
+  });
+  it('follows the nested indexes an llms.txt names, so a site that lists its pages there migrates whole', async () => {
+    const site = syntheticSiteFetcher({
+      host: SITE_HOST,
+      pages: {
+        '/': { html: HOME_HTML, md: HOME_MD },
+        '/guides/setup': { html: SETUP_HTML, md: SETUP_MD },
+        '/fr/demarrage': { html: SETUP_HTML, md: SETUP_MD },
+      },
+      llmsTxt: [
+        `- [Acme Docs](${SITE}/index.md): Welcome to Acme.`,
+        `- [Documentation](${SITE}/_llms/en.md): Documentation for Documentation.`,
+        `- [French](${SITE}/_llms/fr.md): Documentation for French.`,
+      ].join('\n'),
+      llmsIndexes: {
+        '/_llms/en.md': `- [Setup](${SITE}/guides/setup.md): Install Acme.`,
+        // A locale index names the deeper index, which the root does not: the walk reaches it through this one.
+        '/_llms/fr.md': `- [Demarrage](${SITE}/fr/demarrage.md): Commencez ici.\n- [French / Documentation](${SITE}/_llms/fr/documentation.md): more`,
+        // Already-seen pages, reached a second way: one index read, no duplicate page.
+        '/_llms/fr/documentation.md': `- [Demarrage](${SITE}/fr/demarrage.md): Commencez ici.`,
+      },
+    });
+    const fetcher = offlineFetcher(site, { workspace: ws(), allowHosts: [SITE_HOST], canonicalHosts: new CanonicalHosts(SITE) });
+    const found = await discoverLiveSite({ seedUrl: SITE, fetcher, profile: getProfile('mintlify') });
+    // Every page the site states, including the 2 that only the nested indexes list.
+    expect(found.llms?.entries.map((entry) => entry.path).sort()).toEqual(['/', '/fr/demarrage', '/guides/setup']);
+    expect(found.structuralIssues ?? []).toEqual([]);
+    // The indexes are routes, never pages to migrate, and one reached twice is read once.
+    expect(found.pages.map((page) => new URL(page.url).pathname)).not.toContain('/_llms/en');
+    expect(site.requests.filter((url) => url === `${SITE}/_llms/fr/documentation.md`)).toHaveLength(1);
+  });
+  it('treats an llms.txt entry that links to another site as a reference, not a page of this one', async () => {
+    // Mintlify's docs link learn.mintlify.com once per locale, each with a localised label. Its path
+    // is another site's path, so admitting it would invent a page and collide across the locales.
+    const site = syntheticSiteFetcher({
+      host: SITE_HOST,
+      pages: { '/': { html: HOME_HTML, md: HOME_MD }, '/guides/setup': { html: SETUP_HTML, md: SETUP_MD } },
+      llmsTxt: [
+        `- [Acme Docs](${SITE}/index.md): Welcome to Acme.`,
+        `- [Learn](https://learn.acme.example/): Self-paced lessons.`,
+        `- [French](${SITE}/_llms/fr.md): Documentation for French.`,
+      ].join('\n'),
+      llmsIndexes: {
+        '/_llms/fr.md': [
+          `- [Setup](${SITE}/guides/setup.md): Install Acme.`,
+          `- [Apprendre](https://learn.acme.example/): Lecons en autonomie.`,
+        ].join('\n'),
+      },
+    });
+    const fetcher = offlineFetcher(site, { workspace: ws(), allowHosts: [SITE_HOST], canonicalHosts: new CanonicalHosts(SITE) });
+    const found = await discoverLiveSite({ seedUrl: SITE, fetcher, profile: getProfile('mintlify') });
+    expect(found.llms?.entries.map((entry) => entry.path).sort()).toEqual(['/', '/guides/setup']);
+    // Two localised labels for one off-site link are not a contradiction about a page of this site.
+    expect(found.structuralIssues ?? []).toEqual([]);
+    // Recorded once, so the exclusion is reviewable rather than silent.
+    expect(found.externalLlmsLinks).toEqual([{ title: 'Learn', url: 'https://learn.acme.example/' }]);
+    expect(found.pages.map((page) => new URL(page.url).hostname)).not.toContain('learn.acme.example');
+  });
+  it('refuses to certify a page list when an index the source names cannot be read', async () => {
+    const site = syntheticSiteFetcher({
+      host: SITE_HOST,
+      pages: { '/': { html: HOME_HTML, md: HOME_MD } },
+      llmsTxt: `- [Acme Docs](${SITE}/index.md): Welcome to Acme.\n- [Documentation](${SITE}/_llms/en.md): Documentation for Documentation.`,
+    });
+    const fetcher = offlineFetcher(site, { workspace: ws(), allowHosts: [SITE_HOST], canonicalHosts: new CanonicalHosts(SITE) });
+    const found = await discoverLiveSite({ seedUrl: SITE, fetcher, profile: getProfile('mintlify') });
+    // The pages that index lists are not merely unreachable, they are unknown; exact mode stops on this.
+    expect(found.structuralIssues?.join(' ')).toMatch(/_llms\/en\.md.*pages it lists are unknown/);
+  });
+  it('looks for a site-level file under the site the operator named before the origin root', () => {
+    expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);
+    expect(siteFileBases('https://acme.example/docs/')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);
+    expect(siteFileBases('https://acme.example/')).toEqual(['https://acme.example/']);
+    expect(siteFileBases('https://acme.example/a/b/c/d/e')).toEqual([
+      'https://acme.example/a/b/c/d/e/', 'https://acme.example/a/b/c/d/', 'https://acme.example/a/b/c/', 'https://acme.example/',
+    ]);
+  });
+  it('reads the index and sitemap of a site published under a path prefix, not the marketing site its origin root redirects to', async () => {
+    // One host serving a marketing site at the root and the documentation under /docs: the origin's
+    // robots.txt, sitemap.xml and llms.txt all belong to the marketing site, which lists pages that are
+    // not documentation and, listed twice under different names, cannot even be read as an index.
+    const marketing = 'http://1.1.1.1';
+    const site = (async (input: any) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.hostname === '1.1.1.1') {
+        if (url.pathname === '/robots.txt') return new Response('', { status: 200, headers: { 'content-type': 'text/plain' } });
+        if (url.pathname === '/llms.txt') return new Response(`- [Knowledge base](${marketing}/solutions/kb): one\n- [Internal knowledge base](${marketing}/solutions/kb): two\n`, { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+        if (url.pathname === '/sitemap.xml') return new Response(`<urlset><url><loc>${marketing}/pricing</loc></url><url><loc>${marketing}/careers</loc></url></urlset>`, { status: 200, headers: { 'content-type': 'application/xml' } });
+        return new Response('nope', { status: 404 });
+      }
+      // every site-level file at the origin root is the marketing site's
+      if (['/llms.txt', '/sitemap.xml', '/robots.txt'].includes(url.pathname)) return new Response('', { status: 302, headers: { location: `${marketing}${url.pathname}` } });
+      if (url.pathname === '/docs/llms.txt') return new Response('- [Quickstart](http://8.8.8.8/docs/quickstart.md): Start here.\n', { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      if (url.pathname === '/docs/sitemap.xml') return new Response('<urlset><url><loc>http://8.8.8.8/docs/quickstart</loc></url><url><loc>http://8.8.8.8/docs/fr/demarrage</loc></url></urlset>', { status: 200, headers: { 'content-type': 'application/xml' } });
+      if (url.pathname.endsWith('.md')) return new Response('# Quickstart\n', { status: 200, headers: { 'content-type': 'text/markdown; charset=utf-8' } });
+      if (url.pathname.endsWith('.xml')) return new Response('nope', { status: 404 });
+      if (url.pathname === '/docs' || url.pathname.startsWith('/docs/')) return new Response('<html><title>Docs</title></html>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+      return new Response('nope', { status: 404 });
+    }) as unknown as FetchImpl;
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/docs', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('gitbook') });
+    // the site's own index, not the marketing one, whose duplicate entry would have thrown
+    expect(found.llms?.url).toBe('http://8.8.8.8/docs/llms.txt');
+    expect(found.llms?.entries.map((entry) => entry.path)).toEqual(['/docs/quickstart']);
+    // the site's own index answered, so the marketing one at the origin root was never even read;
+    // the only thing reported is the origin robots.txt that belongs to the marketing site
+    expect(found.failures.map((failure) => failure.error)).toEqual([expect.stringMatching(/robots\.txt: served by 1\.1\.1\.1, a different site/)]);
+    // the locale page exists only in the site's own sitemap, and no marketing page became a documentation page
+    expect(found.pages.map((page) => page.url).sort()).toEqual(['http://8.8.8.8/docs', 'http://8.8.8.8/docs/fr/demarrage', 'http://8.8.8.8/docs/quickstart']);
+    expect(found.canonicalHosts).not.toContain('1.1.1.1');
+  });
+  it('refuses a site-level index that redirects to another site instead of reading it as this site’s', async () => {
+    // Nothing is published under the seed's own path, so the origin root is tried and lands on a
+    // different site. Its entries are that site's pages; reading them here would invent pages.
+    const site = (async (input: any) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.hostname === '1.1.1.1') return new Response('- [A](http://1.1.1.1/x.md): one\n- [B](http://1.1.1.1/x.md): two\n', { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      if (url.pathname === '/llms.txt') return new Response('', { status: 302, headers: { location: 'http://1.1.1.1/llms.txt' } });
+      if (url.pathname === '/docs') return new Response('<html><title>Docs</title></html>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+      return new Response('nope', { status: 404 });
+    }) as unknown as FetchImpl;
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/docs', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('gitbook') });
+    // refused and reported, rather than throwing on the other site's duplicate entry or adopting its pages
+    expect(found.llms).toBeUndefined();
+    expect(found.failures.some((failure) => /llms\.txt: redirected to http:\/\/1\.1\.1\.1\/llms\.txt, which is a different site/.test(failure.error))).toBe(true);
+    expect(found.pages.map((page) => page.url)).toEqual(['http://8.8.8.8/docs']);
+  });
+  it('does not treat the Sitemap directives of a redirected robots.txt as this site’s hosts', async () => {
+    // The origin's robots.txt redirects to the marketing site, whose Sitemap directive names its own
+    // host. Adopting that host would canonicalise every marketing URL onto the seed origin and admit
+    // the marketing inventory as documentation pages.
+    const site = (async (input: any) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.hostname === '1.1.1.1') {
+        if (url.pathname === '/robots.txt') return new Response('User-agent: *\nSitemap: http://1.1.1.1/sitemap.xml\n', { status: 200, headers: { 'content-type': 'text/plain' } });
+        if (url.pathname === '/sitemap.xml') return new Response('<urlset><url><loc>http://1.1.1.1/blog/post</loc></url><url><loc>http://1.1.1.1/pricing</loc></url></urlset>', { status: 200, headers: { 'content-type': 'application/xml' } });
+        return new Response('nope', { status: 404 });
+      }
+      if (url.pathname === '/robots.txt') return new Response('', { status: 302, headers: { location: 'http://1.1.1.1/robots.txt' } });
+      if (url.pathname === '/docs/sitemap.xml') return new Response('<urlset><url><loc>http://8.8.8.8/docs/quickstart</loc></url></urlset>', { status: 200, headers: { 'content-type': 'application/xml' } });
+      if (url.pathname.endsWith('.xml') || url.pathname.endsWith('.txt')) return new Response('nope', { status: 404 });
+      if (url.pathname === '/docs' || url.pathname.startsWith('/docs/')) return new Response('<html><title>Docs</title></html>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+      return new Response('nope', { status: 404 });
+    }) as unknown as FetchImpl;
+    const found = await discoverLiveSite({ seedUrl: 'http://8.8.8.8/docs', fetcher: new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000 }), profile: getProfile('gitbook') });
+    expect(found.canonicalHosts).not.toContain('1.1.1.1');
+    expect(found.pages.map((page) => page.url).sort()).toEqual(['http://8.8.8.8/docs', 'http://8.8.8.8/docs/quickstart']);
+    expect(found.failures.some((failure) => /robots\.txt: served by 1\.1\.1\.1, a different site/.test(failure.error))).toBe(true);
+  });
+  it('does not adopt a host the origin root only redirects to as the site’s canonical name', async () => {
+    const site = (async (input: any) => {
+      const url = new URL(typeof input === 'string' ? input : input.toString());
+      if (url.hostname === '1.1.1.1') return new Response('<urlset><url><loc>http://1.1.1.1/pricing</loc></url></urlset>', { status: 200, headers: { 'content-type': 'application/xml' } });
+      if (url.pathname === '/sitemap.xml') return new Response('', { status: 302, headers: { location: 'http://1.1.1.1/sitemap.xml' } });
+      return new Response('nope', { status: 404 });
+    }) as unknown as FetchImpl;
+    const hosts = new CanonicalHosts('http://8.8.8.8');
+    const maps = await discoverSitemaps(new Fetcher({ workspace: ws(), fetchImpl: site, rps: 1000, canonicalHosts: hosts }), 'http://8.8.8.8');
+    // the entries are read, but the redirect target never becomes this site's canonical host
+    expect(maps.entries.map((entry) => entry.url)).toEqual(['http://1.1.1.1/pricing']);
+    expect(hosts.canonicalise(new URL('http://1.1.1.1/pricing')).toString()).toBe('http://1.1.1.1/pricing');
+  });
   it('pairs the platform hosts, rewrites alias URLs onto the seed origin and admits them through the allowlist', async () => {
     const mintlify = getProfile('mintlify');
     expect(profileHostAliases(mintlify, SITE_HOST)).toEqual([APP_HOST]);
@@ -561,7 +741,8 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(found.failures).toEqual([]);
     expect(found.canonicalHosts).toEqual([APP_HOST]);
     expect(found.llms).toEqual({ url: `${SITE}/llms.txt`, entries: parseLlmsTxt(LLMS) });
-    expect(site.requests.slice(0, 3)).toEqual([`${SITE}/robots.txt`, `${SITE}/llms.txt`, `${APP}/robots.txt`]);
+    // the seed is a deep page, so its own path and each ancestor are tried before the origin root
+    expect(site.requests.slice(0, 5)).toEqual([`${SITE}/robots.txt`, `${SITE}/guides/setup/llms.txt`, `${SITE}/guides/llms.txt`, `${SITE}/llms.txt`, `${APP}/robots.txt`]);
     const byPath = Object.fromEntries(found.pages.map((page) => [new URL(page.url).pathname, page]));
     expect(Object.keys(byPath).sort()).toEqual(['/', '/changelog', '/guides/setup']);
     expect(found.pages.every((page) => new URL(page.url).hostname === SITE_HOST)).toBe(true);

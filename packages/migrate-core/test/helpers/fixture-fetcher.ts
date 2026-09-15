@@ -35,6 +35,8 @@ export interface SyntheticSiteSpec {
   pages: Record<string, SyntheticPage>;
   llmsTxt?: string;
   llmsFullTxt?: string;
+  /** Nested llms indexes keyed by full path (`/_llms/en.md`), the way Mintlify publishes a multi-locale page list. */
+  llmsIndexes?: Record<string, string>;
   robotsTxt?: string;
   sitemapXml?: string;
 }
@@ -137,6 +139,7 @@ export function syntheticSiteFetcher(spec: SyntheticSiteSpec): RecordingFetcher 
   return recordingFetcher((url) => {
     if (!hosts.has(url.hostname)) return undefined;
     if (rootDocuments.has(url.pathname)) return rootDocuments.get(url.pathname);
+    if (spec.llmsIndexes && url.pathname in spec.llmsIndexes) return optionalDocument(spec.llmsIndexes[url.pathname], CONTENT_TYPES.markdown);
     if (url.pathname.endsWith('.md')) return optionalDocument(spec.pages[pagePathOfMarkdown(url.pathname)]?.md, CONTENT_TYPES.markdown);
     return optionalDocument(spec.pages[url.pathname]?.html, CONTENT_TYPES.html);
   });

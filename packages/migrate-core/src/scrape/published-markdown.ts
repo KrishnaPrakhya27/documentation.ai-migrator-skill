@@ -28,6 +28,27 @@ export interface LlmsEntry {
   path: string;
 }
 
+/** An llms.txt entry that points at another index rather than at a page. */
+export interface LlmsIndexRef {
+  /** The label the listing gives the index. It names a route, not a page, so two listings may label one index differently. */
+  title: string;
+  url: string;
+}
+
+/** What one llms.txt file states: the pages it lists, the nested indexes it points at, and the other sites it links to. */
+export interface ParsedLlmsIndex {
+  entries: LlmsEntry[];
+  indexes: LlmsIndexRef[];
+  external: Array<{ title: string; url: string }>;
+}
+
+export interface ParseLlmsOptions {
+  /** Path segment marking a link as a nested index rather than a page (Mintlify publishes them under `/_llms/`). */
+  indexSegment?: string;
+  /** Whether a link belongs to the site being read. Links that do not are references to another site, never pages of this one. */
+  isOnSite?: (url: string) => boolean;
+}
+
 export interface UnwrapOptions {
   /** The description the platform declares for the page (llms.txt or page metadata). Only a leading blockquote equal to it is lifted out of the body. */
   expectedDescription?: string;
@@ -66,27 +87,68 @@ function describeEntry(entry: LlmsEntry): string {
   return `"${entry.title}"${entry.description === undefined ? ' without description' : `: "${entry.description}"`}`;
 }
 
+/** Whether a URL's path contains `segment` as a whole segment (`/docs/_llms/en.md` has `_llms`). */
+function hasPathSegment(url: string, segment: string): boolean {
+  return new URL(url).pathname.split('/').includes(segment);
+}
+
 /**
- * Entries of an llms.txt index, deduplicated by page path (an index may list
- * its root page twice). Two listings of one path that disagree on title or
- * description are an ambiguity only the source can resolve, so they are refused.
+ * What one llms.txt file states, split three ways: the pages it lists, the
+ * nested indexes it points at, and the links it makes to other sites.
+ *
+ * `indexSegment` is the path segment under which the platform publishes nested
+ * indexes (Mintlify uses `/_llms/`, and says so in the file: "Follow each
+ * `/_llms/` index recursively until you reach documentation pages").
+ *
+ * `isOnSite` decides what is a page here. A site links out from its own index -
+ * Mintlify's docs list `learn.mintlify.com`, a separate site, once per locale -
+ * and another site's URL carries another site's path. Admitting one both
+ * invents a page and collides with whatever this site serves at that path, so
+ * these are separated before any page identity is derived from them.
+ *
+ * Pages are deduplicated by page path, and two listings of one path that
+ * disagree on title or description are refused: only the source can say which
+ * the page is. Indexes and external links are deduplicated by URL and keep the
+ * first label, because a label naming a route or another site is not a page
+ * title to reconcile - one index is listed as a shorthand near the top and
+ * again under the file's own "Indexes" heading, with a different label each time.
  */
-export function parseLlmsTxt(body: string, sourceUrl?: string): LlmsEntry[] {
+export function parseLlmsIndex(body: string, sourceUrl?: string, options: ParseLlmsOptions = {}): ParsedLlmsIndex {
   const byPath = new Map<string, LlmsEntry>();
+  const indexes = new Map<string, LlmsIndexRef>();
+  const external = new Map<string, { title: string; url: string }>();
   for (const raw of body.replace(/^\uFEFF/, '').split(/\r?\n/)) {
     const match = raw.trim().match(LLMS_ENTRY);
     if (!match) continue;
-    const [, title, link, description] = match;
-    let mdUrl: string;
-    try { mdUrl = new URL(link, sourceUrl).toString(); } catch { throw new Error(`llms.txt entry "${title.trim()}" links to an unresolvable URL ${link}`); }
-    const entry: LlmsEntry = { title: title.trim(), mdUrl, path: pagePathOfMarkdownUrl(mdUrl) };
+    const [, rawTitle, link, description] = match;
+    const title = rawTitle.trim();
+    let url: string;
+    try { url = new URL(link, sourceUrl).toString(); } catch { throw new Error(`llms.txt entry "${title}" links to an unresolvable URL ${link}`); }
+    if (options.indexSegment && hasPathSegment(url, options.indexSegment)) {
+      if (!indexes.has(url)) indexes.set(url, { title, url });
+      continue;
+    }
+    if (options.isOnSite && !options.isOnSite(url)) {
+      if (!external.has(url)) external.set(url, { title, url });
+      continue;
+    }
+    const entry: LlmsEntry = { title, mdUrl: url, path: pagePathOfMarkdownUrl(url) };
     const text = description?.trim();
     if (text) entry.description = text;
     const existing = byPath.get(entry.path);
     if (!existing) byPath.set(entry.path, entry);
     else if (existing.title !== entry.title || existing.description !== entry.description) throw new Error(`llms.txt lists ${entry.path} twice with different metadata: ${describeEntry(existing)} and ${describeEntry(entry)}`);
   }
-  return [...byPath.values()];
+  return { entries: [...byPath.values()], indexes: [...indexes.values()], external: [...external.values()] };
+}
+
+/**
+ * Entries of a single llms.txt index, deduplicated by page path (an index may
+ * list its root page twice). Two listings of one path that disagree on title or
+ * description are an ambiguity only the source can resolve, so they are refused.
+ */
+export function parseLlmsTxt(body: string, sourceUrl?: string): LlmsEntry[] {
+  return parseLlmsIndex(body, sourceUrl).entries;
 }
 
 /** Why a response cannot stand as a page's published Markdown; undefined when it can. */

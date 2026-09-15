@@ -54,6 +54,13 @@ export interface ScrapeProfile {
   chromeStrings?: string[];
   /** Platform serves raw markdown at <url>.md; prefer it over HTML. */
   mdSuffix?: boolean;
+  /**
+   * Path segment under which the platform publishes nested llms.txt indexes. A
+   * multi-locale Mintlify site lists most of its pages in `/_llms/` indexes and
+   * links those from llms.txt instead of listing every page in one file, so an
+   * entry under this segment is an index to follow, never a page to migrate.
+   */
+  llmsIndexSegment?: string;
   /** Host suffixes under which the platform serves one site: the same slug under any of them is the same site (`<slug>.mintlify.site` ⇄ `<slug>.mintlify.app`). */
   hostAliasSuffixes?: string[][];
   /** Hosts whose assets must be rehosted (source CDN). */
@@ -174,6 +181,7 @@ export const PROFILES: Record<string, ScrapeProfile> = {
       { kind: 'path', pattern: 'mint.json', weight: 5 },
       { kind: 'md-suffix', pattern: '', weight: 2 },
     ],
+    llmsIndexSegment: '_llms',
     articleSelector: '#content-area',
     // `header` carries the group eyebrow, #page-title and the description, all of which come from
     // llms.txt / the published .md instead. The assistant bar is removed together with everything

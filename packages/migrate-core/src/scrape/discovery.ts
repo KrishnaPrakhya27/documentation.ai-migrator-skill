@@ -7,7 +7,7 @@ import { findAll, parseHtml, textOf, type El } from '../ir/from-html.js';
 import type { ScrapeProfile } from './profiles.js';
 import type { Fetcher, FetchedPage } from './fetcher.js';
 import { CanonicalHosts, discoverSitemaps, sitemapCandidatesFromRobots, type SitemapEntry } from './fetcher.js';
-import { parseLlmsTxt, type LlmsEntry } from './published-markdown.js';
+import { parseLlmsIndex, type LlmsEntry, type ParsedLlmsIndex } from './published-markdown.js';
 import { mapConcurrent } from './concurrency.js';
 import { sha256 } from '../session/ids.js';
 import { sourceFingerprint } from './drift.js';
@@ -74,6 +74,8 @@ export interface DiscoveryResult {
   siteConfig?: SiteConfig;
   /** The site's llms.txt index when it publishes one; entries are deduplicated by path. */
   llms?: { url: string; entries: LlmsEntry[] };
+  /** llms.txt entries that link to another site, which are references rather than pages of this one. */
+  externalLlmsLinks?: Array<{ title: string; url: string }>;
   /** Alias hosts treated as the seed origin: the profile's paired hosts plus those named by robots.txt Sitemap directives and llms.txt. */
   canonicalHosts: string[];
   /** The crawl policy the site published, frozen as the rules this run obeyed. */
@@ -84,6 +86,25 @@ export interface DiscoveryResult {
    * verification re-derives the same tree offline.
    */
   navigationData?: Array<{ url: string; body: string }>;
+  /**
+   * The independent help systems this crawl found on the host, seed first. A host may publish
+   * several; the seed's states the site's navigation and another is reported rather than merged.
+   * Recorded in machine-readable form so the operator can answer the question that report asks —
+   * which help system this run migrates — instead of only reading it in an error message.
+   */
+  helpSystems?: HelpSystem[];
+}
+
+/** One MadCap help system published on the crawled host. */
+export interface HelpSystem {
+  /** Directory the help system is published under; its pages are the URLs beneath it. */
+  root: string;
+  /** Whether this is the help system the seed URL belongs to, whose sidebar the run states. */
+  seed: boolean;
+  /** How many pages its own sidebar places. */
+  sidebarPages: number;
+  /** The structural issue this help system raised, verbatim, when it is not the seed's. */
+  issue?: string;
 }
 
 /** How published MadCap Flare output declares the help system a page belongs to. */
@@ -242,19 +263,142 @@ function pageUrlOfLlmsEntry(entry: LlmsEntry): string {
 }
 
 /**
- * The llms.txt index when the site serves one as text. A 200 HTML body is a
+ * Where a site keeps its own site-level files (llms.txt, sitemaps). A site
+ * published under a path prefix serves them under that prefix: the origin root
+ * belongs to whatever else the host publishes, and on a real host it redirects
+ * to a different site altogether. The seed's own path is the site the operator
+ * named, so it is tried first, then each ancestor, always ending at the origin
+ * so a site published at the root behaves exactly as before.
+ */
+export function siteFileBases(seedUrl: string, limit = 4): string[] {
+  const seed = new URL(seedUrl);
+  const segments = seed.pathname.split('/').filter(Boolean);
+  const baseAt = (depth: number) => new URL(`/${segments.slice(0, depth).join('/')}${depth ? '/' : ''}`, seed.origin).toString();
+  const deepest: string[] = [];
+  for (let depth = segments.length; depth >= 1; depth--) deepest.push(baseAt(depth));
+  const origin = baseAt(0);
+  // The origin is always probed, so a deep seed spends its budget on the paths nearest the page.
+  return [...new Set([...deepest.slice(0, Math.max(0, limit - 1)), origin])];
+}
+
+/**
+ * Whether a response still belongs to the site being migrated. A site-level
+ * file that redirects to another host is that host's file, not this site's:
+ * `gitbook.com/llms.txt` serves the marketing site's index, which lists
+ * marketing pages that are not documentation at all.
+ */
+function staysOnSite(finalUrl: string, seedHost: string, canonicalHosts: CanonicalHosts): boolean {
+  const host = new URL(finalUrl).hostname.toLowerCase();
+  return host === seedHost || canonicalHosts.canonicalise(new URL(finalUrl)).hostname.toLowerCase() === seedHost;
+}
+
+/** How many llms.txt indexes one site may publish before discovery stops following them. */
+const MAX_LLMS_INDEXES = 64;
+
+/**
+ * Whether an llms.txt entry is a page of this site rather than a link to
+ * another one. A site links out from its own index (Mintlify's docs list
+ * `learn.mintlify.com`, a separate site, once per locale), and such a link is
+ * not a page to migrate: its path is another site's path, so admitting it both
+ * invents a page and collides with whatever this site serves at that path.
+ * Published Markdown on another host stays in scope, because a platform may
+ * serve a page's `.md` from a companion host and `canonicalHosts` is taught
+ * those hosts from these very entries.
+ */
+function llmsLinkIsOnSite(url: string, seedHost: string, canonicalHosts: CanonicalHosts): boolean {
+  return PUBLISHED_MARKDOWN.test(new URL(url).pathname) || staysOnSite(url, seedHost, canonicalHosts);
+}
+
+/**
+ * Every page a site's llms.txt states, following the nested indexes it points
+ * at. A site with locales or many tabs does not list its pages in one file: the
+ * root names a handful of indexes, and the pages are in those. Following them is
+ * the only way to read the source's own page list; not following them silently
+ * migrates the fraction that happens to be listed at the root.
+ *
+ * An index reached twice is read once (a locale index and the root may both
+ * name it). An index that cannot be read is a structural issue rather than a
+ * page failure: the pages it lists are not merely unreachable, they are unknown,
+ * and exact mode refuses a source universe it cannot enumerate.
+ */
+async function followLlmsIndexes(
+  fetcher: Fetcher,
+  root: ParsedLlmsIndex,
+  rootUrl: string,
+  seedHost: string,
+  canonicalHosts: CanonicalHosts,
+  indexSegment: string | undefined,
+  failures: DiscoveryResult['failures'],
+  structuralIssues: string[],
+): Promise<{ entries: LlmsEntry[]; external: Array<{ title: string; url: string }> }> {
+  const byPath = new Map<string, LlmsEntry>();
+  const external = new Map<string, { title: string; url: string }>();
+  const merge = (parsed: ParsedLlmsIndex, from: string) => {
+    for (const link of parsed.external) if (!external.has(link.url)) external.set(link.url, link);
+    for (const entry of parsed.entries) {
+      const existing = byPath.get(entry.path);
+      if (!existing) byPath.set(entry.path, { ...entry });
+      else if (existing.title !== entry.title || existing.description !== entry.description) {
+        structuralIssues.push(`llms.txt indexes disagree about ${entry.path}: "${existing.title}" and "${entry.title}" (${from}); the source must state one title and description per page`);
+      }
+    }
+  };
+  const parseOptions = { indexSegment, isOnSite: (url: string) => llmsLinkIsOnSite(url, seedHost, canonicalHosts) };
+  merge(root, rootUrl);
+  const seen = new Set<string>([rootUrl]);
+  const queue = root.indexes.map((index) => index.url).filter((url) => !seen.has(url));
+  for (const url of queue) seen.add(url);
+  let read = 0;
+  while (queue.length) {
+    const url = queue.shift()!;
+    if (++read > MAX_LLMS_INDEXES) {
+      structuralIssues.push(`llms.txt names more than ${MAX_LLMS_INDEXES} nested indexes; the source page list cannot be enumerated`);
+      break;
+    }
+    let response: FetchedPage;
+    try { response = await fetcher.get(url); }
+    catch (error) { structuralIssues.push(`llms.txt index ${url} could not be read (${(error as Error).message}); the pages it lists are unknown`); continue; }
+    if (response.status < 200 || response.status >= 300 || !TEXT_MEDIA_TYPE.test(response.contentType)) {
+      structuralIssues.push(`llms.txt index ${url} answered HTTP ${response.status} as "${response.contentType}"; the pages it lists are unknown`);
+      continue;
+    }
+    const sourceUrl = response.finalUrl || url;
+    if (!staysOnSite(sourceUrl, seedHost, canonicalHosts)) {
+      structuralIssues.push(`llms.txt index ${url} redirected to ${sourceUrl}, which is a different site; the pages it lists are unknown`);
+      continue;
+    }
+    const nested = parseLlmsIndex(response.body, sourceUrl, parseOptions);
+    merge(nested, sourceUrl);
+    for (const index of nested.indexes) if (!seen.has(index.url)) { seen.add(index.url); queue.push(index.url); }
+  }
+  return { entries: [...byPath.values()], external: [...external.values()] };
+}
+
+/**
+ * The llms.txt index when the site serves one as text, looked for under the
+ * site's own base before the origin root, and read through the nested indexes it
+ * names. A 200 HTML body is a
  * single-page-app stand-in for a missing file, not an index. A fetch failure
  * is recorded; a malformed index propagates because it cannot be trusted.
  */
-async function fetchLlmsIndex(fetcher: Fetcher, origin: string, failures: DiscoveryResult['failures']): Promise<DiscoveryResult['llms']> {
-  const url = new URL('/llms.txt', origin).toString();
-  let response: FetchedPage;
-  try { response = await fetcher.get(url); }
-  catch (error) { failures.push({ url, error: `llms.txt: ${(error as Error).message}` }); return undefined; }
-  if (response.status < 200 || response.status >= 300 || !TEXT_MEDIA_TYPE.test(response.contentType)) return undefined;
-  const sourceUrl = response.finalUrl || url;
-  const entries = parseLlmsTxt(response.body, sourceUrl);
-  return entries.length ? { url: sourceUrl, entries } : undefined;
+async function fetchLlmsIndex(fetcher: Fetcher, bases: string[], seedHost: string, canonicalHosts: CanonicalHosts, indexSegment: string | undefined, failures: DiscoveryResult['failures'], structuralIssues: string[]): Promise<(NonNullable<DiscoveryResult['llms']> & { external: Array<{ title: string; url: string }> }) | undefined> {
+  for (const base of bases) {
+    const url = new URL('llms.txt', base).toString();
+    let response: FetchedPage;
+    try { response = await fetcher.get(url); }
+    catch (error) { failures.push({ url, error: `llms.txt: ${(error as Error).message}` }); continue; }
+    if (response.status < 200 || response.status >= 300 || !TEXT_MEDIA_TYPE.test(response.contentType)) continue;
+    const sourceUrl = response.finalUrl || url;
+    if (!staysOnSite(sourceUrl, seedHost, canonicalHosts)) {
+      failures.push({ url, error: `llms.txt: redirected to ${sourceUrl}, which is a different site; its entries are not this site's pages` });
+      continue;
+    }
+    const root = parseLlmsIndex(response.body, sourceUrl, { indexSegment, isOnSite: (link: string) => llmsLinkIsOnSite(link, seedHost, canonicalHosts) });
+    if (!root.entries.length && !root.indexes.length && !root.external.length) continue;
+    const walked = await followLlmsIndexes(fetcher, root, sourceUrl, seedHost, canonicalHosts, indexSegment, failures, structuralIssues);
+    if (walked.entries.length) return { url: sourceUrl, entries: walked.entries, external: walked.external };
+  }
+  return undefined;
 }
 
 /**
@@ -701,6 +845,7 @@ export async function discoverLiveSite(input: {
   let navigation: DiscoveredNavigationNode[] | undefined;
   const navigationCandidates: NonNullable<DiscoveryResult['navigationCandidates']> = {};
   const structuralIssues: string[] = [];
+  const helpSystems: HelpSystem[] = [];
   let sections: SiteSection[] | undefined;
   const sectionSidebars = new Map<string, DiscoveredNavigationNode[]>();
   let siteName: string | undefined;
@@ -779,15 +924,23 @@ export async function discoverLiveSite(input: {
     // The policy the site published is what the crawl was allowed under, so it is frozen with the
     // pages rather than read and dropped: a later reviewer can see the rules this run obeyed.
     robots = { url: new URL('/robots.txt', origin).toString(), body: document };
-    for (const candidate of sitemapCandidatesFromRobots(document, origin)) canonicalHosts.add(new URL(candidate).hostname);
+    // A Sitemap directive names another host of the same site only when the site itself published the
+    // document. A host serving a marketing site at its root redirects robots.txt there, and adopting
+    // that document's hosts would pull the marketing site's whole inventory in as documentation.
+    const servedFrom = input.fetcher.robotsFinalUrl?.(origin);
+    if (!servedFrom || new URL(servedFrom).hostname.toLowerCase() === seed.hostname.toLowerCase()) {
+      for (const candidate of sitemapCandidatesFromRobots(document, origin)) canonicalHosts.add(new URL(candidate).hostname);
+    } else failures.push({ url: robots.url, error: `robots.txt: served by ${new URL(servedFrom).hostname}, a different site; its Sitemap directives do not name this site's hosts` });
   }
   catch { /* discoverSitemaps and page acquisition report an unverifiable robots policy */ }
-  const llms = await fetchLlmsIndex(input.fetcher, origin, failures);
+  const walkedLlms = await fetchLlmsIndex(input.fetcher, siteFileBases(input.seedUrl), seed.hostname.toLowerCase(), canonicalHosts, input.profile.llmsIndexSegment, failures, structuralIssues);
+  const llms = walkedLlms ? { url: walkedLlms.url, entries: walkedLlms.entries } : undefined;
+  const externalLlmsLinks = walkedLlms?.external ?? [];
   if (llms) {
     for (const entry of llms.entries) if (PUBLISHED_MARKDOWN.test(new URL(entry.mdUrl).pathname)) canonicalHosts.add(new URL(entry.mdUrl).hostname);
     for (const entry of llms.entries) add(pageUrlOfLlmsEntry(entry), 'llms-txt', llms.url, { title: entry.title, description: entry.description, llms: entry });
   }
-  const sitemaps = await discoverSitemaps(input.fetcher, origin, { maxUrls: limit });
+  const sitemaps = await discoverSitemaps(input.fetcher, origin, { maxUrls: limit, bases: siteFileBases(input.seedUrl) });
   failures.push(...sitemaps.failures.map((failure) => ({ ...failure, error: `sitemap: ${failure.error}` })));
   for (const entry of sitemaps.entries) {
     add(entry.url, 'sitemap', input.seedUrl, { sitemap: entry });
@@ -910,10 +1063,15 @@ export async function discoverLiveSite(input: {
               if (!navigation) {
                 navigation = read.nodes;
                 navigationCandidates['platform-metadata'] = read.nodes;
+                helpSystems.push({ root: flareRoot, seed: true, sidebarPages: placedPages(read.nodes).size });
               } else {
                 const error = `a second MadCap help system is published here, with its own ${placedPages(read.nodes).size}-page sidebar; the navigation this run states is the one at ${[...flareRoots][0]}, and the pages under this one are placed by neither`;
                 failures.push({ url: flareRoot, error });
-                structuralIssues.push(`${flareRoot}: ${error}`);
+                // The manifest issue is recorded verbatim on the help system, so a decision about
+                // this system can be matched to the issue it answers without parsing the message.
+                const issue = `${flareRoot}: ${error}`;
+                structuralIssues.push(issue);
+                helpSystems.push({ root: flareRoot, seed: false, sidebarPages: placedPages(read.nodes).size, issue });
               }
               // Its pages are discovered either way: a page the first sidebar never names is still
               // part of the site, and leaving it out of the crawl would hide it entirely.
@@ -983,6 +1141,7 @@ export async function discoverLiveSite(input: {
     })),
     failures,
     ...(structuralIssues.length ? { structuralIssues: [...new Set(structuralIssues)].sort() } : {}),
+    ...(helpSystems.length ? { helpSystems } : {}),
     sitemaps: { sources: sitemaps.sources, entries: sitemaps.entries, truncated: sitemaps.truncated },
     navigation: navigation ?? (domSidebarIsNavigation ? domSidebar : undefined),
     navigationSource: navigation ? 'platform-metadata' : domSidebarIsNavigation ? 'dom-sidebar' : undefined,
@@ -990,6 +1149,7 @@ export async function discoverLiveSite(input: {
     siteName: siteName ?? siteNameFromTitleTags([...records.values()].map((value) => value.htmlTitleTag)),
     siteConfig,
     llms,
+    ...(externalLlmsLinks.length ? { externalLlmsLinks } : {}),
     canonicalHosts: canonicalHosts.list(),
     robots,
     ...(navigationData.length ? { navigationData } : {}),

@@ -171,6 +171,8 @@ export class Fetcher {
   private bucket: TokenBucket;
   private robots = new Map<string, string[]>();
   private robotDocuments = new Map<string, string>();
+  /** Where each origin's robots.txt was actually served from, which redirects may move to another host. */
+  private robotSources = new Map<string, string>();
   private pendingRobots = new Map<string, Promise<string>>();
   private cacheDir: string;
   private dispatcher?: Dispatcher;
@@ -211,6 +213,7 @@ export class Fetcher {
   /** Fetch robots without customer credentials and validate every redirect hop. */
   private async fetchRobots(origin: string): Promise<string> {
     let current = new URL('/robots.txt', origin);
+    const record = (): void => { this.robotSources.set(origin, current.toString()); };
     for (let hop = 0; hop < 5; hop++) {
       this.assertAllowedHost(current);
       await assertPublicHost(current, this.opts.lookup);
@@ -223,6 +226,7 @@ export class Fetcher {
         continue;
       }
       if (res.status >= 500) throw new Error(`robots.txt unavailable with HTTP ${res.status}`);
+      record();
       if (!res.ok) return '';
       const len = Number(res.headers.get('content-length') ?? 0);
       if (len > 1024 * 1024) throw new Error('robots.txt exceeds 1 MiB');
@@ -232,6 +236,13 @@ export class Fetcher {
     }
     throw new Error('too many robots.txt redirects');
   }
+
+  /**
+   * Where an origin's robots.txt was served from after redirects. A host that
+   * publishes a marketing site at its root redirects there, and that document's
+   * Sitemap directives name the marketing site, not the site being migrated.
+   */
+  robotsFinalUrl(origin: string): string | undefined { return this.robotSources.get(origin); }
 
   /** Cached, credential-free robots document for policy and Sitemap directives. */
   async robotsDocument(origin: string): Promise<string> {
@@ -402,7 +413,7 @@ export function sitemapCandidatesFromRobots(body: string, origin: string): strin
  * order and use sitemap hierarchy only as a fallback structure hint. Entry
  * URLs on a canonical alias host are recorded on the seed origin.
  */
-export async function discoverSitemaps(fetcher: Fetcher, origin: string, opts: { maxFiles?: number; maxUrls?: number; maxDepth?: number } = {}): Promise<SitemapDiscovery> {
+export async function discoverSitemaps(fetcher: Fetcher, origin: string, opts: { maxFiles?: number; maxUrls?: number; maxDepth?: number; bases?: string[] } = {}): Promise<SitemapDiscovery> {
   const maxFiles = Math.max(1, Math.min(opts.maxFiles ?? 100, 1000));
   const maxUrls = Math.max(1, Math.min(opts.maxUrls ?? 50_000, 500_000));
   const maxDepth = Math.max(0, Math.min(opts.maxDepth ?? 8, 20));
@@ -412,8 +423,17 @@ export async function discoverSitemaps(fetcher: Fetcher, origin: string, opts: {
   };
   // MadCap Flare publishes `Sitemap.xml`; a case-sensitive host serves that name only, so the
   // lowercase probe 404s and the site looks sitemap-less.
-  const seeds = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap-0.xml', '/Sitemap.xml'].map((path) => new URL(path, origin).toString());
-  try { seeds.unshift(...sitemapCandidatesFromRobots(await fetcher.robotsDocument(origin), origin)); }
+  // A site published under a path prefix serves its sitemap under that prefix, so each base the
+  // caller names is probed before the origin root, which belongs to whatever else the host serves.
+  const names = ['sitemap.xml', 'sitemap_index.xml', 'sitemap-index.xml', 'sitemap-0.xml', 'Sitemap.xml'];
+  const seeds = (opts.bases?.length ? opts.bases : [origin]).flatMap((base) => names.map((name) => new URL(name, base).toString()));
+  try {
+    // Only this site's own robots.txt names this site's sitemaps; one redirected to another host
+    // names that host's, which describe a different site.
+    const document = await fetcher.robotsDocument(origin);
+    const servedFrom = fetcher.robotsFinalUrl?.(origin);
+    if (!servedFrom || new URL(servedFrom).hostname.toLowerCase() === new URL(origin).hostname.toLowerCase()) seeds.unshift(...sitemapCandidatesFromRobots(document, origin));
+  }
   catch { /* ordinary page acquisition will report an unverifiable robots policy */ }
 
   const queue = [...new Set(seeds)].map((url) => ({ url, trail: [] as string[], depth: 0 }));
@@ -438,7 +458,10 @@ export async function discoverSitemaps(fetcher: Fetcher, origin: string, opts: {
       if (!/<(?:\w+:)?(?:urlset|sitemapindex)\b/i.test(xml)) { failures.push({ url: current.url, error: 'response is not a sitemap XML document' }); continue; }
       const sourceUrl = page.finalUrl || current.url;
       sources.push(sourceUrl);
-      if (new URL(current.url).origin === origin) servedBySeedOrigin.add(sourceUrl);
+      // Served by the seed origin means served by it, not redirected away from it: the origin root of a
+      // host that also publishes a marketing site redirects there, and that site's sitemap declares
+      // pages this documentation does not have.
+      if (new URL(current.url).origin === origin && new URL(sourceUrl).hostname.toLowerCase() === new URL(origin).hostname.toLowerCase()) servedBySeedOrigin.add(sourceUrl);
       if (/<(?:\w+:)?sitemapindex\b/i.test(xml)) {
         if (current.depth >= maxDepth) { truncated = true; continue; }
         for (const block of xmlBlocks(xml, 'sitemap')) {
