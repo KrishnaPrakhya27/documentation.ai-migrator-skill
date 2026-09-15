@@ -477,6 +477,7 @@ async function main() {
           const withoutSidebar = pages.filter((page) => page.sourceSidebar === 'absent').length;
           if (!observedSidebar) console.log('· no page in the capture rendered a navigation sidebar; the source builds one in the browser or shows none. Page layout is left at the Documentation.AI default and the navigation could not be read from the rendered pages.');
           else if (withoutSidebar) ok(`${withoutSidebar} page(s) render no navigation sidebar in the source and will be written with "show-sidebar": false`);
+          if (discovery.refusedOutsideBase?.length) ok(`${discovery.refusedOutsideBase.length} same-origin URL(s) outside the site's base path were refused as another site on this host: ${discovery.refusedOutsideBase.slice(0, 3).join(', ')}`);
           if (discovery.externalLlmsLinks?.length) ok(`${discovery.externalLlmsLinks.length} llms.txt entr(y/ies) link to another site and are not pages of this one: ${discovery.externalLlmsLinks.slice(0, 3).map((link) => `"${link.title}" → ${link.url}`).join(', ')}`);
           ok(`${pages.length} unique URLs from ${discovery.llms ? `${discovery.llms.entries.length} llms.txt entries, ` : ''}recursive links, sidebars, ${discovery.sitemaps.sources.length} sitemap file(s) and configured map sources${discovery.canonicalHosts.length ? ` (canonical hosts: ${discovery.canonicalHosts.join(', ')})` : ''}; ${discovery.failures.length} fetch failures${discovery.truncated ? '; limit reached' : ''}`);
         }

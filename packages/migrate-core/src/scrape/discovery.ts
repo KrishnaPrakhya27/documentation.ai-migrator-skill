@@ -76,6 +76,8 @@ export interface DiscoveryResult {
   llms?: { url: string; entries: LlmsEntry[] };
   /** llms.txt entries that link to another site, which are references rather than pages of this one. */
   externalLlmsLinks?: Array<{ title: string; url: string }>;
+  /** Same-origin URLs outside the site's base path: pages of whatever else the host publishes. */
+  refusedOutsideBase?: string[];
   /** Alias hosts treated as the seed origin: the profile's paired hosts plus those named by robots.txt Sitemap directives and llms.txt. */
   canonicalHosts: string[];
   /** The crawl policy the site published, frozen as the rules this run obeyed. */
@@ -270,6 +272,53 @@ function pageUrlOfLlmsEntry(entry: LlmsEntry): string {
  * named, so it is tried first, then each ancestor, always ending at the origin
  * so a site published at the root behaves exactly as before.
  */
+/**
+ * The path prefix the operator named as the site, always ending in `/` so a
+ * relative href resolves inside it. One host commonly publishes a marketing
+ * site at its root and the documentation under a prefix, and the seed path is
+ * the operator's statement of which of the two is being migrated. A seed at the
+ * origin root names the whole host, which is how a site published at the root
+ * has always behaved.
+ */
+export function siteBaseUrl(seedUrl: string): string {
+  const seed = new URL(seedUrl);
+  seed.search = '';
+  seed.hash = '';
+  if (!seed.pathname.endsWith('/')) seed.pathname = `${seed.pathname}/`;
+  return seed.toString();
+}
+
+/**
+ * Whether a URL is inside the site's base path. The marketing site a host
+ * serves at its root is not the documentation being migrated: its sitemap is
+ * advertised by the same robots.txt and its pages are one same-origin link
+ * away, so without this a 1021-page documentation site acquires several hundred
+ * blog and pricing pages it never published as documentation.
+ */
+export function withinSiteBase(url: string, siteBase: string): boolean {
+  const base = new URL(siteBase);
+  if (base.pathname === '/') return true;
+  const path = new URL(url).pathname;
+  return path === base.pathname || path === base.pathname.replace(/\/$/, '') || path.startsWith(base.pathname);
+}
+
+/**
+ * The base a Mintlify `scopedNav` href is relative to: the docs deployment
+ * root, which every page states by serving its own sitemap under it. Read from
+ * the page rather than assumed from the seed, so a seed naming any page of the
+ * site resolves the navigation the same way.
+ */
+export function mintlifyNavBase(html: string, seedUrl: string): string {
+  const marker = html.indexOf('/sitemap.xml');
+  if (marker >= 0) {
+    let start = marker;
+    while (start > 0 && !'"\'\\ ='.includes(html[start - 1])) start--;
+    const path = html.slice(start, marker);
+    if (/^(?:\/[A-Za-z0-9._~-]+)*$/.test(path)) return new URL(`${path}/`, new URL(seedUrl).origin).toString();
+  }
+  return siteBaseUrl(seedUrl);
+}
+
 export function siteFileBases(seedUrl: string, limit = 4): string[] {
   const seed = new URL(seedUrl);
   const segments = seed.pathname.split('/').filter(Boolean);
@@ -834,6 +883,12 @@ export async function discoverLiveSite(input: {
   const canonicalHosts = input.fetcher.canonicalHosts ?? new CanonicalHosts(origin);
   if (canonicalHosts.seedOrigin !== origin) throw new Error(`fetcher canonical hosts are bound to ${canonicalHosts.seedOrigin}, not the seed origin ${origin}`);
   const limit = Math.max(1, Math.min(input.limit ?? 5000, 50_000));
+  // Where the site publishes its own index is where the site begins. The seed cannot say: an
+  // operator may name any page, and a deep page of a root-published site would confine it to a
+  // directory. Until the site states a base, nothing is confined - which is the behaviour of a site
+  // published at the origin root.
+  let siteBase = new URL('/', origin).toString();
+  const refusedOutsideBase = new Set<string>();
   const records = new Map<string, { reasons: Set<string>; title?: string; description?: string; sidebarTitle?: string; htmlTitleTag?: string; domSidebarTitle?: string; llms?: LlmsEntry; discoveredOrder: number; sidebarOrder?: number; platformOrder?: number; sitemap?: SitemapEntry; groupHint?: string[]; locale?: string; version?: string; sidebarPages?: number; contentSha256?: string }>();
   const queue: string[] = [];
   const crawled = new Set<string>();
@@ -874,6 +929,9 @@ export async function discoverLiveSite(input: {
   const add = (candidate: string, reason: string, base = input.seedUrl, meta: { sitemap?: SitemapEntry; locale?: string; title?: string; description?: string; sidebarTitle?: string; domSidebarTitle?: string; llms?: LlmsEntry; groupHint?: string[] } = {}) => {
     const normalised = normaliseDiscoveryUrl(candidate, base, origin, canonicalHosts);
     if (!normalised || !isDocumentCandidate(normalised, input.profile.platform)) return;
+    // Outside the site's own path prefix is another site on the same host. The site's own index is
+    // exempt: if llms.txt names a page, the site published it as documentation whatever its path.
+    if (reason !== 'llms-txt' && !withinSiteBase(normalised, siteBase)) { refusedOutsideBase.add(normalised); return; }
     // GitBook and other themes link to a page's published-Markdown representation.
     // It is acquisition evidence for the extensionless page, never another page entity,
     // and admitting it here wastes the crawl budget before it can be discarded.
@@ -935,6 +993,7 @@ export async function discoverLiveSite(input: {
   catch { /* discoverSitemaps and page acquisition report an unverifiable robots policy */ }
   const walkedLlms = await fetchLlmsIndex(input.fetcher, siteFileBases(input.seedUrl), seed.hostname.toLowerCase(), canonicalHosts, input.profile.llmsIndexSegment, failures, structuralIssues);
   const llms = walkedLlms ? { url: walkedLlms.url, entries: walkedLlms.entries } : undefined;
+  if (llms) siteBase = new URL('.', llms.url).toString();
   const externalLlmsLinks = walkedLlms?.external ?? [];
   if (llms) {
     for (const entry of llms.entries) if (PUBLISHED_MARKDOWN.test(new URL(entry.mdUrl).pathname)) canonicalHosts.add(new URL(entry.mdUrl).hostname);
@@ -942,6 +1001,9 @@ export async function discoverLiveSite(input: {
   }
   const sitemaps = await discoverSitemaps(input.fetcher, origin, { maxUrls: limit, bases: siteFileBases(input.seedUrl) });
   failures.push(...sitemaps.failures.map((failure) => ({ ...failure, error: `sitemap: ${failure.error}` })));
+  // No llms.txt: the deepest base that serves a sitemap is the site's own, and a host serving one at
+  // its root only says the site is the root, so nothing is confined.
+  if (!llms) siteBase = siteFileBases(input.seedUrl).find((base) => sitemaps.sources.some((source) => source.startsWith(base))) ?? siteBase;
   for (const entry of sitemaps.entries) {
     add(entry.url, 'sitemap', input.seedUrl, { sitemap: entry });
     for (const alternate of entry.alternates) add(alternate.href, 'sitemap-hreflang', entry.url, { sitemap: entry, locale: alternate.hreflang === 'x-default' ? undefined : alternate.hreflang });
@@ -1031,7 +1093,7 @@ export async function discoverLiveSite(input: {
       if (input.profile.platform === 'mintlify') {
         siteConfig ??= extractMintlifyDocsConfig(response.body);
         if (!navigation) {
-          const extracted = extractMintlifyNavigation(response.body, input.seedUrl);
+          const extracted = extractMintlifyNavigation(response.body, mintlifyNavBase(response.body, input.seedUrl));
           if (extracted) {
             navigation = extracted.navigation;
             navigationCandidates['platform-metadata'] = extracted.navigation;
@@ -1150,6 +1212,7 @@ export async function discoverLiveSite(input: {
     siteConfig,
     llms,
     ...(externalLlmsLinks.length ? { externalLlmsLinks } : {}),
+    ...(refusedOutsideBase.size ? { refusedOutsideBase: [...refusedOutsideBase].sort() } : {}),
     canonicalHosts: canonicalHosts.list(),
     robots,
     ...(navigationData.length ? { navigationData } : {}),
