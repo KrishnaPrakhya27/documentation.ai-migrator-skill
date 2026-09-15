@@ -122,6 +122,38 @@ function isDocumentCandidate(url: string, platform: string): boolean {
   return platform !== 'readme' || !/^\/(?:cdn-cgi|edit|login|logout)(?:\/|$)/i.test(path);
 }
 
+
+/** Separators a documentation theme puts between a page's own title and the site's. */
+const TITLE_SEPARATORS = [' | ', ' — ', ' – ', ' - ', ' · '];
+
+/**
+ * The site's name as its own pages state it, when the platform declares it nowhere else.
+ *
+ * GitBook emits no `og:site_name` and no site config a crawl can read, so a migrated site fell back
+ * to the renderer's default name on every page. Its theme does decorate every `<title>` with the
+ * site: "Quickstart | Documentation | demo Docs". The trailing segment is the name when every page
+ * that decorates its title agrees on it.
+ *
+ * Unanimity is the evidence. A site whose pages disagree, or whose titles carry no separator at all
+ * (where the "suffix" would just be the page's own title), states no name here and the caller keeps
+ * the default rather than inventing one.
+ */
+export function siteNameFromTitleTags(titleTags: ReadonlyArray<string | undefined>): string | undefined {
+  const suffixes = new Set<string>();
+  let decorated = 0;
+  for (const tag of titleTags) {
+    const title = tag?.trim();
+    if (!title) continue;
+    const separator = TITLE_SEPARATORS.find((value) => title.includes(value));
+    if (!separator) return undefined;
+    decorated++;
+    suffixes.add(title.slice(title.lastIndexOf(separator) + separator.length).trim());
+  }
+  if (decorated < 2 || suffixes.size !== 1) return undefined;
+  const [name] = [...suffixes];
+  return name || undefined;
+}
+
 function metaContent(html: string, selector: string): string | undefined {
   const root = parseHtml(html);
   const value = findAll(root, selector)[0]?.attribs.content?.replace(/\s+/g, ' ').trim();
@@ -955,7 +987,7 @@ export async function discoverLiveSite(input: {
     navigation: navigation ?? (domSidebarIsNavigation ? domSidebar : undefined),
     navigationSource: navigation ? 'platform-metadata' : domSidebarIsNavigation ? 'dom-sidebar' : undefined,
     navigationCandidates: Object.keys(navigationCandidates).length ? navigationCandidates : undefined,
-    siteName,
+    siteName: siteName ?? siteNameFromTitleTags([...records.values()].map((value) => value.htmlTitleTag)),
     siteConfig,
     llms,
     canonicalHosts: canonicalHosts.list(),

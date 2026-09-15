@@ -40,7 +40,7 @@ import { fingerprint } from './scrape/fingerprint.js';
 import { CanonicalHosts, Fetcher, type FetchOptions } from './scrape/fetcher.js';
 import { Firecrawl, readFirecrawlPage, type FirecrawlOptions } from './scrape/firecrawl.js';
 import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
-import { discoverLiveSite, extractMintlifyNavigation, navigationFromFrozenPages, sidebarObserved, type DiscoveredNavigationNode, type DiscoveryResult } from './scrape/discovery.js';
+import { discoverLiveSite, extractMintlifyNavigation, navigationFromFrozenPages, sidebarObserved, siteNameFromTitleTags, type DiscoveredNavigationNode, type DiscoveryResult } from './scrape/discovery.js';
 import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
 import { extractSeo, seoFrontmatter } from './scrape/seo.js';
 import { acquirePages, acquireFirecrawlPages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
@@ -244,7 +244,11 @@ function frozenDiscovery(workspace: string, session: Session, profile: ScrapePro
   if (!frozen.length) fail('--offline found no acquired page bodies to re-read; run acquire before re-deriving');
   const derived = navigationFromFrozenPages(frozen, platform, url, new URL(url).origin, profile, new Map((discovery.navigationData ?? []).map((file) => [file.url, file.body])));
   ok(`${frozen.length} frozen page(s) re-read with no network; navigation from ${derived?.source ?? 'the frozen capture, unchanged'}`);
-  return { frozen: discovery, derived: derived ? { ...discovery, navigation: derived.nodes, navigationSource: derived.source } : discovery };
+  // Re-read the site's name from the same frozen titles, so a capture taken before the migrator
+  // could read it gains the name on rebuild instead of needing the site crawled again.
+  const siteName = discovery.siteName ?? siteNameFromTitleTags(discovery.pages.map((page) => page.htmlTitleTag));
+  const rebuilt = { ...discovery, ...(siteName ? { siteName } : {}) };
+  return { frozen: discovery, derived: derived ? { ...rebuilt, navigation: derived.nodes, navigationSource: derived.source } : rebuilt };
 }
 
 
