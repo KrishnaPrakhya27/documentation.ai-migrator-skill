@@ -13,7 +13,7 @@ import { redirectProblems } from '../urls/redirect-graph.js';
 import type { SiteLinks } from '../urls/site-links.js';
 import { sha256 } from '../session/ids.js';
 import { isSafeUrl } from '../components/sanitize.js';
-import { readManifest } from '../assets/manifest.js';
+import { readManifest, type AssetManifest } from '../assets/manifest.js';
 import { markdownToIr } from '../ir/from-markdown.js';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
@@ -316,6 +316,8 @@ export interface SourceEvidence {
   navigationSource?: string;
   /** Routes the source's own page index lists, so a page cannot silently vanish. */
   indexedRoutes?: string[];
+  /** The asset manifest the conversion used, so a rehosted asset is compared by what it is and not by where it is served. */
+  assets?: AssetManifest;
   /** Where the source's site-relative links land in the migrated site, so the source is compared as convert rewrote it. */
   links?: SiteLinks;
 }
@@ -610,7 +612,7 @@ export function runGates(input: GateInput): GateResult[] {
     });
   };
   const sourcePages = exact && evidence ? evidence.pages : [];
-  sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links)), (failures) => `${failures.length} page(s) differ from the published source`);
+  sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links, evidence!.assets)), (failures) => `${failures.length} page(s) differ from the published source`);
   sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page, evidence?.platform ?? 'generic')), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);
   sourceGate('html-reconciliation', evidence?.profile ? sourcePages.map((page) => htmlReconciliation(page, evidence.platform, evidence.profile!)) : sourcePages.map((page) => ({ pageId: page.pageId, path: page.path, pass: false, detail: `profile ${evidence?.platform ?? 'unknown'} declares no rendered-page selectors to reconcile against` })), (failures) => `${failures.length} page(s) disagree with the rendered source`);
   sourceGate('chrome-absent', sourcePages.map((page) => chromeAbsent(page, evidence?.profile?.chromeStrings ?? [])), (failures) => `${failures.length} page(s) contain platform chrome`);

@@ -17,6 +17,7 @@ import { buildDocumentationNavigation, type SourceNavigationNode, type Tree } fr
 import { getProfile } from '../scrape/profiles.js';
 import { navigationFromFrozenPages, type DiscoveredNavigationNode, type DiscoveryResult } from '../scrape/discovery.js';
 import { loadRawSourcePages, type RawSourcePage } from '../verify/source-truth.js';
+import { readManifest } from '../assets/manifest.js';
 import { siteLinksFor, type SiteLinks } from '../urls/site-links.js';
 import { readUrlPlan } from '../urls/plan.js';
 import type { SourceEvidence } from '../verify/gates.js';
@@ -112,5 +113,5 @@ export function buildSourceEvidence(workspace: string, tree: Tree): SourceEviden
       navigation = buildDocumentationNavigation({ ...tree, navigation: witness.nodes }, writtenPagePaths(workspace, tree), readPlatformMeta(workspace)).navigation;
     }
   }
-  return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route), links: siteLinksForWorkspace(workspace, tree) };
+  return { pages, platform: tree.platform, profile, navigation, navigationSource, indexedRoutes: pages.map((page) => page.route), links: siteLinksForWorkspace(workspace, tree), assets: readManifest(workspace) };
 }

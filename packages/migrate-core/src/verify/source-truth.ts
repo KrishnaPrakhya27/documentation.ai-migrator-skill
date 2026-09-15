@@ -21,6 +21,7 @@ import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { authoredContentSnapshot, firstFidelityDifference } from './fidelity.js';
 import { inlineText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
 import { retargetDocLinks, siteLinkTarget, type SiteLinks } from '../urls/site-links.js';
+import { rewriteAssetRefs, type AssetManifest } from '../assets/manifest.js';
 
 /** One page as the source served it, paired with the file the migration wrote for it. */
 export interface RawSourcePage {
@@ -136,12 +137,17 @@ export function outputIr(page: RawSourcePage): DocIR | undefined {
  * component naming differences between platforms do not matter but text,
  * headings, links, images, code and component content props all do.
  */
-export function sourceContentExact(page: RawSourcePage, platform: string, profile?: ScrapeProfile, links?: SiteLinks): SourceComparison {
+export function sourceContentExact(page: RawSourcePage, platform: string, profile?: ScrapeProfile, links?: SiteLinks, assets?: AssetManifest): SourceComparison {
   const source = rawSourceIr(page, platform, profile, links);
   if (!source) return { pageId: page.pageId, path: page.path, pass: false, detail: 'no published Markdown was frozen for this page' };
   const output = outputIr(page);
   if (!output) return { pageId: page.pageId, path: page.path, pass: false, detail: `no output file at ${page.outputFile}` };
-  const difference = firstFidelityDifference(authoredContentSnapshot(source), authoredContentSnapshot(output));
+  // Hosting an asset changes its URL by design, in the body and in the social image alike. The
+  // source is put through the same manifest the conversion used, so the comparison is between what
+  // the two sides *say* and not between where the bytes are served from; an asset the manifest does
+  // not know keeps its source URL and still fails.
+  const hosted = assets ? rewriteAssetRefs({ ...source, source: page.url ?? source.source }, assets) : source;
+  const difference = firstFidelityDifference(authoredContentSnapshot(hosted), authoredContentSnapshot(output));
   return { pageId: page.pageId, path: page.path, pass: !difference, difference };
 }
 
