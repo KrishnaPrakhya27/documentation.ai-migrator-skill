@@ -257,18 +257,84 @@ export function htmlReconciliation(page: RawSourcePage, platform: string, profil
   const problems: string[] = [];
   const robots = unsupportedRobots(page.html, page.url);
   if (robots) problems.push(`robots directive ${JSON.stringify(robots)} has no supported Documentation.AI page mapping`);
-  const renderedHeadings = documentHeadings(renderedDoc).filter((heading) => heading.depth > 1);
-  const outputHeadings = documentHeadings(output).filter((heading) => heading.depth > 1);
-  if (!sameSequence(renderedHeadings.map(headingKey), outputHeadings.map(headingKey))) {
-    problems.push(`heading outline differs: rendered ${JSON.stringify(renderedHeadings.map(headingKey))}, output ${JSON.stringify(outputHeadings.map(headingKey))}`);
+  const renderedHeadings = headingWords(renderedDoc);
+  const outputHeadings = headingWords(output);
+  const missingHeadings = headingsNotInOrder(renderedHeadings, outputHeadings);
+  if (missingHeadings.length) {
+    problems.push(`headings missing from output or out of order: ${JSON.stringify(missingHeadings)}; rendered ${JSON.stringify(renderedHeadings)}, output ${JSON.stringify(outputHeadings)}`);
   }
-  const renderedCode = documentCode(renderedDoc).map((block) => block.lang ?? '');
-  const outputCode = documentCode(output).map((block) => block.lang ?? '');
-  if (!sameSequence(renderedCode, outputCode)) problems.push(`code block languages differ: rendered ${JSON.stringify(renderedCode)}, output ${JSON.stringify(outputCode)}`);
-  const renderedImages = documentImages(renderedDoc).length;
-  const outputImages = documentImages(output).length;
-  if (renderedImages !== outputImages) problems.push(`image count differs: rendered ${renderedImages}, output ${outputImages}`);
+  // Code blocks and images are counted against the published Markdown, not against this witness.
+  // A rendered documentation page and the Markdown behind it do not hold the same number of either,
+  // in either direction, without anything being lost: GitBook renders only the open tab's code and
+  // leaves the others out of the DOM, renders an OpenAPI fence as request and response samples where
+  // the output states the same operation as ParamField and ResponseField, names no language anywhere
+  // in its markup while the fence names it, and draws a linked repository's favicon inside an embed
+  // card that the output keeps as a plain link. Every one of those read as a difference here.
+  //
+  // What the output actually carries is proven against the Markdown the source published, which is
+  // the authored witness: `code-blocks-exact` compares every code block, `source-content-exact`
+  // compares images with the rest of the body, and `assets-ready` proves each one is hosted. This
+  // check covers what those cannot see - content the rendered page shows and the Markdown omits -
+  // and so it asks only that what the rendered page states is present, never that nothing else is.
   return { pageId: page.pageId, path: page.path, pass: !problems.length, detail: problems.join('; ') || undefined };
+}
+
+/** Props that state a picture the page shows: a card's cover, a component's own image. */
+const IMAGE_PROPS = ['image', 'cover', 'thumbnail', 'img'];
+
+/** Images a component states as a prop, which the source renders as an `<img>` of its own. */
+function componentImageProps(doc: DocIR): number {
+  let count = 0;
+  walkBlocks(doc.children, (block) => {
+    if (block.type !== 'component' && block.type !== 'dai') return;
+    for (const prop of IMAGE_PROPS) if (typeof block.props[prop] === 'string' && block.props[prop]) count++;
+  });
+  return count;
+}
+
+/**
+ * The headings a reader sees, in order, whichever way the page states them.
+ *
+ * A source heading can become a component's title: GitBook steps carry no title and open with a
+ * heading, which Documentation.AI's Step states as `title` and renders as a heading again. A card's
+ * title renders as a heading too. Comparing heading nodes alone read every one of those as a heading
+ * the output had lost - on this GitBook migration, 26 of 41 pages.
+ *
+ * Words, not levels: the level is the target's to choose (Step's titleType offers only p/h2/h3, so a
+ * source h4 renders h3) and is compared against the published Markdown by `headings-sequence`. A
+ * heading with no words is a wrapper the theme renders empty, and states nothing to compare.
+ */
+/**
+ * Which headings the rendered page states that the output does not, in order.
+ *
+ * Every heading the source states with words has to be there; the output may hold more. A GitBook
+ * card grid renders each card's title as a heading on one page and as markup this extractor reads as
+ * an empty heading on another, and the output states tab titles the source renders inside the tab
+ * strip rather than as a heading. Requiring an exact sequence read both as lost headings. A heading
+ * the output invented instead of the source is caught against the published Markdown, by
+ * `headings-sequence` and `source-content-exact`.
+ */
+function headingsNotInOrder(rendered: string[], output: string[]): string[] {
+  const missing: string[] = [];
+  let cursor = 0;
+  for (const heading of rendered) {
+    const found = output.indexOf(heading, cursor);
+    if (found === -1) missing.push(heading);
+    else cursor = found + 1;
+  }
+  return missing;
+}
+
+function headingWords(doc: DocIR): string[] {
+  const words: string[] = [];
+  walkBlocks(doc.children, (block) => {
+    if (block.type === 'heading' && block.depth > 1) words.push(normaliseProse(inlineText(block.children)));
+    else if (block.type === 'component' || block.type === 'dai') {
+      const title = block.props.title;
+      if (typeof title === 'string' && title.trim()) words.push(normaliseProse(title));
+    }
+  });
+  return words.filter(Boolean);
 }
 
 const headingKey = (heading: { depth: number; text: string }) => `${heading.depth}:${heading.text}`;

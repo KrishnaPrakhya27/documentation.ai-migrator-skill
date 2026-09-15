@@ -134,8 +134,14 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
       }
       case 'heading': return [{ type: 'heading', depth: block.depth, children: inlineShape(block.children) }];
       case 'code': {
-        const serializedMeta = exactComponents ? [`${block.title ? `title="${block.title.replace(/["\r\n`~]/g, ' ').trim()}"` : ''}`, block.meta ?? ''].filter(Boolean).join(' ') : block.meta ?? '';
-        return [{ type: 'code', lang: block.lang ?? '', meta: serializedMeta, title: exactComponents ? '' : block.title ?? '', value: block.value.replace(/\r\n/g, '\n') }];
+        // A code block's title is the filename label the source shows above it. GitBook states it in
+        // the rendered page but not on the Markdown fence, so the published-Markdown witness cannot
+        // speak to it and reading its silence as a difference failed a page whose output was right.
+        // Like ParamField's `type`, it is proven elsewhere: the snapshot reads it from the rendered
+        // source, `conversion-fidelity` proves conversion kept it, and `serialized-output-exact`
+        // proves the written file still carries it.
+        const serializedMeta = exactComponents ? [`${block.title ? `title="${block.title.replace(/["\r\n`~]/g, ' ').trim()}"` : ''}`, block.meta ?? ''].filter(Boolean).join(' ') : (block.meta ?? '').replace(/\btitle="[^"]*"/g, '').trim();
+        return [{ type: 'code', lang: block.lang ?? '', meta: serializedMeta, title: '', value: block.value.replace(/\r\n/g, '\n') }];
       }
       case 'blockquote': return [{ type: 'blockquote', children: blocksShape(block.children, exactComponents) }];
       case 'list': return [{ type: 'list', ordered: block.ordered, start: block.start ?? null, children: block.children.map((item) => ({ type: 'listItem', checked: item.checked ?? null, children: blocksShape(item.children, exactComponents) })) }];
