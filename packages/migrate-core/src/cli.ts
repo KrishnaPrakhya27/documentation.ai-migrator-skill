@@ -27,6 +27,9 @@ import { progressReporter } from './cli/progress.js';
 import { canonicalHostsPath, loadSnapshot, readJson, readSnapshotPage, resetDir, snapshotPageCount, snapshotPages, sourceFiles, writeJson } from './cli/io.js';
 import { buildSourceEvidence, expectedSidebar, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
 import { captureOpenapi, type OpenapiCapture } from './cli/openapi-capture.js';
+import { buildCustomerReport } from './report/customer-data.js';
+import { renderCustomerReportHtml } from './report/customer-html.js';
+import { htmlToPdf, ChromeUnavailableError } from './report/pdf.js';
 import { acquiredHtml, readPlatformMeta, type PlatformMeta } from './cli/platform-meta.js';
 import { assertOutsidePlugin, ensureWorkspace, readSession, writeSession, markStage, type Session, fileHash } from './session/workspace.js';
 import { acquireWorkspaceLock, type WorkspaceLock } from './session/lock.js';
@@ -1243,8 +1246,31 @@ async function main() {
       const provenance: RunProvenance = { fidelityMode: s.fidelityMode ?? 'exact', navigationSource: tree.navigationSource, migrator: s.migrator, quarantine: countQuarantine(workspace) };
       writeConnectionSummary(workspace, s, provenance);
       writeSummary(workspace, { pages: tree.pages.filter((p) => p.migrate).length, converted: tree.pages.filter((p) => p.migrate && p.newPath && existsSync(join(workspace, 'output', `${p.newPath}.mdx`))).length, clusters: clusters.length, assets: Object.keys(manifest.entries).length, gates, branch: s.stages.write?.note, provenance });
+
+      // The one report written for the customer rather than the team: what arrived, what did not,
+      // and what still needs them. Always written as HTML; the PDF is the same page printed.
+      const redirectsPath = join(workspace, 'report', 'redirects.exact.json');
+      const redirects = existsSync(redirectsPath) ? readJson<unknown[]>(redirectsPath).length : 0;
+      const customer = buildCustomerReport({ workspace, session: s, tree, gates, assets: Object.keys(manifest.entries).length, redirects });
+      const customerHtml = renderCustomerReportHtml(customer);
+      const htmlPath = join(workspace, 'report', 'customer-report.html');
+      writeFileSync(htmlPath, customerHtml, { mode: 0o600 });
+      writeJson(join(workspace, 'report', 'customer-report.json'), customer);
+      let pdfNote = '';
+      if (v['no-pdf']) pdfNote = '; PDF skipped (--no-pdf)';
+      else {
+        const pdfPath = join(workspace, 'report', 'customer-report.pdf');
+        try { await htmlToPdf(customerHtml, pdfPath); pdfNote = `; ${pdfPath}`; }
+        catch (error) {
+          // A missing browser must not cost the report: the HTML prints to PDF from any browser.
+          const why = error instanceof ChromeUnavailableError ? error.message : `PDF rendering failed: ${(error as Error).message}`;
+          pdfNote = `; PDF not written (${why}) — open ${htmlPath} and print to PDF, or set CHROME_PATH and re-run report`;
+        }
+      }
       markStage(workspace, 'report', 'done');
       ok('report/summary.md and report/platform-gaps.json written');
+      const needsCustomer = customer.shortfalls.filter((shortfall) => shortfall.needsYou).length;
+      ok(`customer report: ${customer.migrated.pagesWritten}/${customer.migrated.pagesInScope} pages, ${customer.shortfalls.length} item(s) that did not carry over${needsCustomer ? `, ${needsCustomer} needing a customer decision` : ''}${pdfNote}`);
       break;
     }
     default: fail(`unknown command ${cmd}\n\n${HELP}`);

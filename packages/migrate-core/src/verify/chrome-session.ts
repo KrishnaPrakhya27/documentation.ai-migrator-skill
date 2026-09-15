@@ -41,7 +41,7 @@ const DEFAULT_TIMEOUT_MS = 45_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
 
 /** Chrome prints the endpoint it is listening on to stderr; there is no other way to learn the port. */
-function endpointFrom(chrome: ChildProcess): Promise<string> {
+export function endpointFrom(chrome: ChildProcess): Promise<string> {
   return new Promise((resolve, reject) => {
     let output = '';
     const timer = setTimeout(() => reject(new Error(`Chrome did not report a DevTools endpoint within ${LAUNCH_TIMEOUT_MS}ms`)), LAUNCH_TIMEOUT_MS);
@@ -61,7 +61,7 @@ function endpointFrom(chrome: ChildProcess): Promise<string> {
 }
 
 /** A DevTools connection with request/response correlation by command id. */
-function connect(endpoint: string): Promise<{
+export function connect(endpoint: string): Promise<{
   send: (method: string, params?: Record<string, unknown>, sessionId?: string) => Promise<Record<string, unknown>>;
   close: () => void;
 }> {

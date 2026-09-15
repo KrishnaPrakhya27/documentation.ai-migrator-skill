@@ -27,7 +27,10 @@ Commands (run in order; the workflow has exactly four standard human gates):
                --allow-lossy (permissive sessions only) pushes an exploratory branch with unproven exactness gates waived; failed gates still block
   verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
   release                                                            validates all four approvals and writes an immutable release certificate
-  report                                                            → report/summary.md, report/platform-gaps.json
+  report       [--no-pdf]                                           → report/summary.md, report/platform-gaps.json,
+               and the customer-facing report/customer-report.{html,pdf,json}: what was migrated,
+               what did not carry over and why, and what still needs a customer decision.
+               --no-pdf writes the HTML only (no browser needed)
 
 Every command except init takes --workspace <dir> (or MIGRATION_WORKSPACE).`;
 
@@ -57,7 +60,7 @@ export function parseCommandLine() {
     proxy: { type: 'string', default: process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY },
     'headers-file': { type: 'string', default: process.env.MIGRATION_HEADERS_FILE }, 'cookies-file': { type: 'string', default: process.env.MIGRATION_COOKIES_FILE }, 'auth-origin': { type: 'string', default: process.env.MIGRATION_AUTH_ORIGINS },
     remote: { type: 'string' }, push: { type: 'boolean', default: false }, 'allow-lossy': { type: 'boolean', default: false },
-    'no-wait': { type: 'boolean', default: false }, 'preview-timeout': { type: 'string', default: process.env.MIGRATION_PREVIEW_TIMEOUT_MIN ?? '15' },
+    'no-wait': { type: 'boolean', default: false }, 'no-pdf': { type: 'boolean', default: false }, 'preview-timeout': { type: 'string', default: process.env.MIGRATION_PREVIEW_TIMEOUT_MIN ?? '15' },
     preview: { type: 'boolean', default: false }, 'preview-url': { type: 'string' }, 'preview-contract-version': { type: 'string' },
     'log-originals': { type: 'boolean', default: false },
     help: { type: 'boolean', default: false },
