@@ -121,6 +121,23 @@ function framedImageShape(block: { name: string; props: Record<string, string | 
   return FRAME_COMPONENTS.has(block.name) ? [image] : undefined;
 }
 
+/**
+ * A wrapper whose whole content is one heading reads as that heading. Mintlify publishes a custom
+ * heading anchor that way - `<div id="openapi-overlays">` around `## OpenAPI Overlays` - and the
+ * migration lifts the heading out carrying the id. The author wrote a heading with an anchor; the
+ * wrapper was how the platform spelled the anchor, so the two say the same thing.
+ *
+ * Narrow on purpose: one heading, nothing else, and no prop that carries content. A wrapper holding
+ * a heading *and* other blocks still has to match, because then the wrapper groups something.
+ */
+function anchorHeadingShape(block: { props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  const content = block.children.filter((child) => !(child.type === 'paragraph' && !inlineShape(child.children).length));
+  if (content.length !== 1 || content[0].type !== 'heading') return undefined;
+  const props = contentProps(block.props) as Record<string, unknown>;
+  const carries = Object.keys(props).filter((key) => key !== 'id');
+  return carries.length ? undefined : blocksShape(content, false);
+}
+
 function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[] {
   return blocks.flatMap((block): FidelityValue[] => {
     switch (block.type) {
@@ -160,6 +177,8 @@ function blocksShape(blocks: Block[], exactComponents: boolean): FidelityValue[]
         if (exactComponents) return [{ type: 'component', name: block.name, props: ordered(block.props), children: blocksShape(block.children, true) }];
         const framed = framedImageShape(block);
         if (framed) return framed;
+        const anchored = anchorHeadingShape(block);
+        if (anchored) return anchored;
         const bare = bareUrlShape(contentProps(block.props), block.children);
         if (bare) return bare;
         const folded = titleFold(contentProps(block.props), block.children);
