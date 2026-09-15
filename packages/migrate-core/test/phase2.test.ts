@@ -6,7 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { Response as UndiciResponse } from 'undici';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { CanonicalHosts, Fetcher, discoverSitemaps, type FetchImpl } from '../src/scrape/fetcher.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, mintlifyNavBase, normaliseDiscoveryUrl, siteBaseUrl, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, mergeNavigation, mintlifyNavBase, normaliseDiscoveryUrl, siteBaseUrl, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
 import { getProfile, profileHostAliases } from '../src/scrape/profiles.js';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { htmlAdapterOptions } from '../src/scrape/profiles.js';
@@ -666,6 +666,30 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(paths).toEqual(['/docs', '/docs/guides/setup']);
     // Refused from every direction: the marketing sitemap, and the links the pages themselves carry.
     expect(found.refusedOutsideBase).toEqual([`${SITE}/`, `${SITE}/blog/launch`, `${SITE}/guides/setup`, `${SITE}/pricing`]);
+  });
+  it('builds the sidebar from every page, because each states only its own locale and tab', () => {
+    const page = (url: string) => ({ type: 'page' as const, url });
+    const group = (label: string, children: any[]) => ({ type: 'group' as const, label, children });
+    const fromEn = [group('en', [group('Documentation', [page(`${SITE}/docs/quickstart`)])])];
+    const fromEnApi = [group('en', [group('API reference', [page(`${SITE}/docs/api/introduction`)])])];
+    const fromFr = [group('fr', [group('Documentation', [page(`${SITE}/docs/fr/quickstart`)])])];
+    let nav = mergeNavigation([], fromEn);
+    nav = mergeNavigation(nav, fromEnApi);
+    nav = mergeNavigation(nav, fromFr);
+    // One tab reached from several pages is one tab; a new locale is a new top-level node.
+    expect(nav).toEqual([
+      group('en', [
+        group('Documentation', [page(`${SITE}/docs/quickstart`)]),
+        group('API reference', [page(`${SITE}/docs/api/introduction`)]),
+      ]),
+      group('fr', [group('Documentation', [page(`${SITE}/docs/fr/quickstart`)])]),
+    ]);
+    // A page already placed among its siblings is not placed twice.
+    expect(mergeNavigation(nav, fromEn)).toEqual(nav);
+    // The already-recorded tree is never mutated by a later page.
+    const before = JSON.parse(JSON.stringify(fromEn));
+    mergeNavigation(fromEn, fromFr);
+    expect(fromEn).toEqual(before);
   });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);

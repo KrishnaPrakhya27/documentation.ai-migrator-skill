@@ -280,6 +280,34 @@ function pageUrlOfLlmsEntry(entry: LlmsEntry): string {
  * so a site published at the root behaves exactly as before.
  */
 /**
+ * The site's navigation as the union of what its pages state. A Mintlify page
+ * carries a `scopedNav` holding only its own locale and tab, so reading one
+ * page states a fraction of the sidebar: on a four-locale site the first page
+ * placed 172 of 1050 pages and left the rest to be grouped by their URL path,
+ * which is structure the source never stated.
+ *
+ * Groups match by label among their siblings and merge their children, so a
+ * tab reached from several pages is one tab. A page already placed is not
+ * placed twice, and anything new keeps the order the source gave it. Nodes are
+ * rebuilt rather than mutated, so an already-recorded candidate never changes
+ * under a later page.
+ */
+export function mergeNavigation(into: DiscoveredNavigationNode[], from: DiscoveredNavigationNode[]): DiscoveredNavigationNode[] {
+  const result = [...into];
+  for (const node of from) {
+    if (node.type === 'page') {
+      if (!result.some((existing) => existing.type === 'page' && existing.url === node.url)) result.push(node);
+      continue;
+    }
+    const at = result.findIndex((existing) => existing.type === 'group' && existing.label === node.label);
+    if (at < 0) { result.push(node); continue; }
+    const existing = result[at] as Extract<DiscoveredNavigationNode, { type: 'group' }>;
+    result[at] = { ...existing, children: mergeNavigation(existing.children, node.children) };
+  }
+  return result;
+}
+
+/**
  * The path prefix the operator named as the site, always ending in `/` so a
  * relative href resolves inside it. One host commonly publishes a marketing
  * site at its root and the documentation under a prefix, and the seed path is
@@ -1103,13 +1131,12 @@ export async function discoverLiveSite(input: {
       siteName ??= metaContent(response.body, 'meta[property=og:site_name]');
       if (input.profile.platform === 'mintlify') {
         siteConfig ??= extractMintlifyDocsConfig(response.body);
-        if (!navigation) {
-          const extracted = extractMintlifyNavigation(response.body, input.seedUrl);
-          if (extracted) {
-            navigation = extracted.navigation;
-            navigationCandidates['platform-metadata'] = extracted.navigation;
-            for (const page of extracted.pages) add(page.url, 'platform-navigation', input.seedUrl, { title: page.title, description: page.description, sidebarTitle: page.sidebarTitle, groupHint: page.groups });
-          }
+        // Every page states its own slice of the sidebar, so all of them are read and merged.
+        const extracted = extractMintlifyNavigation(response.body, input.seedUrl);
+        if (extracted) {
+          navigation = mergeNavigation(navigation ?? [], extracted.navigation);
+          navigationCandidates['platform-metadata'] = navigation;
+          for (const page of extracted.pages) add(page.url, 'platform-navigation', input.seedUrl, { title: page.title, description: page.description, sidebarTitle: page.sidebarTitle, groupHint: page.groups });
         }
       }
       // MadCap Flare builds its sidebar in the browser from published data files, so a crawl of
