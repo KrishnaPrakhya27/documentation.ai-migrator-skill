@@ -721,6 +721,13 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     expect(sourceFingerprint(rendered('1', 'tint-11'))).toBe(sourceFingerprint(rendered('2', 'primary-9')));
     // an authored anchor id is not a generated one, and survives
     expect(sourceFingerprint('<h2 id="installing-the-cli">Install</h2>')).toContain('installing-the-cli');
+    // a generated block id is a fresh random token on each render
+    expect(sourceFingerprint('<div id="response-EniAmdAFY0u3">Body</div>')).toBe(sourceFingerprint('<div id="response-HQEPG0aGn0kY">Body</div>'));
+    // republishing bumps the last-updated stamp without a word changing
+    const stamped = (t: string) => `<p>Last updated <time dateTime="${t}">14 hours ago</time></p><p>Body.</p>`;
+    expect(sourceFingerprint(stamped('2026-09-14T16:46:29.000Z'))).toBe(sourceFingerprint(stamped('2026-09-15T10:46:46.000Z')));
+    // and an edit to the words is still a difference
+    expect(sourceFingerprint(stamped('x').replace('Body.', 'New body.'))).not.toBe(sourceFingerprint(stamped('x')));
   });
   it('looks for a site-level file under the site the operator named before the origin root', () => {
     expect(siteFileBases('https://acme.example/docs')).toEqual(['https://acme.example/docs/', 'https://acme.example/']);

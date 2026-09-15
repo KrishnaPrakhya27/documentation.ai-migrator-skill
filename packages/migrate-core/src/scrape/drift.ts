@@ -47,10 +47,18 @@ const VOLATILE = [
  * the text, the markup structure or a link changes it.
  */
 export function sourceFingerprint(body: string): string {
-  // A rendered relative time ("14 hours ago") changes every hour while the page does not. The
-  // element and its machine-readable datetime stay, so an actual edit still moves the fingerprint;
-  // only the words counting the hours since are dropped.
-  let text = body.replace(/(<time\b[^>]*>)[\s\S]*?<\/time>/gi, '$1</time>');
+  // A last-updated stamp, rendered ("14 hours ago") and machine-readable alike. The words change
+  // every hour while the page does not, and the platform bumps the timestamp whenever it republishes
+  // — regenerating an API reference from its spec moved every one of these a full day with the
+  // markdown byte-identical. A timestamp is not what a page says: an edit changes the words, and the
+  // words are still compared.
+  let text = body.replace(/<time\b[^>]*>[\s\S]*?<\/time>/gi, '<time></time>');
+  // An id a renderer generates so it can address a block it just drew — an OpenAPI response panel,
+  // a tooltip — is a fresh random token on every render. An authored anchor is a slug of the
+  // heading's own words, so the two are told apart by shape, not by prefix: a slug is lowercase
+  // words, a generated token mixes case with digits. Only the generated shape is dropped, because
+  // an authored anchor is a link target a reader can follow and losing it would hide a real change.
+  text = text.replace(/\sid="[A-Za-z0-9_-]{6,}"/g, (attr) => (/[A-Z]/.test(attr) && /[0-9]/.test(attr) ? ' ' : attr));
   for (const pattern of VOLATILE) text = text.replace(pattern, ' ');
   return text.replace(/\s+/g, ' ').trim();
 }
