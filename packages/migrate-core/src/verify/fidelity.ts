@@ -14,8 +14,24 @@ function cleanText(value: string): string {
   return value.replace(/\u00a0/g, ' ').replace(/[ \t\r\n]+/g, ' ').trim();
 }
 
+/**
+ * Adjacent text nodes are one run of text. A source can hold several where the output holds one -
+ * GitBook publishes `[Quickstart](broken://pages/d8dde99…)`, whose unusable target the conversion
+ * drops, leaving the words between the text on either side. Written out and read back they are a
+ * single string, so the comparison joins them before cleaning: joining cleaned values would eat the
+ * space that separated them.
+ */
+function mergeText(nodes: Inline[]): Inline[] {
+  return nodes.reduce<Inline[]>((out, node) => {
+    const previous = out[out.length - 1];
+    if (node.type === 'text' && previous?.type === 'text') out[out.length - 1] = { ...previous, value: previous.value + node.value };
+    else out.push(node);
+    return out;
+  }, []);
+}
+
 function inlineShape(nodes: Inline[]): FidelityValue[] {
-  return nodes.map((node): FidelityValue => {
+  return mergeText(nodes).map((node): FidelityValue => {
     switch (node.type) {
       case 'text': return { type: 'text', value: cleanText(node.value) };
       case 'inlineCode': return { type: 'inlineCode', value: node.value };

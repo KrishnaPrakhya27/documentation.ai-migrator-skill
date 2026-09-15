@@ -192,6 +192,29 @@ describe('blocks that say nothing', () => {
     expect(firstFidelityDifference(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBeDefined();
   });
 
+  /** GitBook publishes `[Quickstart](broken://pages/…)`; the unusable target goes and the words stay. */
+  it('reads a run of adjacent text as the one string it is written as', () => {
+    const split: Block = { id: id(), type: 'paragraph', children: [
+      { id: id(), type: 'text', value: 'This goes deeper than the ' },
+      { id: id(), type: 'text', value: 'Quickstart' },
+      { id: id(), type: 'text', value: '. By the end you will have a project.' },
+    ] };
+    const source = doc([split]);
+    const output = doc([para('This goes deeper than the Quickstart. By the end you will have a project.')]);
+    expect(fidelityEqual(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBe(true);
+  });
+
+  it('still fails when the words either side of a dropped link are not the same', () => {
+    const split: Block = { id: id(), type: 'paragraph', children: [
+      { id: id(), type: 'text', value: 'This goes deeper than the ' },
+      { id: id(), type: 'text', value: 'Quickstart' },
+      { id: id(), type: 'text', value: '. By the end you will have a project.' },
+    ] };
+    const source = doc([split]);
+    const output = doc([para('This goes deeper than the . By the end you will have a project.')]);
+    expect(firstFidelityDifference(authoredContentSnapshot(source), authoredContentSnapshot(output))).toBeDefined();
+  });
+
   it('reads an uncaptioned figure as the image it frames', () => {
     const image = { id: id(), type: 'image' as const, url: 'https://cdn.example.net/a.png', alt: '' };
     const source = doc([{ id: id(), type: 'figure', image, caption: [] }]);
