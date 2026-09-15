@@ -1045,3 +1045,24 @@ describe('exact conversion fidelity', () => {
     expect(existsSync(join(workspace, 'ledger', 'dispositions.jsonl'))).toBe(false);
   }, 60_000);
 });
+
+describe('a crawled path has no filename convention in it', () => {
+  const page = (source: string, oldPath: string, newPath: string) => ({ id: oldPath, title: oldPath, source, oldPath, newPath, group: [], order: 0, migrate: true });
+  it('keeps two real pages apart when one ends in readme, and still reads an index in a repository', () => {
+    // Mintlify publishes an overview at /docs/migration and a ReadMe migration guide one level in.
+    const crawled = { platform: 'mintlify', pages: [
+      page('https://www.mintlify.com/docs/migration', '/docs/migration', 'docs/migration'),
+      page('https://www.mintlify.com/docs/migration/readme', '/docs/migration/readme', 'docs/migration/readme'),
+    ] } as any;
+    const links = siteLinksFor(crawled);
+    // each address resolves to its own page, and neither claims the other's
+    expect(links.routes['/docs/migration']).toBe('docs/migration');
+    expect(links.routes['/docs/migration/readme']).toBe('docs/migration/readme');
+    const resolve = siteLinkResolver(links);
+    expect(resolve('/docs/migration/readme', undefined)?.target).toBe('/docs/migration/readme');
+    expect(resolve('/docs/migration', undefined)?.target).toBe('/docs/migration');
+    // in a repository the same spelling IS the index of its directory, and still is
+    const repo = { platform: 'gitbook', pages: [page('docs/migration/readme.md', '/docs/migration/readme', 'migration')] } as any;
+    expect(siteLinksFor(repo).routes['/docs/migration']).toBe('migration');
+  });
+});
