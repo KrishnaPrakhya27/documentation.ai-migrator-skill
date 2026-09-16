@@ -1375,7 +1375,11 @@ async function main() {
         iframeHosts: existsSync(join(workspace, 'plan', 'assets.yaml')) ? (parseYaml(readFileSync(join(workspace, 'plan', 'assets.yaml'), 'utf8')) as { iframeHosts?: string[] }).iframeHosts : undefined,
       });
       const sourceEvidence = buildSourceEvidence(workspace, tree);
-      if (sourceEvidence) sourceEvidence.declaredLosses = (d) => applyDeclaredLosses(d, verifyEngine);
+      // A substitution a named person approved is read on the source side as what replaced it, exactly
+      // as convert read it; otherwise the one page a live demo sits on is reported as differing from
+      // a source the operator already owned the difference in.
+      const verifySubstituted = new Set<string>(readScopeDecisions(workspace).substituted.map((entry) => entry.component));
+      if (sourceEvidence) sourceEvidence.declaredLosses = (d) => applyDeclaredLosses(d, verifyEngine, verifySubstituted);
       const gates = runGates({
         workspace, outputDir: join(workspace, 'output'), sourceEvidence, pinnedSourceManifest: s.hashes.sourceManifest, pinnedAcquisition: s.hashes.acquisition, pinnedOpenapi: s.hashes.openapi,
         // Gate 3 approves the report this run produces, so a local verify asks for gates 1 and 2;

@@ -136,7 +136,11 @@ function tableToMdx(t: TableNode): string {
   const cols = Math.max(...rows.map((r) => r.children.length));
   const pad = (r: { children: Inline[] }[]) => [...r, ...Array.from({ length: cols - r.length }, () => ({ children: [] as Inline[] }))];
   const line = (r: { children: Inline[] }[]) => `| ${pad(r).map(cell).join(' | ')} |`;
-  const sep = `| ${Array.from({ length: cols }, (_, i) => (t.align?.[i] === 'center' ? ':---:' : t.align?.[i] === 'right' ? '---:' : '---')).join(' | ')} |`;
+  // `:---` is a column the author aligned left, which is not the same statement as `---`, a column
+  // they left alone: both render left, and only one of them says so. Writing the default for both
+  // loses what the source stated and reads back as a different table.
+  const marker = (align: string | null | undefined): string => (align === 'center' ? ':---:' : align === 'right' ? '---:' : align === 'left' ? ':---' : '---');
+  const sep = `| ${Array.from({ length: cols }, (_, i) => marker(t.align?.[i])).join(' | ')} |`;
   return [line(header.children), sep, ...body.map((r) => line(r.children))].join('\n');
 }
 

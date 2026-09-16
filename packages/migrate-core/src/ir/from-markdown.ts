@@ -727,6 +727,18 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
           if (!attrs.length && kids.length && kids.every((c: any) => c.type === 'text')) {
             return [{ ...base, type: 'inlineHtml', value: `<${name}>${kids.map((c: any) => c.value).join('')}</${name}>` }];
           }
+          // The two attributed inline elements this tool writes: the span it composes for a source
+          // badge, and the abbr that carries a tooltip's hover text. Both are its own spelling, so
+          // both read back as themselves; without this the file disagreed with the IR it came from
+          // and every page carrying a badge failed the serialization gate.
+          const plain = kids.length && kids.every((c: any) => c.type === 'text') ? kids.map((c: any) => c.value).join('') : undefined;
+          if (plain !== undefined && name === 'span' && attrValue('className') === 'dai-mig-badge') {
+            return [{ ...base, type: 'inlineHtml', value: `<span className="dai-mig-badge">${escapeHtmlText(plain)}</span>` }];
+          }
+          if (plain !== undefined && name === 'abbr' && attrValue('title') !== undefined) {
+            const tip = attrValue('title')!;
+            return [{ ...base, type: 'inlineHtml', value: `<abbr title="${tip.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')}">${escapeHtmlText(plain)}</abbr>` }];
+          }
         }
         const text = inline(node.children ?? [], p);
         // Inline source components need a human decision; preserve their visible
@@ -785,7 +797,18 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
   };
 
   /** A non-literal attribute keeps the node a source component so exact mode stops on it instead of accepting it as resolved. */
-  const jsxElement = (node: any, path: number[]): ComponentNode | DaiComponentNode => {
+  const jsxElement = (node: any, path: number[]): Block => {
+    // The badge span this tool composes, standing on its own. It was written as raw HTML and reads
+    // back as the same raw HTML; read as a component it would disagree with the IR it came from.
+    if (opts.platform === 'dai' && String(node.name) === 'span') {
+      const attrs = (node.attributes ?? []).filter((a: any) => a.type === 'mdxJsxAttribute');
+      const kids = node.children ?? [];
+      const className = attrs.length === 1 && attrs[0].name === 'className' && typeof attrs[0].value === 'string' ? attrs[0].value : undefined;
+      if (className === 'dai-mig-badge' && kids.length && kids.every((c: any) => c.type === 'text')) {
+        const text = kids.map((c: any) => c.value).join('').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        return { id: idOf(node, path), src: srcOf(node), type: 'rawHtml', value: `<span className="dai-mig-badge">${text}</span>`, reviewFlag: 'T4 compose: badge → span (custom CSS)' };
+      }
+    }
     const source = component(node, path);
     if (opts.platform !== 'dai' || source.styleDeps?.length || !isContractComponentName(source.name)) return source;
     return { id: source.id, src: source.src, type: 'dai', name: source.name, props: source.props, children: source.children };
