@@ -272,7 +272,7 @@ describe('urls', () => {
     const inbound = new Map([['#mkd-123', 2]]);
     const { entries, shims } = anchorMap([{ pageId: 'p', headings: [{ id: 'h1', text: 'Overview', sourceId: 'overview' }, { id: 'h2', text: 'Steps', sourceId: 'mkd-123' }, { id: 'h3', text: 'Other', sourceId: 'zzz' }] }], inbound);
     expect(entries.map((e) => e.needsShim)).toEqual([false, true, false]);
-    expect(shims.get('p')?.get('h2')).toBe('mkd-123');
+    expect(shims.get('p')?.get('h2')).toEqual(['mkd-123']);
   });
 });
 

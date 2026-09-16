@@ -8,7 +8,7 @@ import { isSafeUrl } from '../components/sanitize.js';
 
 export interface SerializeOptions {
   /** heading node id → old anchor id to emit as a shim before the heading. */
-  anchorShims?: Map<string, string>;
+  anchorShims?: Map<string, string[]>;
   /** An anchor the page's title heading published, written at the head of the body because that heading became the title. */
   leadingAnchor?: string;
   /** Text to emit for quarantined blocks. */
@@ -168,8 +168,8 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
         break;
       }
       case 'heading': {
-        const shim = opts.anchorShims?.get(b.id);
-        if (shim) out.push(`<a id="${shim}"></a>`);
+        // A heading the source published under more than one address keeps every one of them.
+        for (const shim of opts.anchorShims?.get(b.id) ?? []) out.push(`<a id="${shim}"></a>`);
         // Trailing space is not part of a heading, and writing it changes the id a renderer gives it.
         out.push(`${'#'.repeat(b.depth)} ${inlineToMdx(b.children).trim()}`);
         break;
@@ -203,8 +203,7 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
       case 'rawHtml': out.push(b.value); break;
       case 'dai': {
         // An anchor the source published on this component, kept where something still links to it.
-        const componentShim = opts.anchorShims?.get(b.id);
-        if (componentShim) out.push(`<a id="${componentShim}"></a>`);
+        for (const componentShim of opts.anchorShims?.get(b.id) ?? []) out.push(`<a id="${componentShim}"></a>`);
         const inner = blocksToMdx(b.children, opts);
         if (!inner.trim()) out.push(openTag(b.name, b.props, true));
         else out.push(`${openTag(b.name, b.props)}\n${indent(inner)}\n</${b.name}>`);

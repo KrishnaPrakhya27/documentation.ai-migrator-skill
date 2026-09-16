@@ -871,6 +871,15 @@ async function main() {
         const heads: Array<{ id: string; text: string; sourceId?: string; aliases?: string[]; component?: boolean }> = [];
         // Mintlify numbers a repeated heading -2, -3 within a page; the count is per page.
         const mintlifySeen = new Map<string, number>();
+        // A heading the platform published an anchor for by wrapping it in an id'd div. On a
+        // translated page that id is the English one, so a link written against the original still
+        // lands while the heading itself reads in its own language; both spellings are kept.
+        const publishedAnchor = new Map<string, string>();
+        walkBlocks(doc.children, (n) => {
+          if (n.type !== 'component' || typeof n.props.id !== 'string' || !n.props.id) return;
+          const first = n.children.find((child) => !(child.type === 'paragraph' && !inlineText(child.children).trim()));
+          if (first?.type === 'heading') publishedAnchor.set(first.id, n.props.id);
+        });
         walkBlocks(doc.children, (n, depth) => {
           if (n.type === 'component') comps.push({ pageId: doc.pageId, node: n, depth, source: doc.source });
           if (n.type === 'heading') {
@@ -886,14 +895,28 @@ async function main() {
               const seen = (mintlifySeen.get(base) ?? 0) + 1; mintlifySeen.set(base, seen);
               mintlify = seen > 1 ? `${base}-${seen}` : base;
             }
-            heads.push({ id: n.id, text, sourceId: n.sourceId ?? gitbook[0] ?? mintlify, ...(gitbook.length > 1 ? { aliases: gitbook.slice(1) } : {}) });
+            const published = publishedAnchor.get(n.id);
+            const aliases = [...gitbook.slice(1), ...(published && mintlify && published !== mintlify ? [mintlify] : [])];
+            heads.push({ id: n.id, text, sourceId: n.sourceId ?? published ?? gitbook[0] ?? mintlify, ...(aliases.length ? { aliases } : {}) });
           }
           // Mintlify gives every parameter field an anchor, `param-<name>`, and pages link to them.
           // The target renders no such id, so the anchor is recorded on the component and written
           // back as a shim where a link still uses it.
           if (n.type === 'component' && tree.platform === 'mintlify' && (n.name === 'ParamField' || n.name === 'ResponseField')) {
             const name = ['name', 'path', 'query', 'body', 'header'].map((key) => n.props[key]).find((value) => typeof value === 'string');
-            if (typeof name === 'string') heads.push({ id: n.id, text: '', sourceId: `param-${name}`, component: true });
+            // A field named with a dot is anchored with the dot slugged away (`thumbnails.background`
+            // is linked as `#param-thumbnails-background`), and pages link to it both ways.
+            if (typeof name === 'string') {
+              const slugged = `param-${mintlifyHeadingId(name)}`;
+              heads.push({ id: n.id, text: '', sourceId: `param-${name}`, component: true, ...(slugged !== `param-${name}` ? { aliases: [slugged] } : {}) });
+            }
+          }
+          // Mintlify anchors a disclosure and a tab by their title, and pages link to those anchors
+          // the same way they link to a heading. The target renders no id for either, so the anchor
+          // is recorded on the component and written back as a shim where a link still uses it.
+          if (n.type === 'component' && tree.platform === 'mintlify' && (n.name === 'Accordion' || n.name === 'Tab')) {
+            const title = typeof n.props.title === 'string' ? n.props.title : undefined;
+            if (title) heads.push({ id: n.id, text: '', sourceId: mintlifyHeadingId(title), component: true });
           }
         });
         // Every link the document holds, not only those directly in a paragraph: a page's own

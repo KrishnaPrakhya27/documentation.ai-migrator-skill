@@ -31,16 +31,25 @@ describe('GitBook heading ids', () => {
     // the dotless spelling is the renderer's own id, so a link to it needs nothing; the dotted one does
     expect(anchorMap(pages, new Map([['#a-how-does-this-actually-work', 1]])).shims.get('p')?.has('h1') ?? false).toBe(false);
     const { shims } = anchorMap(pages, new Map([['#a.-how-does-this-actually-work', 1], ['#param-icons', 3]]));
-    expect(shims.get('p')?.get('h1')).toBe('a.-how-does-this-actually-work');
-    expect(shims.get('p')?.get('c1')).toBe('param-icons');
+    expect(shims.get('p')?.get('h1')).toEqual(['a.-how-does-this-actually-work']);
+    expect(shims.get('p')?.get('c1')).toEqual(['param-icons']);
     expect(shims.get('p')?.has('h2')).toBe(false);
+  });
+
+  it('keeps every published address of one heading, because a link may use any of them', () => {
+    // a translated page carries the original's anchor beside the one its own words generate
+    const pages = [{ pageId: 'p', headings: [{ id: 'h1', text: 'llms-full.txt', sourceId: 'llms-fulltxt', aliases: ['llms-full-txt'] }] }];
+    const { shims, entries } = anchorMap(pages, new Map([['#llms-fulltxt', 2], ['#llms-full-txt', 4]]));
+    // the renderer's own slug is llms-fulltxt, so only the other spelling needs an anchor of its own
+    expect(shims.get('p')?.get('h1')).toEqual(['llms-full-txt']);
+    expect(entries[0].inboundLinks).toBe(6);
   });
 
   it('writes the component shim into the page, where the fragment gate can see it', () => {
     const doc = { pageId: 'p', platform: 'mintlify', source: 'x', frontmatter: { title: 'T' }, children: [
       { id: 'c1', type: 'dai' as const, name: 'ResponseField', props: { name: 'icons', 'field-type': 'object' }, children: [] },
     ] };
-    expect(docToMdx(doc as any, { anchorShims: new Map([['c1', 'param-icons']]) })).toContain('<a id="param-icons"></a>\n\n<ResponseField');
+    expect(docToMdx(doc as any, { anchorShims: new Map([['c1', ['param-icons']]]) })).toContain('<a id="param-icons"></a>\n\n<ResponseField');
   });
 });
 
