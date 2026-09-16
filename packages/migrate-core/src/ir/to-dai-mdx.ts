@@ -44,8 +44,33 @@ const MDX_TEXT_ESCAPES: Array<[RegExp, string]> = [
  * the page answers 500. Mintlify's own `mdx className example` label did exactly that.
  */
 const STRING_READ_PROPS = new Set(['className', 'class', 'style', 'children', 'key', 'ref', 'dangerouslySetInnerHTML', 'meta']);
-/** A run of JSX attributes with plain string values, nothing else: what `<pre META />` can parse. */
-const PLAIN_JSX_ATTRIBUTES = /^(?:\s*[A-Za-z_][\w.-]*(?:="[^"<>{}&]*")?)*\s*$/;
+/**
+ * The attribute names of meta that is a run of JSX attributes with plain string values, or
+ * undefined when it is anything else. A linear scan: the regular expression this replaced nested
+ * one quantifier inside another and backtracked exponentially, so a long word followed by a
+ * character it could not take hung conversion outright.
+ */
+function plainAttributeNames(meta: string): string[] | undefined {
+  const names: string[] = [];
+  let i = 0;
+  const n = meta.length;
+  while (i < n) {
+    while (i < n && /\s/.test(meta[i])) i++;
+    if (i >= n) break;
+    if (!/[A-Za-z_]/.test(meta[i])) return undefined;
+    const start = i;
+    while (i < n && /[\w.-]/.test(meta[i])) i++;
+    names.push(meta.slice(start, i));
+    if (meta[i] === '=') {
+      if (meta[i + 1] !== '"') return undefined;
+      const close = meta.indexOf('"', i + 2);
+      if (close < 0 || /[<>{}&]/.test(meta.slice(i + 2, close))) return undefined;
+      i = close + 1;
+    }
+    if (i < n && !/\s/.test(meta[i])) return undefined;
+  }
+  return names;
+}
 
 /**
  * The meta a fence is written with. Meta that parses as plain attributes and names no prop the
@@ -54,7 +79,7 @@ const PLAIN_JSX_ATTRIBUTES = /^(?:\s*[A-Za-z_][\w.-]*(?:="[^"<>{}&]*")?)*\s*$/;
  * carried whole in one quoted `meta` prop, which the reader unwraps back to the same text.
  */
 export function fenceMeta(meta: string): string {
-  const names = PLAIN_JSX_ATTRIBUTES.test(meta) ? [...meta.matchAll(/(?:^|\s)([A-Za-z_][\w.-]*)(?==|\s|$)/g)].map((m) => m[1]) : undefined;
+  const names = plainAttributeNames(meta);
   if (names && !names.some((name) => STRING_READ_PROPS.has(name))) return meta;
   // Encoded twice: once for the JSX attribute the platform parses, and once more for the Markdown
   // info string, which decodes character references before that parse ever sees them.

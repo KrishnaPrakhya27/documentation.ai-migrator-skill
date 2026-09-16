@@ -21,6 +21,11 @@ describe('MDX the platform can compile and render', () => {
     expect(fenceMeta('Write class names in full')).toBe('meta="Write class names in full"');
     expect(fenceMeta('Example (with parens)')).toBe('meta="Example (with parens)"');
     expect(fenceMeta('title={x}')).toBe('meta="title=&amp;#123;x&amp;#125;"');
+    expect(fenceMeta('title="a b" wrap lines')).toBe('title="a b" wrap lines');
+    // linear: a long word before a character no attribute can take once hung conversion
+    const started = Date.now();
+    expect(fenceMeta(`${'a'.repeat(5000)}(`)).toMatch(/^meta="/);
+    expect(Date.now() - started).toBeLessThan(200);
   });
 
   it('reads the quoted meta back to the exact text it carried', () => {
