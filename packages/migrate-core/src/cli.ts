@@ -1271,6 +1271,7 @@ async function main() {
       }
       const withoutFolder: TreePage[] = [];
       const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta, withoutFolder);
+      if (!withoutFolder.length) rmSync(join(workspace, 'report', 'unplaced-pages.json'), { force: true });
       if (withoutFolder.length) {
         // The source publishes these in no folder at all, so --place-unlisted has no folder of the
         // source's to put them in. Inventing a container for them would state a structure the source
@@ -1607,8 +1608,8 @@ async function main() {
       // and what still needs them. Always written as HTML; the PDF is the same page printed.
       const redirectsPath = join(workspace, 'report', 'redirects.exact.json');
       const redirects = existsSync(redirectsPath) ? readJson<unknown[]>(redirectsPath).length : 0;
-      const customer = buildCustomerReport({ workspace, session: s, tree, gates, assets: Object.keys(manifest.entries).length, redirects });
-      const customerHtml = renderCustomerReportHtml(customer);
+      const customer = buildCustomerReport({ workspace, session: s, tree, gates, assets: Object.keys(manifest.entries).length, redirects, hubRoutes: [...helpCenterHubRoutes(workspace, tree)] });
+      const customerHtml = renderCustomerReportHtml(customer, { summary: !!v.summary });
       const htmlPath = join(workspace, 'report', 'customer-report.html');
       writeFileSync(htmlPath, customerHtml, { mode: 0o600 });
       writeJson(join(workspace, 'report', 'customer-report.json'), customer);

@@ -51,6 +51,13 @@ export interface Shortfall {
   more: number;
   /** Whether this needs the customer to decide something. */
   needsYou: boolean;
+  /**
+   * The sentence the reader's version (`report --summary`) uses in place of `summary`, when the full
+   * one names internal reasons; and whether the reader's version leaves the point out altogether.
+   * Either way the point stays in customer-report.json with its full list.
+   */
+  readerSummary?: string;
+  teamOnly?: boolean;
 }
 
 export interface CustomerReport {
@@ -150,7 +157,7 @@ const SKIP_REASON_LANGUAGE: Record<string, string> = {
 };
 
 /** Everything the run did not carry over, each with the reason it recorded at the time. */
-function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fidelityMode: 'exact' | 'permissive'): Shortfall[] {
+function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fidelityMode: 'exact' | 'permissive', hubRoutes: readonly string[] = []): Shortfall[] {
   const shortfalls: Shortfall[] = [];
 
   // Pages the plan deliberately did not migrate, grouped by the reason the adapter gave.
@@ -172,6 +179,7 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
       heading: `${plural(pages.length, 'page')} not migrated — ${reason}`,
       explanation: 'These exist in your source but were not carried over for the reason above. If any belong in the new site, they can be added.',
       summary: `${plural(pages.length, 'page')} ${why}. Tell us if any of them should be on the new site.`,
+      readerSummary: `${plural(pages.length, 'item')} from your old site ${pages.length === 1 ? 'was' : 'were'} not moved because ${pages.length === 1 ? 'it is' : 'they are'} not a documentation page. Tell us if any should be on the new site.`,
       examples: examplesOf(pages.map((page) => page.title ?? '')),
       ...capped(pages.map(pageLabel)),
       needsYou: true,
@@ -237,12 +245,15 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
 
   // A help-centre hub the migration wrote: no words of its own, only the section's categories.
   if (tree.helpCenter) {
+    // One hub per container carrying the label - a section published in four languages gets four.
+    const hubs = hubRoutes.length || 1;
     shortfalls.push({
-      heading: `1 page written by the migration: a help-centre hub for “${tree.helpCenter.container}”`,
-      explanation: `Your source had no landing page for this section, so one was written at /${tree.helpCenter.hubPath}. It holds no text of ours: it renders the section's own categories as cards, drawn from the navigation. Approved by ${tree.helpCenter.approvedBy}.`,
-      summary: `A landing page was added for “${tree.helpCenter.container}”, because your old site had none. It shows the section's own categories as cards and contains no text of ours.`,
+      heading: `${plural(hubs, 'page')} written by the migration: ${hubs === 1 ? 'a help-centre hub' : 'help-centre hubs'} for “${tree.helpCenter.container}”`,
+      explanation: `Your source had no landing page for this section, so ${hubs === 1 ? 'one was' : `one was written in each of its ${hubs} languages`}${hubs === 1 ? ' written' : ''}. It holds no text of ours: it renders the section's own categories as cards, drawn from the navigation. Approved by ${tree.helpCenter.approvedBy}.`,
+      summary: `A landing page was added for “${tree.helpCenter.container}”${hubs > 1 ? ` in each of its ${hubs} languages` : ''}, because your old site had none. It shows the section's own categories as cards and contains no text of ours.`,
       examples: [],
-      items: [], more: 0, needsYou: false,
+      ...capped(hubRoutes.map((route) => `/${route}`)),
+      needsYou: false,
     });
   }
 
@@ -265,7 +276,22 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
 
   // Published pages the source sidebar never placed. They migrate as files; inventing a group for
   // them would state a structure the source does not have.
-  const unlisted = readJsonIfPresent<Array<{ title?: string; newPath?: string; source?: string }>>(join(workspace, 'report', 'unlisted-pages.json'), []);
+  const allUnlisted = readJsonIfPresent<Array<{ title?: string; newPath?: string; route?: string; source?: string }>>(join(workspace, 'report', 'unlisted-pages.json'), []);
+  // An operator may have placed them under the folders the source publishes them in; then only the
+  // pages in no folder at all are still without a place, and the rest are placed rather than absent.
+  const placement = tree.unlistedPlacement;
+  const unplaced = placement ? readJsonIfPresent<Array<{ title?: string; route?: string; source?: string }>>(join(workspace, 'report', 'unplaced-pages.json'), []) : [];
+  const unlisted = placement ? unplaced.map((page) => ({ title: page.title, newPath: page.route, source: page.source })) : allUnlisted;
+  if (placement && allUnlisted.length > unlisted.length) {
+    const placed = allUnlisted.length - unlisted.length;
+    shortfalls.push({
+      heading: `${plural(placed, 'page')} placed in the sidebar under the section ${placed === 1 ? 'it belongs' : 'they belong'} to`,
+      explanation: `Your old site publishes these without listing them in its menu. They were placed under the sections their own addresses sit in, so readers can find them. Approved by ${placement.approvedBy}.`,
+      summary: `${plural(placed, 'page')} that your old site did not list in its menu ${placed === 1 ? 'was' : 'were'} placed in the sidebar under the section ${placed === 1 ? 'it belongs' : 'they belong'} to, so readers can find them.`,
+      examples: [],
+      items: [], more: 0, needsYou: false,
+    });
+  }
   if (unlisted.length) {
     const labels = unlisted.map((page) => `${page.title || 'Untitled'}${page.newPath ? ` — /${page.newPath}` : ''}`);
     // Placed by an approved decision (nav --place-unlisted) they are in the sidebar, and that is not
@@ -335,6 +361,7 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     const names = targets.slice(0, 3).map(([target]) => targetName(target));
     const top = targets.slice(0, 3).map(([target, count], index) => `the page “${names.filter((name) => name === names[index]).length > 1 ? `${names[index]} (${target})` : names[index]}”, ${plural(count, 'link')}`);
     shortfalls.push({
+      teamOnly: true,
       heading: `${unmigrated.length} link${unmigrated.length === 1 ? ' points' : 's point'} at pages this migration does not include`,
       explanation: 'These links target pages outside the agreed scope. They still work only while your existing site stays online — decide whether to bring those pages across or repoint the links.',
       summary: `${plural(unmigrated.length, 'link')} in your pages go to ${plural(targets.length, 'page')} that ${targets.length === 1 ? 'was' : 'were'} not migrated. They keep working only while your old site is online. Decide whether to bring those pages across or change the links.`,
@@ -410,6 +437,8 @@ export function buildCustomerReport(input: {
   assets: number;
   redirects: number;
   generatedAt?: string;
+  /** Routes of the help-centre hubs the navigation wrote, one per container carrying the label. */
+  hubRoutes?: readonly string[];
 }): CustomerReport {
   const { workspace, session, tree, gates } = input;
   const fidelityMode = session.fidelityMode ?? 'exact';
@@ -438,7 +467,7 @@ export function buildCustomerReport(input: {
       navigationSource: navigationSourceLanguage(tree.navigationSource),
     },
     checks: checksFrom(gates),
-    shortfalls: shortfallsFrom(workspace, tree, gates, fidelityMode),
+    shortfalls: shortfallsFrom(workspace, tree, gates, fidelityMode, input.hubRoutes ?? []),
     provenance: {
       migrator: describeMigrator(session.migrator),
       contentContract: session.versions.contentContract,
