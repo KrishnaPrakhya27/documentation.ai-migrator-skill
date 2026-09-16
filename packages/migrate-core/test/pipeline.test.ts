@@ -14,7 +14,7 @@ import { RulesEngine, applyDeclaredLosses, loadMappings, type MappingTable } fro
 import { DecisionLog } from '../src/log/decisions.js';
 import { Fetcher, isPublicAddress, type FetchImpl } from '../src/scrape/fetcher.js';
 import { remoteOrg, assertRemoteAllowed } from '../src/write/migration-branch.js';
-import { EXACT_FAMILY_GATE_IDS, headingOutline, mdxHeadingOutline, mdxTableSignatures, normaliseMdxText, previewPushBlockers, proseSegments, releaseBlockers, REQUIRED_RELEASE_GATE_IDS, runGates, tableSignatures, waivedExactnessGates, type GateInput } from '../src/verify/gates.js';
+import { EXACT_FAMILY_GATE_IDS, headingOutline, isHtmlChromeNode, mdxHeadingOutline, mdxTableSignatures, normaliseMdxText, previewPushBlockers, proseSegments, releaseBlockers, REQUIRED_RELEASE_GATE_IDS, runGates, tableSignatures, waivedExactnessGates, type GateInput } from '../src/verify/gates.js';
 import { unreadableImageDimensions } from '../src/ir/dimensions.js';
 import { chromeDump, pinnedResolverRules, runBrowserContentGate, runBrowserFragmentGate } from '../src/verify/browser.js';
 import { authoredContentSnapshot, fidelityEqual, firstFidelityDifference, renderedDocSnapshot } from '../src/verify/fidelity.js';
@@ -1029,6 +1029,19 @@ describe('exact conversion fidelity', () => {
     expect(grouped.resolved.children.map((block) => block.type)).toEqual(['heading', 'paragraph']);
     // a div that names an anchor and holds no heading is still refused rather than flattened
     expect(quarantinedReasons(convert('<div id="x">\n  Just prose.\n</div>\n').resolved)).toEqual([expect.stringContaining('heading anchor only when a heading leads it')]);
+  });
+
+  it('writes a code span of spaces so it reads back as the same spaces, and drops a bare Icon as decoration', () => {
+    // ` ` ` inside a table cell is a code span holding one space; padding it wrote three
+    const conversion = convert('| a | b |\n| --- | --- |\n| x | wrap in double backticks (` `code with \\` inside` `). |\n');
+    const written = docToMdx(conversion.resolved);
+    const back = markdownToIr(written, { platform: 'dai', file: 'f', pageId: 'p' });
+    const strip = (value: unknown) => JSON.stringify(value, (key, node) => (key === 'id' || key === 'src' ? undefined : node));
+    expect(strip(back.children[0])).toBe(strip(conversion.resolved.children[0]));
+
+    // a glyph with no words and no children is decoration a rule may drop, like script and style
+    expect(isHtmlChromeNode({ id: 'i', type: 'component', name: 'Icon', platform: 'mintlify', props: { icon: 'rocket' }, children: [] } as Block)).toBe(true);
+    expect(isHtmlChromeNode({ id: 'i', type: 'component', name: 'Icon', platform: 'mintlify', props: {}, children: [{ id: 't', type: 'paragraph', children: [{ id: 'x', type: 'text', value: 'words' }] }] } as Block)).toBe(false);
   });
 
   it('accepts a rendered Step without a title (null extractor prop) as exact', () => {

@@ -90,7 +90,11 @@ export function inlineToMdx(nodes: Inline[], insideLink = false): string {
       case 'inlineCode': {
         const longestRun = Math.max(0, ...Array.from(n.value.matchAll(/`+/g), (m) => m[0].length));
         const fence = '`'.repeat(longestRun + 1);
-        const pad = /^[ `]|[ `]$/.test(n.value) ? ' ' : '';
+        // A reader strips one space from each end of a code span only when it does not consist
+        // entirely of spaces. Padding one that does turned a span holding a single space into one
+        // holding three - which is what the source's own page about escaping characters writes.
+        const allSpaces = n.value.length > 0 && n.value.trim() === '';
+        const pad = !allSpaces && /^[ `]|[ `]$/.test(n.value) ? ' ' : '';
         return `${fence}${pad}${n.value}${pad}${fence}`;
       }
       case 'strong': return wrapEmphasis(inlineToMdx(n.children, insideLink), '**');

@@ -30,6 +30,7 @@ import { documentAnchors, unresolvedFragments, htmlAnchors, splitInheritedFragme
 import type { ScrapeProfile } from '../scrape/profiles.js';
 import { requireSourceManifest, sourceUniverseProblems } from '../evidence/verify.js';
 import { requireAcquisition } from '../evidence/acquisition.js';
+import { readScopeDecisions, type AcceptedDifference } from '../evidence/scope.js';
 import { inapplicableProofs } from '../evidence/applicability.js';
 import type { SpecManifest } from '../openapi/graph.js';
 
@@ -77,8 +78,17 @@ function isPlatformChromeButton(block: Block): boolean {
   return block.type === 'component' && block.name === 'button' && block.props['data-action'] === 'ask';
 }
 
+/**
+ * A glyph named from the platform's own icon set, standing on its own and holding nothing. It is
+ * decoration drawn from a font the target does not have: no words, no link, no content of any kind,
+ * so a rule may drop it the way it drops a style element. An icon wrapping anything is not this.
+ */
+function isPlatformGlyph(block: Block): boolean {
+  return block.type === 'component' && block.name === 'Icon' && !block.children.length;
+}
+
 export function isHtmlChromeNode(block: Block | undefined): boolean {
-  return block?.type === 'component' && (HTML_CHROME_ELEMENTS.has(block.name) || isPlatformChromeButton(block));
+  return block?.type === 'component' && (HTML_CHROME_ELEMENTS.has(block.name) || isPlatformChromeButton(block) || isPlatformGlyph(block));
 }
 
 /** Reviewer recorded by the rules engine when a mapping rule, not a person, dropped a node. */
@@ -717,15 +727,25 @@ export function runGates(input: GateInput): GateResult[] {
     if (!results.length || resultIds.size !== results.length || requiredIds.some((id) => !resultIds.has(id))) {
       gates.push({ id, status: 'fail', detail: 'raw source evidence is empty, duplicated, or missing migrated pages' }); return;
     }
-    const failures = results.filter((result) => !result.pass);
+    const reported = results.filter((result) => !result.pass);
+    // A difference a named person accepted, because its cause is outside the migration. The record
+    // quotes part of what this gate reported, so it answers that difference on that page and no
+    // other: anything else this page starts differing on is still a failure.
+    const answered = (result: SourceComparison): AcceptedDifference | undefined => accepted.find((entry) =>
+      entry.gate === id && entry.route === result.path.replace(/^\/+/, '') && (result.difference ?? result.detail ?? '').includes(entry.detail));
+    const failures = reported.filter((result) => !answered(result));
+    const waived = reported.length - failures.length;
     gates.push({
       id,
       status: failures.length ? 'fail' : 'pass',
-      detail: failures.length ? summary(failures) : `${results.length} page(s) match the acquired source`,
+      detail: failures.length
+        ? summary(failures)
+        : `${results.length} page(s) match the acquired source${waived ? `; ${waived} accepted difference(s) recorded by ${[...new Set(reported.filter((result) => answered(result)).map((result) => answered(result)!.approvedBy))].join(', ')}` : ''}`,
       count: failures.length,
       samples: failures.slice(0, 5).map((failure) => `${failure.path}: ${failure.difference ?? failure.detail ?? 'differs'}`),
     });
   };
+  const accepted = exact ? readScopeDecisions(input.workspace).differences : [];
   const sourcePages = exact && evidence ? evidence.pages : [];
   sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links, evidence!.assets, evidence!.declaredLosses)), (failures) => `${failures.length} page(s) differ from the published source`);
   sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page, evidence?.platform ?? 'generic', evidence?.profile)), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);
