@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import type { Block, ComponentNode, DaiComponentNode, DocIR, Inline, ListItemNode, QuarantinedNode, RawHtmlNode } from '../ir/types.js';
 import { flareTocTree } from '../scrape/madcap-toc.js';
 import type { DiscoveredNavigationNode } from '../scrape/discovery.js';
-import { walkBlocks, inlineText, isBlockWithChildren } from '../ir/types.js';
+import { walkBlocks, inlineText, blocksText, isBlockWithChildren } from '../ir/types.js';
 import { Ledger } from '../ledger/dispositions.js';
 import { sanitizeHtmlToJsx } from './sanitize.js';
 import { blocksToMdx } from '../ir/to-dai-mdx.js';
@@ -146,25 +146,6 @@ function matches(rule: MappingRule, node: ComponentNode): boolean {
  * lists with their markers and nesting, quotes with theirs, code as written. A prompt that holds a
  * numbered list is the whole list, not its first paragraph.
  */
-function blocksText(blocks: readonly Block[], indent = ''): string | undefined {
-  const parts: string[] = [];
-  for (const block of blocks) {
-    if (block.type === 'paragraph' || block.type === 'heading') parts.push(indent + inlineText(block.children));
-    else if (block.type === 'code') parts.push(block.value.split('\n').map((line) => indent + line).join('\n'));
-    else if (block.type === 'list') {
-      parts.push(block.children.map((item, index) => {
-        const marker = block.ordered ? `${(block.start ?? 1) + index}. ` : '- ';
-        const body = blocksText(item.children, indent + ' '.repeat(marker.length)) ?? '';
-        return indent + marker + body.trimStart();
-      }).join('\n'));
-    } else if (block.type === 'blockquote') parts.push((blocksText(block.children, indent) ?? '').split('\n').map((line) => `> ${line}`).join('\n'));
-    else if (block.type === 'table') parts.push(block.children.map((row) => indent + row.children.map((cell) => inlineText(cell.children)).join(' | ')).join('\n'));
-    else if ('children' in block && Array.isArray(block.children)) { const inner = blocksText(block.children as Block[], indent); if (inner) parts.push(inner); }
-  }
-  const text = parts.join('\n\n').trim();
-  return text || undefined;
-}
-
 /** A Flare table of contents as the nested list of links its tile menu draws, cut at the depth the menu declares. */
 function flareTocList(nodes: readonly DiscoveredNavigationNode[], idBase: string, depth: number, maxDepth: number): Block {
   const items = nodes.map((node, index): ListItemNode => {

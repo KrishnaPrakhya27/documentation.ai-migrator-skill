@@ -1,6 +1,6 @@
 /** Lossless, ID-independent representations used by exact migration gates. */
 import type { Block, DocIR, Inline } from '../ir/types.js';
-import { inlineText } from '../ir/types.js';
+import { inlineText, blocksText } from '../ir/types.js';
 
 export type FidelityValue = null | boolean | number | string | FidelityValue[] | { [key: string]: FidelityValue };
 
@@ -126,10 +126,19 @@ function sameAddress(url: string): string {
  * Props that only choose how a component looks: variant selectors (kind/type/style/theme/color), decoration
  * (icon/iconType/arrow), layout (columns/cols/horizontal) and initial state (defaultOpen). `titleType` is which
  * heading level a title renders at, and the contract offers only p/h2/h3, so a source h4 title renders h3 with the
- * same words. Losing one is a styling change, never a content change. ParamField's `type` is the one content-bearing `type`; its rule copies it and the
+ * same words. `width`/`height` size a component's own decoration - a Mintlify Tab sizes its icon with them - and
+ * are not the dimensions of an image, which the image node states itself and is compared on. Losing one is a
+ * styling change, never a content change. ParamField's `type` is the one content-bearing `type`; its rule copies it and the
  * serialised-output gate proves it survives, so the comparator need not.
  */
-const VISUAL_PROPS = new Set(['arrow', 'class', 'className', 'color', 'columns', 'cols', 'defaultOpen', 'horizontal', 'icon', 'iconType', 'kind', 'style', 'theme', 'titleType', 'type']);
+const VISUAL_PROPS = new Set(['arrow', 'class', 'className', 'color', 'columns', 'cols', 'defaultOpen', 'height', 'horizontal', 'icon', 'iconType', 'kind', 'style', 'theme', 'titleType', 'type', 'width']);
+/**
+ * Attributes that grant an embed a capability rather than state content: what an iframe may do, and
+ * what it may be trusted with. The sanitizer strips every one of them by policy before any rule
+ * runs, because a migrated page must not carry permissions the source host granted itself. Nothing
+ * a reader reads is in them.
+ */
+const EMBED_POLICY_PROPS = new Set(['allow', 'allowfullscreen', 'csp', 'frameborder', 'loading', 'referrerpolicy', 'sandbox', 'scrolling']);
 /** Source spellings of a target prop. An alias stands in only while the canonical prop is absent, so the two can never collide. */
 const PROP_ALIASES: Record<string, string> = { summary: 'title', label: 'title', date: 'title', img: 'image' };
 /** HTML data-* attributes are machine metadata (Mintlify's data-path is the asset's repository path), never rendered content. */
@@ -161,7 +170,7 @@ function contentProps(props: Record<string, string | number | boolean | null>): 
   const semantic: Record<string, string | number | boolean> = {};
   const authored = (key: string) => props[key] !== null && props[key] !== undefined;
   for (const [key, value] of Object.entries(props)) {
-    if (value === null || value === undefined || VISUAL_PROPS.has(key) || DATA_ATTRIBUTE.test(key)) continue;
+    if (value === null || value === undefined || VISUAL_PROPS.has(key) || EMBED_POLICY_PROPS.has(key.toLowerCase()) || DATA_ATTRIBUTE.test(key)) continue;
     const alias = PROP_ALIASES[key];
     const canonical = alias && !authored(alias) && !(alias in semantic) ? alias : key;
     semantic[canonical] = value;
@@ -222,8 +231,28 @@ function framedImageShape(block: { name: string; props: Record<string, string | 
   if (!content.length || !content.every((child) => child.type === 'image')) return undefined;
   const caption = typeof block.props.caption === 'string' ? cleanText(block.props.caption) : '';
   const images = blocksShape(content, false);
-  if (caption) return content.length === 1 ? [{ type: 'figure', image: images[0], caption: [{ type: 'text', value: caption }] }] : undefined;
-  return FRAME_COMPONENTS.has(block.name) ? images : undefined;
+  if (!caption) return FRAME_COMPONENTS.has(block.name) ? images : undefined;
+  // One image and a caption is a figure. Several - the light and dark spellings of one picture, or a
+  // sequence the caption describes together - cannot be one figure, so the conversion writes the
+  // pictures and then the caption as the italic line under them, which is where the reader reads it.
+  if (content.length === 1) return [{ type: 'figure', image: images[0], caption: [{ type: 'text', value: caption }] }];
+  return FRAME_COMPONENTS.has(block.name) ? [...images, { type: 'paragraph', children: [{ type: 'emphasis', children: [{ type: 'text', value: caption }] }] }] : undefined;
+}
+
+/**
+ * A frame around one embed is that embed: the frame draws the border, the embed is the content. The
+ * published Markdown wraps a YouTube iframe in a `<Frame>` and the conversion lifts the embed out,
+ * so the two spellings state the same video.
+ *
+ * Narrow by construction: a named frame, no caption, no content prop of its own, and exactly one
+ * child, which must be a component. A frame that wrapped anything else still has to match.
+ */
+function framedEmbedShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (!FRAME_COMPONENTS.has(block.name)) return undefined;
+  const content = block.children.filter((child) => !(child.type === 'paragraph' && !inlineShape(child.children).length));
+  if (content.length !== 1 || content[0].type !== 'component') return undefined;
+  if (Object.keys(contentProps(block.props) as Record<string, unknown>).length) return undefined;
+  return blocksShape(content, false);
 }
 
 /**
@@ -238,10 +267,18 @@ function framedImageShape(block: { name: string; props: Record<string, string | 
 function anchorHeadingShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
   if (!ANCHOR_WRAPPERS.has(block.name)) return undefined;
   const content = block.children.filter((child) => !(child.type === 'paragraph' && !inlineShape(child.children).length));
-  if (content.length !== 1 || content[0].type !== 'heading') return undefined;
   const props = contentProps(block.props) as Record<string, unknown>;
   const carries = Object.keys(props).filter((key) => key !== 'id');
-  return carries.length ? undefined : blocksShape(content, false);
+  if (carries.length) return undefined;
+  // An id'd div with nothing in it is an anchor and only an anchor - the target an older link still
+  // uses, before a heading that has since been renamed. The conversion writes it as that anchor
+  // element, which holds nothing authored and shapes to nothing; so does the div it came from.
+  if (!content.length) return typeof props.id === 'string' && props.id ? [] : undefined;
+  if (content[0].type !== 'heading') return undefined;
+  // The anchor is the platform's spelling of a heading id, so the conversion lifts the heading out
+  // carrying it and leaves what followed in place. Everything the div held is still compared, in the
+  // same order; only the wrapper the platform needed to name the anchor is gone.
+  return blocksShape(content, false);
 }
 
 /**
@@ -255,17 +292,29 @@ function anchorHeadingShape(block: { name: string; props: Record<string, string 
 function promptShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
   if (block.name !== 'Prompt') return undefined;
   const description = typeof block.props.description === 'string' ? block.props.description.trim() : '';
-  const parts: string[] = [];
-  for (const child of block.children) {
-    if (child.type === 'paragraph' || child.type === 'heading') parts.push(inlineText(child.children));
-    else if (child.type === 'code') parts.push(child.value);
-  }
-  const value = parts.join('\n\n').trim();
+  // The conversion flattens the prompt with blocksText, so this reads it with blocksText too. Reading
+  // it any other way would drop whatever that function keeps and this one does not - a prompt written
+  // as a numbered list lost its steps here while the output carried them, and the page quarantined.
+  const value = blocksText(block.children) ?? '';
   if (!value) return undefined;
   return [
     ...(description ? [{ type: 'paragraph', children: [{ type: 'text', value: description }] } as FidelityValue] : []),
     { type: 'code', lang: 'text', meta: '', title: '', value },
   ];
+}
+
+/**
+ * A file in a file tree states one thing: its name. The target has no tree, so the conversion writes
+ * the name as code in the tree's reading order, which is what a reader of the source sees in that row.
+ * Keyed to the name and to a file that states nothing else, so a tree node that carried more than a
+ * name still has to match.
+ */
+function treeFileShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
+  if (block.name !== 'Tree.File' || block.children.length) return undefined;
+  const props = contentProps(block.props) as Record<string, FidelityValue>;
+  const name = props.name;
+  if (typeof name !== 'string' || !name || Object.keys(props).length !== 1) return undefined;
+  return [{ type: 'paragraph', children: [{ type: 'inlineCode', value: name }] }];
 }
 
 /** Source components the conversion reads as a Card. Named, so this is not a licence for any component to become one. */
@@ -483,7 +532,9 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
         if (anchored) return anchored;
         const prompt = promptShape(block);
         if (prompt) return prompt;
-        for (const read of [cardSourceShape, colorRowShape, htmlHeadingShape, htmlRuleShape, renamedLabelShape, colorSwatchShape]) {
+        const embed = framedEmbedShape(block);
+        if (embed) return embed;
+        for (const read of [treeFileShape, cardSourceShape, colorRowShape, htmlHeadingShape, htmlRuleShape, renamedLabelShape, colorSwatchShape]) {
           const shaped = read(block);
           if (shaped) return shaped;
         }

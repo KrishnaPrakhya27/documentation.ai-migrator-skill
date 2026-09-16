@@ -10,7 +10,7 @@ import { defaultUrlPlan, redirectMaps, anchorMap, applyUrlPlan } from '../src/ur
 import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor } from '../src/urls/site-links.js';
 import { buildDocumentationNavigation, buildNavigation, pagesWithoutPlacement, placedPageIds, type Tree, type TreePage } from '../src/nav/tree.js';
 import { loadContract, validateMdx, validateNavigation } from '@dai/content-contract';
-import { RulesEngine, loadMappings, type MappingTable } from '../src/components/rules-engine.js';
+import { RulesEngine, applyDeclaredLosses, loadMappings, type MappingTable } from '../src/components/rules-engine.js';
 import { DecisionLog } from '../src/log/decisions.js';
 import { Fetcher, isPublicAddress, type FetchImpl } from '../src/scrape/fetcher.js';
 import { remoteOrg, assertRemoteAllowed } from '../src/write/migration-branch.js';
@@ -24,7 +24,7 @@ import { PROFILES, htmlAdapterOptions } from '../src/scrape/profiles.js';
 import { docToMdx } from '../src/ir/to-dai-mdx.js';
 import { ensureWorkspace, assertOutsidePlugin, writeSession, type Session } from '../src/session/workspace.js';
 import { Ledger } from '../src/ledger/dispositions.js';
-import { inlineText, walkBlocks, type Block, type CodeNode, type DaiComponentNode, type DocIR, type ImageNode } from '../src/ir/types.js';
+import { inlineText, walkBlocks, type Block, type CodeNode, type ComponentNode, type DaiComponentNode, type DocIR, type ImageNode } from '../src/ir/types.js';
 import { collectAssets, readManifest, writeManifest } from '../src/assets/manifest.js';
 import { applyBlockExclusions, unmatchedBlockExclusions } from '../src/ir/exclusions.js';
 import { firecrawlStatusUrl } from '../src/scrape/firecrawl.js';
@@ -972,6 +972,63 @@ describe('exact conversion fidelity', () => {
     expect(verdict(captioned)).toBe('exact');
     expect(captioned.resolved.children.map((block) => block.type)).toEqual(['figure']);
     expect(docToMdx(captioned.resolved)).toContain('<Image src="/s.png" alt="a" />\n\n*Cap*');
+  });
+
+  it('reads a captioned Frame of several images as those images above the caption line', () => {
+    const conversion = convert('<Frame caption="Assistant button.">\n  ![light](/light.png)\n\n  ![dark](/dark.png)\n</Frame>\n');
+    expect(verdict(conversion)).toBe('exact');
+    expect(conversion.resolved.children.map((block) => block.type)).toEqual(['image', 'image', 'paragraph']);
+    expect(docToMdx(conversion.resolved)).toContain('*Assistant button.*');
+    // a caption the conversion dropped is still a difference
+    const lost = resolve({ ...conversion.source, children: [{ ...(conversion.source.children[0] as ComponentNode), props: {} }] });
+    expect(verdict({ ...lost, source: conversion.source })).not.toBe('exact');
+  });
+
+  it('reads a Frame around one embed as that embed, and ignores the iframe capabilities the sanitizer strips', () => {
+    const conversion = convert('<Frame>\n  <iframe className="w-full" src="https://www.youtube.com/embed/abc" title="Player" allow="autoplay; encrypted-media" allowFullScreen></iframe>\n</Frame>\n');
+    expect(verdict(conversion)).toBe('exact');
+    expect(docToMdx(conversion.resolved)).toContain('https://www.youtube.com/embed/abc');
+  });
+
+  it('reads a tree file as its name in code, in the order the tree states it', () => {
+    const conversion = convert('<Tree>\n  <Tree.Folder name="app">\n    <Tree.File name="page.tsx" />\n  </Tree.Folder>\n\n  <Tree.File name="package.json" />\n</Tree>\n');
+    expect(verdict(conversion)).toBe('exact');
+    const mdx = docToMdx(conversion.resolved);
+    expect(mdx).toContain('`page.tsx`');
+    expect(mdx.indexOf('`page.tsx`')).toBeLessThan(mdx.indexOf('`package.json`'));
+    // a file that states more than its name is not just its name, and still has to match
+    expect(verdict(convert('<Tree>\n  <Tree.File name="a.ts" extra="x" />\n</Tree>\n'))).not.toBe('exact');
+  });
+
+  it('declares the tree folder highlight it drops, so the approved source no longer states it', () => {
+    const conversion = convert('<Tree>\n  <Tree.Folder name="app" highlight>\n    <Tree.File name="page.tsx" />\n  </Tree.Folder>\n</Tree>\n');
+    const engine = new RulesEngine({ platform: 'mintlify', mappings: mintlifyMappings(), ledger: new Ledger(conversion.workspace), log: new DecisionLog(conversion.workspace) });
+    const approved = applyDeclaredLosses(conversion.source, engine);
+    expect(firstFidelityDifference(authoredContentSnapshot(approved), authoredContentSnapshot(conversion.resolved))).toBeUndefined();
+  });
+
+  it('reads a prompt written as a list as the whole list, not only its opening line', () => {
+    const conversion = convert('<Prompt description="Use this prompt.">\n  You are a writing assistant.\n\n  - Use second person.\n  - Be concise.\n</Prompt>\n');
+    expect(verdict(conversion)).toBe('exact');
+    const code = conversion.resolved.children.find((block) => block.type === 'code');
+    expect(code && code.type === 'code' ? code.value : '').toBe('You are a writing assistant.\n\n- Use second person.\n- Be concise.');
+  });
+
+  it('sizes a component with width and height without calling it content, while an image keeps its own dimensions', () => {
+    const conversion = convert('<Tabs>\n  <Tab title="AWS" icon="/aws.svg" width="128" height="128">\n    Deploy on AWS.\n  </Tab>\n</Tabs>\n');
+    expect(verdict(conversion)).toBe('exact');
+    const shrunk = convert('<img src="/a.png" alt="a" width="100" height="50" />\n');
+    expect(JSON.stringify(authoredContentSnapshot(shrunk.source))).toContain('"width":100');
+  });
+
+  it('reads an empty id-only div as the anchor it is, and lifts a heading out of one that names it', () => {
+    const anchorOnly = convert('<div id="draft-changelog"></div>\n\n## Draft a changelog\n');
+    expect(verdict(anchorOnly)).toBe('exact');
+    const grouped = convert('<div id="create-the-webhook">\n  ## Create the webhook\n\n  Open settings.\n</div>\n');
+    expect(verdict(grouped)).toBe('exact');
+    expect(grouped.resolved.children.map((block) => block.type)).toEqual(['heading', 'paragraph']);
+    // a div that names an anchor and holds no heading is still refused rather than flattened
+    expect(quarantinedReasons(convert('<div id="x">\n  Just prose.\n</div>\n').resolved)).toEqual([expect.stringContaining('heading anchor only when a heading leads it')]);
   });
 
   it('accepts a rendered Step without a title (null extractor prop) as exact', () => {

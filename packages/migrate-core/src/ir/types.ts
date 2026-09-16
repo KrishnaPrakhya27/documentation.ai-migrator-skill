@@ -167,6 +167,31 @@ export function mapBlocks(blocks: Block[], fns: { inline?: (node: Inline) => Inl
   });
 }
 
+/**
+ * Plain text of a run of blocks, as a reader would copy it: list markers and nesting indentation
+ * included, cells separated, blank line between blocks. A conversion that flattens blocks into one
+ * text value uses this, and so must anything comparing against that value, or the two disagree on
+ * content neither of them lost.
+ */
+export function blocksText(blocks: readonly Block[], indent = ''): string | undefined {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === 'paragraph' || block.type === 'heading') parts.push(indent + inlineText(block.children));
+    else if (block.type === 'code') parts.push(block.value.split('\n').map((line) => indent + line).join('\n'));
+    else if (block.type === 'list') {
+      parts.push(block.children.map((item, index) => {
+        const marker = block.ordered ? `${(block.start ?? 1) + index}. ` : '- ';
+        const body = blocksText(item.children, indent + ' '.repeat(marker.length)) ?? '';
+        return indent + marker + body.trimStart();
+      }).join('\n'));
+    } else if (block.type === 'blockquote') parts.push((blocksText(block.children, indent) ?? '').split('\n').map((line) => `> ${line}`).join('\n'));
+    else if (block.type === 'table') parts.push(block.children.map((row) => indent + row.children.map((cell) => inlineText(cell.children)).join(' | ')).join('\n'));
+    else if ('children' in block && Array.isArray(block.children)) { const inner = blocksText(block.children as Block[], indent); if (inner) parts.push(inner); }
+  }
+  const text = parts.join('\n\n').trim();
+  return text || undefined;
+}
+
 /** Plain text of inline content, for prose matching and signatures. */
 export function inlineText(nodes: Inline[] | undefined): string {
   if (!nodes) return '';
