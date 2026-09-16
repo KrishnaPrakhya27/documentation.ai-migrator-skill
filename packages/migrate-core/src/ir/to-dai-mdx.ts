@@ -24,7 +24,8 @@ const MDX_TEXT_ESCAPES: Array<[RegExp, string]> = [
   [/\}/g, '&#125;'],
   // every `<`, not only one before a letter: in `<<remove` the first `<` would otherwise open a tag MDX cannot parse
   [/</g, '&lt;'],
-  [/^(\s*)([#>+\-*])(?=\s)/gm, '$1\\$2'],
+  // `*` is not here: every asterisk is escaped below, and escaping a line-leading one twice wrote `\\*`
+  [/^(\s*)([#>+\-])(?=\s)/gm, '$1\\$2'],
   // a backtick in text is literal: left bare, it pairs with the next code span's backtick (even a later table row's)
   [/`/g, '\\`'],
   // text that starts a line with a fence marker would open a code block

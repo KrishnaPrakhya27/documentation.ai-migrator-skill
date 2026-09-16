@@ -327,7 +327,7 @@ function placeByRoute(top: Record<string, unknown>[], rest: TreePage[]): TreePag
   return unplaced;
 }
 
-function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[], placeUnlisted = false, unplaced: TreePage[] = []): Record<string, unknown> {
+function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[], placeUnlisted = false, unplaced: TreePage[] = [], bound: ReadonlySet<string> = new Set()): Record<string, unknown> {
   type PageRef = { title: string; path: string };
   type Node = { group: string; pages: Array<PageRef | Node>; _order: number };
   const eligible = new Map(pages.filter((p) => p.migrate && p.newPath).map((p) => [p.id, p]));
@@ -344,7 +344,7 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
       // sitting at the container's own route (`assistant` above `assistant/configure`, or its
       // `index`/`readme`) — opens on that page: the platform reads it from the container's `path`,
       // and listing it again as a first child would show the same name twice in the sidebar.
-      const lifted = !node.pageId ? landingChild(node, eligible) : undefined;
+      const lifted = !node.pageId ? landingChild(node, eligible, bound) : undefined;
       const remaining = lifted ? node.children.filter((child) => child !== lifted) : node.children;
       const children = convert(remaining);
       const kind = node.kind ?? 'group';
@@ -352,7 +352,11 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
       // with nothing left beneath it is simply that page.
       const own = node.pageId ? eligible.get(node.pageId) : lifted ? eligible.get(lifted.pageId) : undefined;
       if (own && !children.length && !node.href) { out.push({ ...pageMetadata(own), ...pageLayout(own), title: node.label, path: own.newPath! }); continue; }
-      if (children.length || node.href) out.push({ [kind]: node.label, ...navigationMetadata(node), ...(own ? { path: own.newPath!, ...pageLayout(own) } : {}), ...(children.length ? collection(children, kind) : {}) });
+      // A container's own page that is bound to an OpenAPI operation is written as the container's
+      // first page entry instead of its `path`: the platform reads the operation from a page entry only.
+      const ownBound = !!own && bound.has(own.id);
+      const kids = ownBound ? [{ ...pageMetadata(own!), ...pageLayout(own!), title: node.label, path: own!.newPath! }, ...children] : children;
+      if (kids.length || node.href) out.push({ [kind]: node.label, ...navigationMetadata(node), ...(own && !ownBound ? { path: own.newPath!, ...pageLayout(own) } : {}), ...(kids.length ? collection(kids, kind) : {}) });
       }
       return out;
     };
@@ -424,17 +428,17 @@ function collection(items: Record<string, unknown>[], parent: string): Record<st
  * languages → versions → groups/pages, each level present only when the tree uses it.
  * The schema has no `default` flag: the default version or language is listed first.
  */
-export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: string; defaultLocale?: string; sourceNavigation?: SourceNavigationNode[]; placeUnlisted?: boolean; unplaced?: TreePage[] } = {}): { navigation: Record<string, unknown> } {
+export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: string; defaultLocale?: string; sourceNavigation?: SourceNavigationNode[]; placeUnlisted?: boolean; bound?: ReadonlySet<string>; unplaced?: TreePage[] } = {}): { navigation: Record<string, unknown> } {
   const inScope = pages.filter((p) => p.migrate && p.newPath);
   const hasDimensions = (nodes: SourceNavigationNode[]): boolean => nodes.some((node) => node.type === 'group' && (node.kind === 'language' || node.kind === 'version' || hasDimensions(node.children)));
-  if (hasDimensions(defaults.sourceNavigation ?? [])) return { navigation: buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced) };
+  if (hasDimensions(defaults.sourceNavigation ?? [])) return { navigation: buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced, defaults.bound) };
   const locales = [...new Set(inScope.map((p) => p.locale).filter((x): x is string => !!x))];
   const versions = [...new Set(inScope.map((p) => p.version).filter((x): x is string => !!x))];
   const orderFirst = <T,>(items: T[], first?: T) => (first && items.includes(first) ? [first, ...items.filter((x) => x !== first)] : items);
   const byVersion = (subset: TreePage[]): Record<string, unknown> => {
     const vs = orderFirst([...new Set(subset.map((p) => p.version).filter((x): x is string => !!x))], defaults.defaultVersion);
-    if (vs.length < 2 && !(vs.length === 1 && subset.some((p) => !p.version))) return buildSlice(subset, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced);
-    return { versions: vs.map((v) => ({ version: v, ...buildSlice(subset.filter((p) => p.version === v), defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced) })) };
+    if (vs.length < 2 && !(vs.length === 1 && subset.some((p) => !p.version))) return buildSlice(subset, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced, defaults.bound);
+    return { versions: vs.map((v) => ({ version: v, ...buildSlice(subset.filter((p) => p.version === v), defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced, defaults.bound) })) };
   };
   if (locales.length >= 2) {
     const ls = orderFirst(locales, defaults.defaultLocale);
@@ -459,11 +463,11 @@ export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: 
       const subset = inScope.filter((p) => p.locale === l);
       const nav = sliceNavigation(l);
       const vs = [...new Set(subset.map((p) => p.version).filter((x): x is string => !!x))];
-      return vs.length >= 2 ? byVersion(subset) : buildSlice(subset, nav, defaults.placeUnlisted);
+      return vs.length >= 2 ? byVersion(subset) : buildSlice(subset, nav, defaults.placeUnlisted, [], defaults.bound);
     };
     return { navigation: { languages: ls.map((l) => ({ language: l, ...byLanguage(l) })) } };
   }
-  return { navigation: versions.length >= 2 ? byVersion(inScope) : buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced) };
+  return { navigation: versions.length >= 2 ? byVersion(inScope) : buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced, defaults.bound) };
 }
 
 /** Attach a group-level `openapi` property to the group at `groupPath` (DAI group-level OpenAPI connection). */
@@ -520,8 +524,11 @@ function sameLabel(a: string | undefined, b: string): boolean {
  * container's name, or its route is the directory its siblings sit in (or that directory's
  * `index`/`readme`). Anything else stays a child. Only the first page counts: an index page leads.
  */
-export function landingChild(node: { label: string; children: SourceNavigationNode[] }, eligible: ReadonlyMap<string, TreePage>): Extract<SourceNavigationNode, { type: 'page' }> | undefined {
+export function landingChild(node: { label: string; children: SourceNavigationNode[] }, eligible: ReadonlyMap<string, TreePage>, bound: ReadonlySet<string> = new Set()): Extract<SourceNavigationNode, { type: 'page' }> | undefined {
   const first = node.children[0];
+  // A page bound to an OpenAPI operation stays a page entry: the platform reads the operation from a
+  // page's own entry, never from a container's `path`, so lifting it would render no reference.
+  if (first && first.type === 'page' && bound.has(first.pageId)) return undefined;
   // only a first page, and only when something else stays beneath the container: a container with
   // one page is the source's structure, and lifting it would collapse the container into a page
   if (!first || first.type !== 'page' || !eligible.has(first.pageId) || node.children.length < 2) return undefined;
@@ -560,12 +567,13 @@ function bindPageOperations(node: unknown, bindings: ReadonlyMap<string, string>
 
 export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlySet<string>, platformMeta: DocumentationNavigationMeta, unplaced: TreePage[] = []): { navigation: Record<string, unknown> } {
   const written = tree.pages.filter((page) => page.newPath !== undefined && writtenPaths.has(page.newPath));
-  let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation, placeUnlisted: !!tree.unlistedPlacement, unplaced });
   const bindings = new Map<string, string>();
   for (const page of written) {
     const operation = platformMeta.pageOpenapi?.[page.id];
     if (operation) bindings.set(page.newPath!, operation);
   }
+  const bound = new Set(written.filter((page) => platformMeta.pageOpenapi?.[page.id]).map((page) => page.id));
+  let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation, placeUnlisted: !!tree.unlistedPlacement, bound, unplaced });
   if (bindings.size) navigation = { navigation: bindPageOperations(navigation.navigation, bindings) };
   for (const ref of platformMeta.openapi ?? []) {
     try {

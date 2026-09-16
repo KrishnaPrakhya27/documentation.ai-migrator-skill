@@ -39,4 +39,37 @@ describe('an endpoint page bound where the platform reads it', () => {
     const { navigation } = buildDocumentationNavigation(tree, new Set(['docs/api/introduction']), { pageOpenapi: { status: 'api-reference/openapi.json GET /x' } });
     expect(entries(navigation).some((entry) => 'openapi' in entry)).toBe(false);
   });
+
+  it('keeps a bound page as its own entry rather than lifting it to its container\'s path', () => {
+    const operation = 'api-reference/openapi.json POST /pet';
+    const landing: Tree = {
+      ...tree,
+      pages: [page('doc-api', 'docs/create-content/openapi', 'Document an API'), page('add', 'docs/create-content/openapi/add-a-spec', 'Add a spec'), page('insert', 'docs/create-content/openapi/insert', 'Insert a reference')],
+      navigation: [{ type: 'group', label: 'Document an API', children: [{ type: 'page', pageId: 'doc-api' }, { type: 'page', pageId: 'add' }, { type: 'page', pageId: 'insert' }] }] as unknown as SourceNavigationNode[],
+    } as unknown as Tree;
+    const written = new Set(['docs/create-content/openapi', 'docs/create-content/openapi/add-a-spec', 'docs/create-content/openapi/insert']);
+    // without an operation the first page is the group's own landing page
+    const plain = buildDocumentationNavigation(landing, written, {}).navigation;
+    expect(JSON.stringify(plain)).toContain('"group":"Document an API","path":"docs/create-content/openapi"');
+    // with one it stays a page entry, where the platform reads the operation
+    const { navigation } = buildDocumentationNavigation(landing, written, { pageOpenapi: { 'doc-api': operation } });
+    const byPath = new Map(entries(navigation).map((entry) => [entry.path, entry]));
+    expect(byPath.get('docs/create-content/openapi')?.openapi).toBe(operation);
+    expect(JSON.stringify(navigation)).not.toContain('"group":"Document an API","path"');
+  });
+
+  it('writes a container\'s own bound page as its first page entry rather than as the container\'s path', () => {
+    const operation = 'api-reference/openapi.json POST /pet';
+    const owned: Tree = {
+      ...tree,
+      pages: [page('doc-api', 'docs/create-content/openapi', 'Document an API'), page('add', 'docs/create-content/openapi/add-a-spec', 'Add a spec')],
+      navigation: [{ type: 'group', label: 'Document an API', pageId: 'doc-api', children: [{ type: 'page', pageId: 'add' }] }] as unknown as SourceNavigationNode[],
+    } as unknown as Tree;
+    const written = new Set(['docs/create-content/openapi', 'docs/create-content/openapi/add-a-spec']);
+    expect(JSON.stringify(buildDocumentationNavigation(owned, written, {}).navigation)).toContain('"group":"Document an API","path":"docs/create-content/openapi"');
+    const { navigation } = buildDocumentationNavigation(owned, written, { pageOpenapi: { 'doc-api': operation } });
+    const byPath = new Map(entries(navigation).map((entry) => [entry.path, entry]));
+    expect(byPath.get('docs/create-content/openapi')?.openapi).toBe(operation);
+    expect(JSON.stringify(navigation)).not.toContain('"group":"Document an API","path"');
+  });
 });

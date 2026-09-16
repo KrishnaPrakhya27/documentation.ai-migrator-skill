@@ -29,6 +29,8 @@ A help-centre hub the migration wrote (`nav --help-center`) is listed as a page 
 
 Gate ids never appear. Each is rendered in the customer's terms (`code-blocks-exact` → "Code samples are character-for-character identical") by `report/gate-language.ts`; a gate with no entry there falls back to its raw id, so add one when adding a gate.
 
+`report --summary` writes the reader's version instead: the verdict, the numbers, each decision and note as one plain sentence, and the checks at a glance, with no appendix, no page or link addresses and no build detail. Nothing leaves the counts; every list stays in `customer-report.json`. Use it for the copy a customer reads; the full report is for the people acting on it.
+
 The PDF is printed from the HTML by the same headless Chrome verification already uses — no extra dependency, no network, scripts disabled. If Chrome is absent the stage still writes the HTML and JSON and says how to finish the job; it never fails the report over a missing browser. `--no-pdf` writes the HTML only.
 
 ## Provenance and per-route results

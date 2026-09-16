@@ -129,4 +129,16 @@ describe('titles the source escapes', () => {
     expect(page.llms?.title).toBe('Guide [updated for 2026]');
     expect(sourceMetadataExact(page, 'gitbook').pass).toBe(true);
   });
+
+  it('writes a text run that opens with an asterisk once-escaped, so it reads back as the asterisk', () => {
+    const doc = { pageId: 'p', frontmatter: { title: 'p' }, children: [{ id: 'l', type: 'list', ordered: false, children: [{ id: 'i', type: 'listItem', children: [{ id: 'q', type: 'paragraph', children: [
+      { id: 'e', type: 'emphasis', children: [{ id: 'et', type: 'text', value: 'Avoid it.' }] },
+      { id: 't', type: 'text', value: '* That collapses the nav.' },
+    ] }] }] }] } as any;
+    const mdx = docToMdx(doc);
+    expect(mdx).not.toContain('\\\\*');
+    const back = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' });
+    const para = ((back.children[0] as any).children[0].children[0]) as any;
+    expect(para.children.map((n: any) => (n.type === 'text' ? n.value : n.type))).toEqual(['emphasis', '* That collapses the nav.']);
+  });
 });

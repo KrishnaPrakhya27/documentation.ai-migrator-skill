@@ -53,8 +53,12 @@ npm run dai-migrate -- report      --workspace <path>
 `--fidelity exact` is the default and the only mode for a customer migration.
 `--fidelity permissive` is for test runs the user explicitly asks for: it reports the
 exact-fidelity gates as `not-run`, lets `assets --provider none` leave media on the source
-host, and pushes a preview only with `write --push --allow-lossy`. See "Exploratory test run"
-in `skills/migrate/SKILL.md`.
+host, and `write --push --allow-lossy` records the unproven gates as waived. See "Exploratory
+test run" in `skills/migrate/SKILL.md`.
+
+A failing gate never withholds the preview, in any mode: once scope and plan are approved,
+`write --push` publishes the branch with every finding recorded in
+`report/pushed-with-findings.json`; `release` is where a finding blocks.
 
 There are exactly four human approval gates, listed in the router skill. Stop at those.
 A failed check or a missing input is an exception to report, not a fifth gate.
