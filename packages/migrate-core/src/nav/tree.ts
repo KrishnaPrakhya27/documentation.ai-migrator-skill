@@ -370,10 +370,11 @@ function groupsBySourcePath(pages: TreePage[]): Record<string, unknown>[] {
       depth++;
       let node = byPath.get(key);
       if (!node) { node = { group: name, key, pages: [], order: page.order, route: folderRoute(page, depth), members: 0 }; byPath.set(key, node); container.push(node); }
+      // every page beneath this folder, at any depth: a folder whose pages all sit in subfolders
+      // still holds them
+      node.members++;
       container = node.pages;
     }
-    const own = byPath.get(key);
-    if (own) own.members++;
   }
 
   const byRoute = new Map<string, Node>();
@@ -390,7 +391,8 @@ function groupsBySourcePath(pages: TreePage[]): Record<string, unknown>[] {
   const landingFolder = (page: TreePage): Node | undefined => {
     const node = byRoute.get(page.newPath!.replace(/\/(?:index|readme)$/i, ''));
     if (!node || node.own) return undefined;
-    const others = node.members - (keyOf(page) === node.key ? 1 : 0);
+    const beneath = keyOf(page) === node.key || keyOf(page).startsWith(`${node.key}/`);
+    const others = node.members - (beneath ? 1 : 0);
     return others > 0 ? node : undefined;
   };
 

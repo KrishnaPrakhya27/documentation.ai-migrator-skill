@@ -1141,3 +1141,24 @@ describe('a section landing page opens its section', () => {
     expect(top.find((entry) => entry.group === 'Explainers')).not.toHaveProperty('path');
   });
 });
+
+describe('a section whose pages all sit in subfolders is still a section', () => {
+  const page = (id: string, newPath: string, group: string[], title: string, order: number): TreePage =>
+    ({ id, title, source: `https://learn.example.com/${newPath}.htm`, group, order, oldPath: `/${newPath}.htm`, migrate: true, newPath } as TreePage);
+  const seed = page('seed', 'home', [], 'Home', 0);
+  const nav = (list: TreePage[]) => {
+    const built = buildNavigation([seed, ...list], { placeUnlisted: true, sourceNavigation: [{ type: 'page' as const, pageId: 'seed', title: 'Home' }] }).navigation as { pages: Array<Record<string, unknown>> };
+    return built.pages.filter((entry) => entry.path !== 'home');
+  };
+
+  it('opens from its landing page even when no page sits in the folder itself', () => {
+    const top = nav([
+      page('lp', 'Explainers', [], 'SessionM Help Center', 1),
+      page('a', 'Explainers/Profile/overview', ['Explainers', 'Profile'], 'Overview', 2),
+      page('b', 'Explainers/Events/custom', ['Explainers', 'Events'], 'Custom events', 3),
+    ]);
+    expect(top).toHaveLength(1);
+    expect(top[0]).toMatchObject({ group: 'Explainers', path: 'Explainers' });
+    expect((top[0].pages as Array<{ group?: string }>).map((entry) => entry.group)).toEqual(['Profile', 'Events']);
+  });
+});
