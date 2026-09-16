@@ -6,7 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { Response as UndiciResponse } from 'undici';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { CanonicalHosts, Fetcher, discoverSitemaps, type FetchImpl } from '../src/scrape/fetcher.js';
-import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, mergeNavigation, mergeNavigationTrees, mintlifyNavBase, normaliseDiscoveryUrl, siteBaseUrl, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
+import { discoverLiveSite, extractDomSidebarNavigation, extractMintlifyNavigation, mergeNavigation, mergeNavigationTrees, mintlifyNavBase, navigationFromFrozenPages, normaliseDiscoveryUrl, siteBaseUrl, siteFileBases, sitemapStructureHint, withinSiteBase } from '../src/scrape/discovery.js';
 import { getProfile, profileHostAliases } from '../src/scrape/profiles.js';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { htmlAdapterOptions } from '../src/scrape/profiles.js';
@@ -664,6 +664,57 @@ describe('llms.txt and published Markdown as the authoritative source', () => {
     // a title one rendering states fills a gap in the other, and neither overwrites the first
     expect(mergeNavigationTrees([page('/a')], [page('/a', 'Alpha')])).toEqual([page('/a', 'Alpha')]);
     expect(mergeNavigationTrees([page('/a', 'Alpha')], [page('/a', 'Other')])).toEqual([page('/a', 'Alpha')]);
+  });
+  it('re-derives a section sidebar from every frozen page, not just the first', () => {
+    // GitBook expands only the branch holding the page being read. Reading one page per section
+    // would drop the subpages of every branch that page renders collapsed, so the tree rebuilt
+    // offline would be shorter than the one the live crawl merged.
+    const sections = '<div data-gb-sections><a href="/docs">Docs</a><a href="/api">API</a></div>';
+    const aside = (inner: string) => `<html><body>${sections}<aside>${inner}</aside><main>x</main></body></html>`;
+    // /api/models renders the parent collapsed: a bare link, no subpages.
+    const collapsed = aside('<ul><li><a class="toclink" href="/api">Petstore API</a></li><li><a class="toclink" href="/api/models">Models</a></li></ul>');
+    // /api itself renders the parent expanded, stating the two subpages nothing else names.
+    const expanded = aside('<ul><li><a class="toclink" href="/api">Petstore API</a><div><ul><li><a class="toclink" href="/api/auth">Auth</a></li><li><a class="toclink" href="/api/errors">Errors</a></li></ul></div></li><li><a class="toclink" href="/api/models">Models</a></li></ul>');
+    const docs = aside('<ul><li><a class="toclink" href="/docs">Welcome</a></li></ul>');
+    const frozen = [
+      { url: 'http://8.8.8.8/docs', html: docs },
+      { url: 'http://8.8.8.8/api/models', html: collapsed },
+      { url: 'http://8.8.8.8/api', html: expanded },
+    ];
+    const derived = navigationFromFrozenPages(frozen as any, 'gitbook', 'http://8.8.8.8/docs', 'http://8.8.8.8', getProfile('gitbook'));
+    expect(derived?.source).toBe('dom-sidebar');
+    const api = derived!.nodes.find((node: any) => node.label === 'API') as any;
+    // the parent is one entry carrying its own page, and its subpages survive the merge
+    expect(api.children).toEqual([
+      { type: 'group', label: 'Petstore API', pageUrl: 'http://8.8.8.8/api', children: [
+        { type: 'page', url: 'http://8.8.8.8/api/auth', title: 'Auth' },
+        { type: 'page', url: 'http://8.8.8.8/api/errors', title: 'Errors' },
+      ] },
+      { type: 'page', url: 'http://8.8.8.8/api/models', title: 'Models' },
+    ]);
+  });
+  it('places a container page once when one rendering collapses it to a plain link', () => {
+    const page = (url: string, title?: string) => ({ type: 'page' as const, url, ...(title ? { title } : {}) });
+    const container = (label: string, pageUrl: string, children: any[]) => ({ type: 'group' as const, label, pageUrl, children });
+    const group = (label: string, children: any[]) => ({ type: 'group' as const, label, children });
+    // GitBook expands the sidebar around the page being read: the parent page that opens
+    // /api-reference renders with its subpages on its own branch, and as a bare link from a sibling.
+    const expanded = [
+      container('Welcome to the Petstore API', '/api-reference', [page('/api-reference/auth'), page('/api-reference/errors')]),
+      group('Store', [page('/api-reference/store/orders')]),
+    ];
+    const collapsed = [
+      page('/api-reference'),
+      group('Store', [page('/api-reference/store/orders')]),
+    ];
+    // The container stands for both renderings, keeping the subpages it states; the page is placed once.
+    expect(mergeNavigationTrees(expanded, collapsed)).toEqual(expanded);
+    expect(mergeNavigationTrees(collapsed, expanded)).toEqual(expanded);
+    // and it is still one placement when the collapsed link sits inside another branch
+    expect(mergeNavigationTrees(expanded, [group('Store', [page('/api-reference')])])).toEqual([
+      container('Welcome to the Petstore API', '/api-reference', [page('/api-reference/auth'), page('/api-reference/errors')]),
+      group('Store', [page('/api-reference/store/orders')]),
+    ]);
   });
   it('gives a language variant its own container instead of folding it into the section above it', async () => {
     // Every English page declares two sections; a French page declares only its own root. Keying the

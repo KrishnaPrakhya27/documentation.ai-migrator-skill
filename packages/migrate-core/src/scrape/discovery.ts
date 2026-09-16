@@ -775,14 +775,20 @@ export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform
   }
   const sections = extractSectionTabs(home.html, seed, origin, profile);
   if (sections) {
+    // A sidebar that expands only the branch holding the page being read states a different part of
+    // one tree on every page, so a section's navigation is the union of what its pages state — read
+    // in discovery order, which is the order the live crawl merged them in, so re-deriving from the
+    // frozen bytes yields the navigation discovery recorded rather than a shorter one that drops the
+    // subpages of every branch the first page happened to render collapsed.
     const sidebars = new Map<string, DiscoveredNavigationNode[]>();
     for (const page of pages) {
       if (!page.html) continue;
       const section = sectionOfUrl(page.url, sections);
-      if (!section || sidebars.has(section.url)) continue;
+      if (!section) continue;
       const dom = extractDomSidebarNavigation(page.html, page.url, origin, profile);
-      if (dom) sidebars.set(section.url, dom);
-      if (sidebars.size === sections.length) break;
+      if (!dom) continue;
+      const seen = sidebars.get(section.url);
+      sidebars.set(section.url, seen ? mergeNavigationTrees(seen, dom) : dom);
     }
     const navigation = siteSectionNavigation(sections, sidebars);
     if (navigation) return { nodes: navigation, source: 'dom-sidebar' };
@@ -865,14 +871,24 @@ export function siteSectionNavigation(sections: readonly SiteSection[], sidebars
   return tabs.length >= 2 ? tabs : undefined;
 }
 
-/** Every page URL the tree already places, at any depth. */
+/** Every page URL the tree already places, at any depth — a container's own page included. */
 function pageKeysIn(nodes: DiscoveredNavigationNode[]): string[] {
-  return nodes.flatMap((node) => node.type === 'page' ? [navKey(node)] : pageKeysIn(node.children));
+  return nodes.flatMap((node) => node.type === 'page'
+    ? [navKey(node)]
+    : [...(node.pageUrl ? [`p:${node.pageUrl}`] : []), ...pageKeysIn(node.children)]);
 }
 
-/** How a navigation node is identified across two renderings of the same sidebar. */
+/**
+ * How a navigation node is identified across two renderings of the same sidebar.
+ *
+ * A container that opens a page of its own is identified by that page, not by its label: a sidebar
+ * that expands around the page being read renders such a container as a group with its subpages on
+ * one page and as a plain link to the same page on another, and keying those two renderings apart
+ * would place the page twice.
+ */
 function navKey(node: DiscoveredNavigationNode): string {
-  return node.type === 'page' ? `p:${node.url ?? ''}` : `g:${node.label ?? ''}`;
+  if (node.type === 'page') return `p:${node.url ?? ''}`;
+  return node.pageUrl ? `p:${node.pageUrl}` : `g:${node.label ?? ''}`;
 }
 
 /**
@@ -914,6 +930,10 @@ function mergeNavigationNode(a: DiscoveredNavigationNode, b: DiscoveredNavigatio
     return { ...a, ...(pageUrl ? { pageUrl } : {}), href: a.href ?? b.href, icon: a.icon ?? b.icon, description: a.description ?? b.description, children: mergeNavigationTrees(a.children, b.children, placed) };
   }
   if (a.type === 'page' && b.type === 'page') return { ...a, title: a.title ?? b.title };
+  // One rendering collapsed the container to a plain link to its own page, the other expanded it.
+  // They are one entry in the source, so the container stands and keeps the subpages it states.
+  if (a.type === 'group' && b.type === 'page') return { ...a, children: mergeNavigationTrees(a.children, [], placed) };
+  if (a.type === 'page' && b.type === 'group') return { ...b, children: mergeNavigationTrees(b.children, [], placed) };
   return a;
 }
 
