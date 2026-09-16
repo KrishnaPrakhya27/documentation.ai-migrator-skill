@@ -1429,7 +1429,10 @@ async function main() {
         // rendered and thrown away twice. The render opens accordions, expandables and tabs first,
         // so the content behind them is verified instead of excused.
         const preview = await openChromeSession(previewUrl, { concurrency: Number(v.concurrency) });
-        const renderPreview = cachedRenderer(preview.render, { prepare: EXPAND_INTERACTIVE });
+        // Renders from an earlier preview check describe an earlier deployment, so each run starts empty.
+        const renderDir = join(workspace, 'logging', 'preview-renders');
+        rmSync(renderDir, { recursive: true, force: true });
+        const renderPreview = cachedRenderer(preview.render, { prepare: EXPAND_INTERACTIVE, directory: renderDir });
         try {
         const browserConcurrency = Number(v.concurrency);
         const browser = await runBrowserFragmentGate(previewUrl, tree.pages, browserAnchors, renderPreview, browserConcurrency);
@@ -1442,12 +1445,17 @@ async function main() {
         const manifest = readManifest(workspace);
         const browserContent = await runBrowserContentGate(
           previewUrl,
-          tree.pages.map((page) => {
-            const raw = rawByPageId.get(page.id);
-            const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
-            const snapshot = readSnapshotPage(workspace, page.id);
-            return { ...page, doc: fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink)) };
-          }),
+          // Each page's source document is built when that page is checked, not for the whole site up
+          // front: holding every page's IR at once is what, with the renders, ran the heap out.
+          tree.pages.map((page) => ({
+            ...page,
+            get doc() {
+              const raw = rawByPageId.get(page.id);
+              const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
+              const snapshot = fromSource ? undefined : readSnapshotPage(workspace, page.id);
+              return fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink));
+            },
+          })),
           {
             routes: writtenPagePaths(workspace, tree),
             assetUrls: new Map(Object.entries(manifest.byUrl).flatMap(([url, hash]) => { const final = manifest.entries[hash]?.finalUrl; return final ? [[url, final] as [string, string]] : []; })),

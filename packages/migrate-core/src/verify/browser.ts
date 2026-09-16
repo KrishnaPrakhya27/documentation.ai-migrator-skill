@@ -365,7 +365,9 @@ export async function runBrowserContentGate(
     const problems: string[] = [];
     // A page with no source document cannot be judged, so it is a failure rather than a silent skip.
     if (!page.newPath) return { route, status: 'fail', problems: ['migrated page has no output route'] };
-    if (!page.doc) return { route, status: 'fail', problems: ['no source document to compare the rendered page against'] };
+    // Read once: a page's document may be built on demand, and it is released when this page is done.
+    const doc = page.doc;
+    if (!doc) return { route, status: 'fail', problems: ['no source document to compare the rendered page against'] };
 
     let html: string;
     try {
@@ -387,7 +389,7 @@ export async function runBrowserContentGate(
 
     // Segments in order; the text between consecutive matches is residual and must be insignificant.
     // Optional text (inside a collapsed block) counts only where it sits before the next required segment.
-    const segments = documentSegments(page.doc, opts.interactive);
+    const segments = documentSegments(doc, opts.interactive);
     let cursor = 0;
     const residual: string[] = [];
     segments.forEach((segment, position) => {
@@ -410,11 +412,11 @@ export async function runBrowserContentGate(
 
     // The outline the reader navigates by.
     const renderedOutline = content.flatMap((node) => findAll(node, 'h2, h3, h4, h5, h6')).map((heading) => `${Number(heading.name.slice(1))}:${normaliseVisible(visibleText(heading))}`);
-    const expectedOutline = sourceOutline(page.doc, opts.interactive);
+    const expectedOutline = sourceOutline(doc, opts.interactive);
     if (renderedOutline.join('|') !== expectedOutline.join('|')) problems.push(`heading outline differs: rendered ${JSON.stringify(renderedOutline)}, source ${JSON.stringify(expectedOutline)}`);
 
     // Links: internal ones must land on a migrated route, external ones must be the source's own.
-    const sourceTargets = sourceLinkTargets(page.doc);
+    const sourceTargets = sourceLinkTargets(doc);
     for (const anchor of content.flatMap((node) => findAll(node, 'a[href]'))) {
       const href = anchor.attribs.href;
       if (!href || href.startsWith('#')) continue;
@@ -427,7 +429,7 @@ export async function runBrowserContentGate(
     }
 
     // Images: rehosted, and still carrying the alt text the source wrote.
-    const expectedImages = sourceImages(page.doc, opts.interactive);
+    const expectedImages = sourceImages(doc, opts.interactive);
     const renderedImages = content.flatMap((node) => findAll(node, 'img'));
     if (renderedImages.length !== expectedImages.length) problems.push(`image count differs: rendered ${renderedImages.length}, source ${expectedImages.length}`);
     renderedImages.forEach((image, index) => {
@@ -437,7 +439,7 @@ export async function runBrowserContentGate(
       if (normaliseVisible(alt) !== normaliseVisible(expected.alt ?? '')) problems.push(`image ${index + 1} alt is ${JSON.stringify(alt)}, source states ${JSON.stringify(expected.alt ?? '')}`);
       const src = image.attribs.src ?? '';
       if (opts.assetUrls?.size) {
-        const hosted = hostedAssetUrl(expected.src, page.doc?.source, opts.assetUrls) ?? expected.src;
+        const hosted = hostedAssetUrl(expected.src, doc.source, opts.assetUrls) ?? expected.src;
         if (src && hosted && !src.startsWith(hosted) && src !== hosted) problems.push(`image ${index + 1} renders ${src}, expected the hosted ${hosted}`);
       }
     });

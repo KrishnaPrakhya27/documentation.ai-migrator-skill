@@ -14,7 +14,8 @@
  * lives in a temporary directory that is removed at the end.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertPublicHost } from '../scrape/fetcher.js';
@@ -179,16 +180,38 @@ export const EXPAND_INTERACTIVE = `new Promise((done) => {
  * One render per URL for a whole run. The fragment gate and the content gate ask for the same
  * pages, and each used to fetch and render its own copy of every one of them.
  */
-export function cachedRenderer(render: (url: string, options?: RenderOptions) => Promise<string>, options: RenderOptions = {}): (url: string) => Promise<string> {
-  const cache = new Map<string, Promise<string>>();
-  return (url) => {
-    const existing = cache.get(url);
-    if (existing) return existing;
-    const rendering = render(url, options);
-    cache.set(url, rendering);
-    // A failed render must not be remembered as the answer for the rest of the run.
-    rendering.catch(() => cache.delete(url));
-    return rendering;
+export function cachedRenderer(render: (url: string, options?: RenderOptions) => Promise<string>, options: RenderOptions & { directory?: string } = {}): (url: string) => Promise<string> {
+  const { directory, ...renderOptions } = options;
+  // Without a directory, renders are held in memory: fine for a handful of pages in a test.
+  if (!directory) {
+    const cache = new Map<string, Promise<string>>();
+    return (url) => {
+      const existing = cache.get(url);
+      if (existing) return existing;
+      const rendering = render(url, renderOptions);
+      cache.set(url, rendering);
+      // A failed render must not be remembered as the answer for the rest of the run.
+      rendering.catch(() => cache.delete(url));
+      return rendering;
+    };
+  }
+  // A site's worth of rendered pages does not fit in a process heap: 1,046 pages with their
+  // accordions and tabs opened exhausted a 2 GB heap before the second gate began. Each render is
+  // written to disk once and read back when a later gate asks for the same page, so every page is
+  // still rendered exactly once and only the pages in flight are held in memory.
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const pending = new Map<string, Promise<void>>();
+  const fileFor = (url: string): string => join(directory, `${createHash('sha256').update(url).digest('hex')}.html`);
+  return async (url) => {
+    const file = fileFor(url);
+    const inFlight = pending.get(url);
+    if (inFlight) await inFlight;
+    else if (!existsSync(file)) {
+      const writing = render(url, renderOptions).then((html) => writeFileSync(file, html, { mode: 0o600 }));
+      pending.set(url, writing);
+      try { await writing; } finally { pending.delete(url); }
+    }
+    return readFileSync(file, 'utf8');
   };
 }
 
