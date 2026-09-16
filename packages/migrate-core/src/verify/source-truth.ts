@@ -11,10 +11,11 @@
  * platform chrome leaking into a page.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { parseOperationFrontmatter } from '../ir/mintlify-openapi.js';
 import { markdownToIr, splitFrontmatter } from '../ir/from-markdown.js';
 import { htmlToIr } from '../ir/from-html.js';
-import { unwrapPublishedMarkdown } from '../scrape/published-markdown.js';
+import { unescapeMarkdown, unwrapPublishedMarkdown } from '../scrape/published-markdown.js';
 import { extractSeo, seoFrontmatter } from '../scrape/seo.js';
 import { htmlAdapterOptions, type ScrapeProfile } from '../scrape/profiles.js';
 import { titleHeading } from '../ir/page-title.js';
@@ -84,19 +85,22 @@ export function loadRawSourcePages(input: {
     const cached = acquiredPath(input.workspace, page.id);
     if (!existsSync(cached)) { missing.push(page.source); continue; }
     const record = JSON.parse(readFileSync(cached, 'utf8')) as AcquiredPage;
+    // The llms.txt label and the tree title are Markdown link text: `\[` there is the character `[`.
+    // The frozen record keeps the bytes as served; the title the source states is the unescaped text.
+    const llms = record.llms ? { ...record.llms, title: unescapeMarkdown(record.llms.title) } : undefined;
     out.push({
       pageId: page.id,
       url: page.source,
       path: pathOf(page.source),
       route: page.newPath,
       outputFile: join(input.outputDir, `${page.newPath}.mdx`),
-      title: record.llms?.title ?? record.title ?? page.title,
-      description: record.llms?.description ?? record.description ?? page.description,
+      title: llms?.title ?? (record.title ? unescapeMarkdown(record.title) : page.title),
+      description: llms?.description ?? record.description ?? page.description,
       markdown: record.markdown,
       markdownSha256: record.markdownSha256,
       html: record.html,
       htmlSha256: record.htmlSha256,
-      llms: record.llms,
+      llms,
     });
   }
   if (missing.length) throw new Error(`no frozen source for ${missing.length} migrated page(s): ${missing.join(', ')}; run acquire again`);
@@ -272,7 +276,19 @@ export function htmlReconciliation(page: RawSourcePage, platform: string, profil
   // The heading that states the page title leaves the body to become the frontmatter title, so the
   // output is not expected to repeat it. An H1 is skipped by headingWords already; a generator that
   // reserves H1 for its own masthead states the title in the heading the article opens with.
-  const renderedHeadings = headingWords(renderedDoc, titleHeading(rendered.children)?.id);
+  // A rendered heading that is one of the theme's own strings ("Test it (powered by Scalar)" over
+  // GitBook's API playground) is chrome, not a heading the page states. A heading the platform
+  // will generate from the page's OpenAPI operation (its summary) is not expected in the file either.
+  const chrome = new Set((profile.chromeStrings ?? []).map((value) => normaliseProse(value)));
+  const generated = new Set(operationHeadings(output, page).map((value) => normaliseProse(value)));
+  // A rendered block that repeats the section heading as its own title (an API models page draws
+  // "The Organization object" as the section and again over the schema) is one heading to a reader.
+  // A heading the rendered page shows but the published Markdown never states heads a block the
+  // theme draws at render time ("Most popular", "Recently added" on a hub) — there is nothing for
+  // the conversion to carry. Where the source publishes Markdown, the rendered witness is compared
+  // for the headings that Markdown states.
+  const stated = page.markdown ? new Set(page.markdown.split('\n').filter((line) => /^\s*#{1,6}\s/.test(line)).map((line) => normaliseProse(line.replace(/^\s*#{1,6}\s*/, '').replace(/<a\b[^>]*><\/a>/g, '').replace(/\u200b/g, '')))) : undefined;
+  const renderedHeadings = headingWords(renderedDoc, titleHeading(rendered.children)?.id).filter((words) => !chrome.has(words) && !generated.has(words) && (!stated || stated.has(words))).filter((words, index, all) => index === 0 || all[index - 1] !== words);
   const outputHeadings = headingWords(output);
   const missingHeadings = headingsNotInOrder(renderedHeadings, outputHeadings);
   if (missingHeadings.length) {
@@ -340,14 +356,22 @@ function headingsNotInOrder(rendered: string[], output: string[]): string[] {
   return missing;
 }
 
+/** Inline content as rendered: an inline HTML element contributes its text, not its tags. */
+function renderedInlineText(nodes: Inline[]): string {
+  return nodes.map((n) => (n.type === 'inlineHtml' ? n.value.replace(/<[^<>]*>/g, '') : n.type === 'text' || n.type === 'inlineCode' ? n.value : n.type === 'image' ? n.alt : 'children' in n ? renderedInlineText(n.children) : '')).join('');
+}
+
 function headingWords(doc: DocIR, skipId?: string): string[] {
   const words: string[] = [];
   walkBlocks(doc.children, (block) => {
     if (skipId !== undefined && block.id === skipId) return;
-    if (block.type === 'heading' && block.depth > 1) words.push(normaliseProse(inlineText(block.children)));
+    // the words a reader sees, an inline element's included: GitBook renders `Name<mark>*</mark>`
+    if (block.type === 'heading' && block.depth > 1) words.push(normaliseProse(renderedInlineText(block.children)));
     else if (block.type === 'component' || block.type === 'dai') {
       const title = block.props.title;
-      if (typeof title === 'string' && title.trim()) words.push(normaliseProse(title));
+      // GitBook's export labels a schema's nested fields "Object Properties" / "Array Items" on the
+      // wrapper it writes; the rendered page shows no such heading, and neither does the reader.
+      if (typeof title === 'string' && title.trim() && !(block.name === 'Expandable' && /^(Object Properties|Array Items)$/.test(title.trim()))) words.push(normaliseProse(title));
     }
   });
   return words.filter(Boolean);
@@ -370,20 +394,25 @@ function sameSequence(a: string[], b: string[]): boolean {
  * only when chrome is all it holds, and code blocks, which may legitimately contain
  * anything, are not prose at all.
  */
-function chromeInOutput(markdown: string, chromeStrings: readonly string[]): string[] {
+/** What a Markdown line renders as: block markers, emphasis and link targets are not content. */
+function lineWords(line: string): string {
+  return normaliseProse(line
+    .replace(/^\s*[>#*+-]+\s*/, '')
+    .replace(/^\s*\d+[.)]\s*/, '')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`~]+/g, '')
+    .replace(/^\s*\|/, '').replace(/\|\s*$/, ''));
+}
+
+function chromeInOutput(markdown: string, chromeStrings: readonly string[], authoredLines: ReadonlySet<string> = new Set()): string[] {
   const chrome = chromeStrings.map((value) => normaliseProse(value)).filter(Boolean);
   const found = new Set<string>();
   let fenced = false;
   for (const line of markdown.split('\n')) {
     if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; continue; }
     if (fenced) continue;
-    // what the line renders as: block markers, emphasis and link targets are not content
-    const text = normaliseProse(line
-      .replace(/^\s*[>#*+-]+\s*/, '')
-      .replace(/^\s*\d+[.)]\s*/, '')
-      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/[*_`~]+/g, '')
-      .replace(/^\s*\|/, '').replace(/\|\s*$/, ''));
+    const text = lineWords(line);
+    if (authoredLines.has(text)) continue;
     if (!text) continue;
     let remainder = text;
     for (const value of chrome) remainder = remainder.split(value).join(' ');
@@ -394,9 +423,33 @@ function chromeInOutput(markdown: string, chromeStrings: readonly string[]): str
 }
 
 /** No block the platform's own theme renders may appear in the migrated output. */
+/**
+ * Headings the platform renders for an endpoint page from its spec — the operation's summary — which
+ * the source rendered too and the written file rightly does not repeat. Read from the spec the
+ * page's frontmatter names; without the spec nothing is assumed and the heading is still expected.
+ */
+function operationHeadings(output: DocIR, page: RawSourcePage): string[] {
+  const operation = parseOperationFrontmatter(output.frontmatter.openapi);
+  if (!operation) return [];
+  const specFile = join(dirname(page.outputFile).replace(/(\/output)\/.*$/, '$1'), operation.spec);
+  if (!existsSync(specFile)) return [];
+  try {
+    const spec = JSON.parse(readFileSync(specFile, 'utf8')) as { paths?: Record<string, Record<string, { summary?: string }>> };
+    const summary = spec.paths?.[operation.path]?.[operation.method.toLowerCase()]?.summary;
+    return summary ? [summary] : [];
+  } catch { return []; }
+}
+
 export function chromeAbsent(page: RawSourcePage, chromeStrings: readonly string[]): SourceComparison {
   if (!chromeStrings.some((value) => value.trim())) return { pageId: page.pageId, path: page.path, pass: false, detail: 'no platform chrome evidence was supplied' };
   if (!existsSync(page.outputFile)) return { pageId: page.pageId, path: page.path, pass: false, detail: `no output file at ${page.outputFile}` };
-  const found = chromeInOutput(readFileSync(page.outputFile, 'utf8'), chromeStrings);
+  // A heading in the output that the source's own published text also heads is the author's: a
+  // page documenting the "Table of contents" feature heads a section with those words. Without a
+  // published source text to consult, a heading made of chrome words is judged as chrome.
+  // A line the published source itself writes — a heading or a bullet naming the "Table of
+  // contents" feature — is the author's wherever the theme also uses the words; chrome that leaked
+  // into the output cannot be in the source's published Markdown.
+  const authoredLines = new Set((page.markdown ?? '').split('\n').map((line) => lineWords(line.replace(/<a\b[^>]*><\/a>/g, '').replace(/\u200b/g, ''))).filter(Boolean));
+  const found = chromeInOutput(readFileSync(page.outputFile, 'utf8'), chromeStrings, authoredLines);
   return { pageId: page.pageId, path: page.path, pass: !found.length, detail: found.length ? `theme chrome in output: ${found.map((chrome) => JSON.stringify(chrome)).join(', ')}` : undefined };
 }

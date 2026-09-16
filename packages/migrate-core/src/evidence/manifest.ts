@@ -11,6 +11,7 @@
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { sha256 } from '../session/ids.js';
+import { unescapeMarkdown } from '../scrape/published-markdown.js';
 
 export const SOURCE_MANIFEST_SCHEMA_VERSION = 1;
 
@@ -143,14 +144,20 @@ export function narrowSourceManifest(workspace: string, manifest: SourceManifest
   for (const page of existing.pages) {
     const now = kept.get(page.pageId);
     if (now) {
-      if (JSON.stringify(now) !== JSON.stringify(page)) throw new Error(`${page.sourceId}: the re-derivation changes a page the frozen source universe holds; capture it afresh in a new workspace`);
+      // A title that only lost the escapes an llms.txt label carries (`\[updated for 2026\]`) is the
+      // same title read correctly, not a different source; anything else about a page may not move.
+      const sameButTitle = JSON.stringify({ ...now, title: undefined }) === JSON.stringify({ ...page, title: undefined }) && (now.title === page.title || now.title === unescapeMarkdown(page.title ?? ''));
+      if (!sameButTitle) throw new Error(`${page.sourceId}: the re-derivation changes a page the frozen source universe holds; capture it afresh in a new workspace`);
       continue;
     }
     if (!refused.has(page.location)) throw new Error(`${page.sourceId}: the re-derivation drops a page discovery did not refuse; capture it afresh in a new workspace`);
     dropped.push(page.location);
   }
   for (const page of manifest.pages) if (!existing.pages.some((was) => was.pageId === page.pageId)) throw new Error(`${page.sourceId}: the re-derivation adds a page the frozen source universe never held; capture it afresh in a new workspace`);
-  const body = `${JSON.stringify(manifest, null, 2)}\n`;
+  // The index files on disk did not change — this is a re-reading of them, not a new capture — so
+  // the manifest keeps the digests it pinned them under; a digest of the re-read object would name
+  // a file that was never written and every later stage would see the frozen result as changed.
+  const body = `${JSON.stringify({ ...manifest, indexes: existing.indexes }, null, 2)}\n`;
   const path = sourceManifestPath(workspace);
   writeFileSync(`${path}.tmp`, body, { mode: 0o600 });
   renameSync(`${path}.tmp`, path);

@@ -19,7 +19,12 @@ describe('GitBook heading ids', () => {
   it('follow GitBook\'s own rule, digits prefixed and dots kept', () => {
     expect(gitbookHeadingId('3. Payment terms')).toBe('id-3.-payment-terms');
     expect(gitbookHeadingId('Edit on GitHub/GitLab')).toBe('edit-on-github-gitlab');
-    expect(gitbookHeadingIds('A. How Does This Actually Work?')).toEqual(['a.-how-does-this-actually-work', 'a-how-does-this-actually-work']);
+    expect(gitbookHeadingIds('A. How Does This Actually Work?').slice(0, 2)).toEqual(['a.-how-does-this-actually-work', 'a-how-does-this-actually-work']);
+    // the spellings GitBook has used at different times are all offered, the current rule first
+    expect(gitbookHeadingIds('Math & TeX')[0]).toBe('math-and-tex');
+    expect(gitbookHeadingIds('3. Payment Terms.')[0]).toBe('id-3.-payment-terms');
+    expect(gitbookHeadingIds('1. Create an app registration in Azure AD')).toContain('id-1.-create-an-app-registration-in-azure-a-d');
+    expect(gitbookHeadingIds("GitBook's global privacy practices")).toContain('gitbooks-global-privacy-practices');
   });
 
   it('shim a heading under whichever spelling a link used, and a component under the anchor the source gave it', () => {

@@ -971,7 +971,7 @@ describe('exact conversion fidelity', () => {
     const captioned = convert('<Frame caption="Cap">\n  ![a](/s.png)\n</Frame>\n');
     expect(verdict(captioned)).toBe('exact');
     expect(captioned.resolved.children.map((block) => block.type)).toEqual(['figure']);
-    expect(docToMdx(captioned.resolved)).toContain('<Image src="/s.png" alt="a" />\n\n*Cap*');
+    expect(docToMdx(captioned.resolved)).toContain('<Image src="/s.png" alt="a" caption="Cap" />');
   });
 
   it('accepts a rendered Step without a title (null extractor prop) as exact', () => {

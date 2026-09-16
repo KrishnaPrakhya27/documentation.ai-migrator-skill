@@ -98,6 +98,14 @@ function card(row: El, roles: CardColumn[], file: string): ComponentNode {
     const icon = iconOf(cell);
     if (icon && props.icon === undefined) { props.icon = icon; return; }
     if (props.title === undefined && isTitleCell(cell)) { props.title = cleanText(textOf(cell)); return; }
+    // A cell that opens with a heading and goes on (`<h4>Title</h4><p>Blurb</p>`) titles the card
+    // with the heading; the rest is the card's body, not part of its title.
+    const lead = cell.children.find((child): child is El => child.type === 'tag');
+    if (props.title === undefined && lead && /^h[1-6]$/.test(lead.name) && cell.children.some((child) => child !== lead && !(child.type === 'text' && !child.data.trim()))) {
+      props.title = cleanText(textOf(lead));
+      body.push({ ...cell, children: cell.children.filter((child) => child !== lead) });
+      return;
+    }
     body.push(cell);
   });
   if (props.title === undefined) {

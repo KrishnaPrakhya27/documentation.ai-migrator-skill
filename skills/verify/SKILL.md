@@ -62,6 +62,8 @@ Previews skip search indexing: search is a post-release canary, not a preview ga
 
 `responsive-layout` measures every written route on a phone (390px), a tablet (768px) and a desktop (1440px) through the same browser session, and fails a page that scrolls sideways or renders no text. It reports the widths in `report/responsive.json`, and it measures layout rather than comparing screenshots, which differ between font sets and browser versions.
 
+A local verify that finds failing gates still offers gate 3 and does not block `write --push`: the findings travel with the push and must pass before `release`.
+
 `human-gates-approved` reports approvals as records rather than prose: `dai-migrate approve --gate <n> --by "<who>"` pins the files that gate covers (gate 1 the tree and scope decisions, gate 2 the plans, gate 3 the immutable pre-push report, and gate 4 the immutable preview report, route comparison and responsive readings). A local verify asks for gates 1 and 2, `verify --preview` also for gate 3, `write --push` refuses without gates 1–3, and `release` refuses unless all four still match.
 
 Source coverage uses the discovery-pinned `source-cache/source-manifest.json`, independently of the editable tree. Frozen native files are checked for additions, deletions, modifications and symbolic links. A missing source page, a changed source identity, duplicate output ownership, an extra output page or an unresolved quarantine blocks exact certification. Partial-scope exclusions require matching identities, a reason and an approver in `plan/scope-decisions.yaml`; conversion pins this file. These two gates remain `not-run` in permissive mode.

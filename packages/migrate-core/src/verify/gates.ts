@@ -74,7 +74,7 @@ export const HTML_CHROME_ELEMENTS: ReadonlySet<string> = new Set(['script', 'sty
 
 /** A GitBook Assistant prompt (`<button data-action="ask">`) works only inside GitBook: platform chrome, like script and style. */
 function isPlatformChromeButton(block: Block): boolean {
-  return block.type === 'component' && block.name === 'button' && block.props['data-action'] === 'ask';
+  return block.type === 'component' && block.name === 'button' && ['ask', 'search'].includes(String(block.props['data-action']));
 }
 
 export function isHtmlChromeNode(block: Block | undefined): boolean {
@@ -231,8 +231,9 @@ export function normaliseMdxText(mdx: string): string {
     .replace(/<Image\b[^>]*\balt="([^"]*)"[^>]*\/?>/gi, ' $1 ')
     // a component's title is text the reader sees: a Step's, a Card's (a PreviewButton's label became one), an Accordion's
     .replace(/<[A-Z]\w*\b[^>]*\btitle="([^"]*)"[^>]*\/?>/g, ' $1 ')
-    // a key cap wraps its text without a space either side: `(<kbd>Ctrl</kbd>` reads `(Ctrl`
-    .replace(/<\/?kbd>/g, '')
+    // a key cap wraps its text without a space either side: `(<kbd>Ctrl</kbd>` reads `(Ctrl`; so
+    // does emphasis written as HTML where CommonMark could not delimit it (`<strong>［完了］</strong>を`)
+    .replace(/<\/?(?:kbd|strong|b|em|i|del|s)>/g, '')
     // a tag opens with a name; a literal `<` (`1 < 2`, `<<remove`) is text, and no tag reaches past the next `<`
     .replace(/<\/?[A-Za-z][^<>]*>/g, ' ')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
@@ -850,7 +851,8 @@ export function runGates(input: GateInput): GateResult[] {
   // A link to the host outside the docs' own base is to the site beside the docs (`/pricing`), and a
   // link to a served file (`llms.txt`, a sitemap, a page's `.md` export) is to that file: neither is a
   // page this migration could have written, so both stay as authored and are counted apart.
-  let beside = 0; let resources = 0; let selfLinks = 0; let declared = 0;
+  let beside = 0; let resources = 0; let selfLinks = 0; let declared = 0; let neverPublished = 0;
+  const publishedPaths = new Set((input.sourceEvidence?.links?.sourcePages ?? []).map((path) => path.replace(/\/+$/, '') || '/'));
   // Links a mapping rule wrote by the operator's decision (a card to a live tool the migration
   // cannot carry), recorded in the ledger; they are the operator's, not the source's.
   const declaredByPage = new Map<string, Set<string>>();
@@ -877,13 +879,15 @@ export function runGates(input: GateInput): GateResult[] {
         if (!parsed || !sourceHosts.has(parsed.hostname)) continue;
         if (!withinSourceBase(parsed.pathname, sourceBase)) { beside++; continue; }
         if (isSourceResource(parsed.pathname)) { resources++; continue; }
+        // a link to a path the source never published was broken on the source too: the customer's, listed with the inherited links, not a page left behind
+        if (publishedPaths.size && !publishedPaths.has(decodeURI(parsed.pathname).replace(/\/+$/, '') || '/')) { neverPublished++; continue; }
         if (ownSource && url.replace(/[?#].*$/, '').replace(/\/+$/, '') === ownSource) { selfLinks++; continue; }
         unmigrated++;
         if (unmigratedSamples.length < 5) unmigratedSamples.push(`${relative(input.outputDir, f)} → ${url}`);
       }
     }
   }
-  const aside = [beside ? `${beside} link(s) to the source host outside ${sourceBase} are to the site beside the docs and stay as authored` : '', resources ? `${resources} link(s) to files the source serves (sitemap, llms.txt, .md exports) stay as authored` : '', selfLinks ? `${selfLinks} link(s) from a page to its own source address point at a live tool the migration could not carry and stay as authored` : '', declared ? `${declared} link(s) a mapping rule wrote by decision (a card to a live tool on the source site) are the operator's and are listed in the ledger` : ''].filter(Boolean).join('; ');
+  const aside = [beside ? `${beside} link(s) to the source host outside ${sourceBase} are to the site beside the docs and stay as authored` : '', resources ? `${resources} link(s) to files the source serves (sitemap, llms.txt, .md exports) stay as authored` : '', selfLinks ? `${selfLinks} link(s) from a page to its own source address point at a live tool the migration could not carry and stay as authored` : '', declared ? `${declared} link(s) a mapping rule wrote by decision (a card to a live tool on the source site) are the operator's and are listed in the ledger` : '', neverPublished ? `${neverPublished} link(s) to a path the source never published were broken before the migration and are listed with the inherited links` : ''].filter(Boolean).join('; ');
   gates.push({
     id: 'unmigrated-links',
     status: unmigrated && unmigratedMode === 'keep' ? 'fail' : 'pass',

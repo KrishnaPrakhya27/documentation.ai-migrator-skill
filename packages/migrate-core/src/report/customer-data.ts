@@ -193,6 +193,8 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     shortfalls.push({
       heading: `${excludedMedia.length} image${excludedMedia.length === 1 ? '' : 's'} not carried over`,
       explanation: 'Your source publishes these at an address we could not host from, so the pages that used them came over without them. Everything else on those pages is yours and unchanged. Re-upload each one and place it back where it was.',
+      summary: `${plural(excludedMedia.length, 'image or file')} could not be fetched from your old site (too large to download, or refused by the host), so the pages that used them came over without them. Re-upload each one and place it back.`,
+      examples: examplesOf(excludedMedia.map((entry) => String(entry.describe ?? entry.url ?? entry.hash).split('/').pop() ?? '')),
       ...capped(excludedMedia.map((entry) => `${entry.describe ?? entry.url ?? entry.hash} — ${entry.reason} (approved by ${entry.approvedBy})`)),
       needsYou: true,
     });

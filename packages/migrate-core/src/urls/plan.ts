@@ -163,8 +163,12 @@ export function redirectMaps(plan: UrlPlan): { exact: RedirectRule[]; wildcard: 
     if (r.source.slice(o.length + 1) !== r.destination.slice(n.length + 1)) entry.splatSurvives = false;
     prefixPairs.set(key, entry);
   }
+  // …and only where every exact rule anywhere beneath the old prefix agrees: `/docs/*` →
+  // `/en/docs/:splat` is wrong for `/docs/documentation/fr/…`, which moves to `/fr/docs/…`, and a
+  // candidate that covers those would send them to a page nobody wrote.
+  const agreesBeneath = (o: string, n: string): boolean => exact.every((r) => !r.source.startsWith(`${o}/`) || r.destination === `${n}${r.source.slice(o.length)}`);
   const wildcard: RedirectRule[] = [...prefixPairs.entries()]
-    .filter(([, entry]) => entry.covered >= 3 && entry.splatSurvives)
+    .filter(([k, entry]) => { const [o, n] = k.split('|'); return entry.covered >= 3 && entry.splatSurvives && agreesBeneath(o, n); })
     .map(([k]) => { const [o, n] = k.split('|'); return { source: `${o}/*`, destination: `${n}/:splat`, statusCode: 308 }; });
   return { exact, wildcard, issues };
 }

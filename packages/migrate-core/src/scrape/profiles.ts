@@ -245,7 +245,7 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     navGroupSelector: 'aside .toc-group, aside [data-testid="table-of-contents-group"]',
     navChildListSelector: 'aside li div',
     navSectionSelector: '[data-gb-sections] a[href]',
-    chromeStrings: [...COMMON_CHROME_STRINGS, 'Powered by GitBook', 'Was this helpful?', 'Last updated', 'Ask or search…', 'Ctrl K'],
+    chromeStrings: [...COMMON_CHROME_STRINGS, 'Powered by GitBook', 'Was this helpful?', 'Last updated', 'Ask or search…', 'Ctrl K', 'Test it (powered by Scalar)'],
     recognisers: [
       { selector: 'button[data-action]', name: 'button', props: { 'data-action': '@attr:data-action' } },
       { selector: '.hint, [data-hint]', name: 'hint', props: { style: '@class-suffix:hint-' } },

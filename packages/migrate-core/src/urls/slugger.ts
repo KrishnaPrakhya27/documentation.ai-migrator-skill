@@ -60,15 +60,30 @@ export function legalisePath(path: string, opts: { case: 'preserve' | 'lower' })
  * this-work`), so `gitbookHeadingIds` offers that spelling too.
  */
 export function gitbookHeadingId(text: string): string {
-  const slug = text.trim().toLowerCase().replace(/[^\p{L}\p{N}.]+/gu, '-').replace(/^-+|-+$/g, '');
+  // `&` is spelled "and" (`Math & TeX` → `math-and-tex`); a dot inside stays, a dot at either end
+  // is trimmed with the hyphens (`3. Payment Terms.` → `id-3.-payment-terms`)
+  const slug = text.trim().toLowerCase().replace(/&/g, ' and ').replace(/[^\p{L}\p{N}.]+/gu, '-').replace(/^[-.]+|[-.]+$/g, '');
   return /^\d/.test(slug) ? `id-${slug}` : slug;
 }
 
-/** Every id GitBook may have linked a heading by. */
+/**
+ * Every id GitBook has been seen to give a heading, the current rule first. Its slugger has changed
+ * over time and a site carries links in each spelling: an apostrophe once became a hyphen and now
+ * vanishes (`GitBook's` → `gitbooks`), a run of capitals is now split letter by letter
+ * (`Azure AD` → `azure-a-d`), and a dot inside a heading is kept or dropped. Measured against 92
+ * in-page links on gitbook.com: the base rule alone lands 88, the variants the rest. Every spelling
+ * is an alias, so whichever a link used gets its shim.
+ */
 export function gitbookHeadingIds(text: string): string[] {
-  const dotted = gitbookHeadingId(text);
-  const dotless = dotted.replace(/\.+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '');
-  return [...new Set([dotted, dotless])];
+  const spellings = new Set<string>();
+  for (const apostrophe of [text, text.replace(/[\u2019']/g, '')]) {
+    for (const capitals of [apostrophe, apostrophe.replace(/(?<=\p{Lu})(?=\p{Lu})/gu, '-')]) {
+      const dotted = gitbookHeadingId(capitals);
+      spellings.add(dotted);
+      spellings.add(dotted.replace(/\.+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, ''));
+    }
+  }
+  return [...spellings].filter(Boolean);
 }
 
 /** Heading id as the renderer computes it: github-slugger, then dashes collapsed. */

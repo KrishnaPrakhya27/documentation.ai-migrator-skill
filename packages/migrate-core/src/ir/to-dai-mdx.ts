@@ -3,6 +3,7 @@
  * Only public contract names are emitted. Editor-internal nodes never appear.
  */
 import type { Block, Inline, DocIR, DaiComponentNode, ImageNode, ListNode, TableNode, Frontmatter } from './types.js';
+import { inlineText } from './types.js';
 import { stringify as toYaml } from 'yaml';
 import { isSafeUrl } from '../components/sanitize.js';
 
@@ -54,9 +55,9 @@ function markdownUrl(url: string, kind: 'link' | 'resource'): string | undefined
   return url.trim().replace(/\\/g, '%5C').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/</g, '%3C').replace(/>/g, '%3E');
 }
 
-function imageToMdx(image: ImageNode): string {
+function imageToMdx(image: ImageNode, caption?: string): string {
   const safe = markdownUrl(image.url, 'resource');
-  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null }, true) : escapeText(image.alt);
+  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null, caption: caption ?? null }, true) : escapeText(image.alt);
 }
 
 export function openTag(name: string, props: Record<string, string | number | boolean | null>, selfClose = false): string {
@@ -75,9 +76,16 @@ export function openTag(name: string, props: Record<string, string | number | bo
  * the reader then sees. The space belongs outside the delimiters, where it reads the same and parses.
  * Emphasis over nothing but whitespace has no run to close, so it keeps only the whitespace.
  */
+const EMPHASIS_TAG: Record<string, string> = { '**': 'strong', '*': 'em', '~~': 'del' };
+
 function wrapEmphasis(inner: string, marker: string): string {
   const [, lead = '', core = '', trail = ''] = /^(\s*)([\s\S]*?)(\s*)$/.exec(inner) ?? [];
-  return core ? `${lead}${marker}${core}${marker}${trail}` : inner;
+  if (!core) return inner;
+  // CommonMark cannot close a run whose last character is punctuation when a word follows it:
+  // `**［完了］**をクリック` stays literal asterisks on a Japanese page. Where the words begin or end
+  // in punctuation the element is written as the HTML the platform reads the same way.
+  if (/^[\p{P}\p{S}]|[\p{P}\p{S}]$/u.test(core)) { const tag = EMPHASIS_TAG[marker] ?? 'strong'; return `${lead}<${tag}>${core}</${tag}>${trail}`; }
+  return `${lead}${marker}${core}${marker}${trail}`;
 }
 
 export function inlineToMdx(nodes: Inline[], insideLink = false): string {
@@ -173,9 +181,12 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
       case 'code': {
         const longestRun = Math.max(0, ...Array.from(b.value.matchAll(/`+/g), (m) => m[0].length));
         const fence = '`'.repeat(Math.max(3, longestRun + 1));
-        const lang = (b.lang ?? '').replace(/[^A-Za-z0-9_+.#-]/g, '');
+        const stated = (b.lang ?? '').replace(/[^A-Za-z0-9_+.#-]/g, '');
         const title = b.title?.replace(/["\r\n`~]/g, ' ').trim();
         const meta = b.meta?.replace(/[\r\n`~]/g, ' ').trim();
+        // A fence's first word is its language: a title on a fence with no language would be read
+        // as the language. `text` is what the platform renders an unlabelled block as anyway.
+        const lang = stated || (title || meta ? 'text' : '');
         out.push(`${fence}${lang}${title ? ` title="${title}"` : ''}${meta ? ` ${meta}` : ''}\n${b.value}\n${fence}`);
         break;
       }
@@ -191,17 +202,27 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
       }
       case 'image': out.push(imageToMdx(b)); break;
       case 'figure': {
-        out.push(imageToMdx(b.image));
-        if (b.caption?.length) out.push(`*${inlineToMdx(b.caption)}*`);
+        // The platform's Image carries a caption; a caption of plain words rides on it and reads
+        // back as the figure it was. One with a link or emphasis keeps its markup as the line under
+        // the image, since a prop cannot hold it.
+        // The platform's Image caption is words: a caption's formatting or link cannot ride on it,
+        // and the conversion records that loss. The words always do, so the file reads back as the
+        // figure it was written from.
+        const caption = b.caption?.length ? inlineText(b.caption).trim() : '';
+        out.push(imageToMdx(b.image, caption || undefined));
         break;
       }
       case 'html': out.push(b.value); break;
       case 'rawHtml': out.push(b.value); break;
       case 'dai': {
-        // An anchor the source published on this component, kept where something still links to it.
-        const componentShim = opts.anchorShims?.get(b.id);
-        if (componentShim) out.push(`<a id="${componentShim}"></a>`);
-        const inner = blocksToMdx(b.children, opts);
+        // An anchor the source published on this component, or on the heading its title was folded
+        // from, kept where something still links to it. A Step's goes inside the step: its parent
+        // Steps holds steps and nothing else.
+        const componentShim = opts.anchorShims?.get(b.id) ?? (b.anchorFrom ? opts.anchorShims?.get(b.anchorFrom) : undefined);
+        const shimLine = componentShim ? `<a id="${componentShim}"></a>` : '';
+        if (shimLine && b.name !== 'Step') out.push(shimLine);
+        const body = blocksToMdx(b.children, opts);
+        const inner = shimLine && b.name === 'Step' ? `${shimLine}\n\n${body}`.trim() : body;
         if (!inner.trim()) out.push(openTag(b.name, b.props, true));
         else out.push(`${openTag(b.name, b.props)}\n${indent(inner)}\n</${b.name}>`);
         break;

@@ -45,8 +45,11 @@ describe('redirects read as a graph', () => {
   });
 
   it('reports a wildcard that covers an exact rule, where the host decides which one runs', () => {
-    const problems = redirectProblems([rule('/docs/*', '/guides/:splat'), rule('/docs/install', '/guides/install')], new Set(['guides/install']));
+    // the exact rule sends the path somewhere the wildcard would not, so the host's order decides
+    const problems = redirectProblems([rule('/docs/*', '/guides/:splat'), rule('/docs/install', '/setup/install')], new Set(['guides/install', 'setup/install']));
     expect(kinds(problems)).toContain('shadowed');
+    // a wildcard that agrees with every exact rule beneath it is the same rule said once
+    expect(kinds(redirectProblems([rule('/docs/*', '/guides/:splat'), rule('/docs/install', '/guides/install')], new Set(['guides/install'])))).not.toContain('shadowed');
   });
 
   it('reports a rule whose old path carries a query or fragment, which never matches', () => {

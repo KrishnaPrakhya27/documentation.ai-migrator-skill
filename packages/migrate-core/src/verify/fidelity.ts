@@ -1,6 +1,6 @@
 /** Lossless, ID-independent representations used by exact migration gates. */
 import type { Block, DocIR, Inline } from '../ir/types.js';
-import { inlineText } from '../ir/types.js';
+import { inlineText, blocksPlainText } from '../ir/types.js';
 import { EMBED_FALLBACK_TITLE, STEP_FALLBACK_TITLE, embedPlayerUrl } from '../components/rules-engine.js';
 
 export type FidelityValue = null | boolean | number | string | FidelityValue[] | { [key: string]: FidelityValue };
@@ -51,8 +51,9 @@ function inlineShape(nodes: Inline[], insideLink = false): FidelityValue[] {
         const url = sameAddress(node.url);
         // The label has already had its character references read; the address must be read the same
         // way before the two can be compared at all.
-        const address = decodeCharacterReferences(url);
-        const label = only?.type === 'text' && only.value ? decodeCharacterReferences(only.value).trim() : undefined;
+        // percent-decoded on both sides: a reader shows `diff view.mp4` for `diff%20view.mp4`
+        const address = sameAddress(decodeCharacterReferences(url));
+        const label = only?.type === 'text' && only.value ? sameAddress(decodeCharacterReferences(only.value).trim()) : undefined;
         if (label && (address === label || address === `mailto:${label}` || address === `http://${label}`)) return { type: 'text', value: only!.value ?? '' };
         return { type: 'link', url, title: node.title ?? '', children };
       }
@@ -197,9 +198,10 @@ function titleFold(props: FidelityValue, children: Block[]): { props: FidelityVa
   if (first?.type !== 'heading' && !isBoldLine) return { props: ordered(stated), children };
   // A bold line's words sit inside the `strong`, not beside it, so they are read through the
   // inline tree rather than off the top-level nodes — which yielded an empty title, and so no fold.
-  const words = isBoldLine
-    ? cleanText(inlineText(first.children))
-    : cleanText(inlineShape(first.children).map((node) => ((node as { value?: string }).value ?? '')).join(' '));
+  // Read through the inline tree either way: a heading's words may sit inside a `strong` too
+  // (GitBook writes `### **Create or open your site**` for a step), where the top-level nodes
+  // carry no value and the fold found nothing.
+  const words = cleanText(inlineText(first.children));
   if (!words) return { props: ordered(stated), children };
   return { props: ordered({ ...stated, title: words }), children: rest };
 }
@@ -291,16 +293,13 @@ function promptShape(block: { name: string; props: Record<string, string | numbe
   // every prompt page quarantined over a shape the comparison was built to reconcile.
   if (block.name?.toLowerCase() !== 'prompt') return undefined;
   const description = typeof block.props.description === 'string' ? block.props.description.trim() : '';
-  const parts: string[] = [];
-  for (const child of block.children) {
-    if (child.type === 'paragraph' || child.type === 'heading') parts.push(inlineText(child.children));
-    else if (child.type === 'code') parts.push(child.value);
-  }
-  const value = parts.join('\n\n').trim();
+  // the same rendering the conversion copies — lists with their markers, code as written — and
+  // the same language reading: `text` is the platform's default and is compared as none
+  const value = blocksPlainText(block.children) ?? '';
   if (!value) return undefined;
   return [
     ...(description ? [{ type: 'paragraph', children: [{ type: 'text', value: description }] } as FidelityValue] : []),
-    { type: 'code', lang: 'text', meta: '', title: '', value },
+    { type: 'code', lang: '', meta: '', title: '', value },
   ];
 }
 
@@ -476,7 +475,9 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
         // source, `conversion-fidelity` proves conversion kept it, and `serialized-output-exact`
         // proves the written file still carries it.
         const serializedMeta = exactComponents ? [`${block.title ? `title="${block.title.replace(/["\r\n`~]/g, ' ').trim()}"` : ''}`, block.meta ?? ''].filter(Boolean).join(' ') : (block.meta ?? '').replace(/\btitle="[^"]*"/g, '').trim();
-        return [{ type: 'code', lang: block.lang ?? '', meta: serializedMeta, title: '', value: block.value.replace(/\r\n/g, '\n') }];
+        // `text` is the platform's reading of a fence with no language, and what the serializer
+        // writes when a title needs a first word: the two are one block
+        return [{ type: 'code', lang: (block.lang ?? '') === 'text' ? '' : block.lang ?? '', meta: serializedMeta, title: '', value: block.value.replace(/\r\n/g, '\n') }];
       }
       case 'blockquote': return [{ type: 'blockquote', children: blocksShape(block.children, exactComponents) }];
       case 'list': {
@@ -507,10 +508,13 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
       case 'footnoteDefinition': return [{ type: 'footnoteDefinition', identifier: block.identifier, children: blocksShape(block.children, exactComponents) }];
       case 'image': return [{ type: 'image', url: sameAddress(block.url), alt: block.alt, title: block.title ?? '', width: block.width ?? null, height: block.height ?? null }];
       case 'figure': {
-        if (exactComponents) return [blocksShape([block.image], true)[0], ...(block.caption?.length ? [{ type: 'paragraph', children: [{ type: 'emphasis', children: inlineShape(block.caption) }] } as FidelityValue] : [])];
+        // the written caption is the platform Image's words, so the exact shape compares words too
+        if (exactComponents) return [blocksShape([block.image], true)[0], ...(cleanText(inlineText(block.caption ?? [])) ? [{ type: 'paragraph', children: [{ type: 'emphasis', children: [{ type: 'text', value: cleanText(inlineText(block.caption ?? [])) }] }] } as FidelityValue] : [])];
         // Without a caption a figure says exactly what its image says, so it reads as the image -
         // the same equivalence framedImageShape already applies to a component wrapping one image.
-        const caption = inlineShape(block.caption ?? []);
+        // words only: the platform's caption carries no formatting, which the conversion records
+        const captionWords = cleanText(inlineText(block.caption ?? []));
+        const caption = captionWords ? [{ type: 'text', value: captionWords } as FidelityValue] : [];
         const image = blocksShape([block.image], false)[0];
         return caption.length ? [{ type: 'figure', image, caption }] : [image];
       }

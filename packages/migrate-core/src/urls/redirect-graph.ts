@@ -97,12 +97,16 @@ export function redirectProblems(rules: readonly RedirectRule[], routes: Readonl
   }
 
   // A wildcard covering an exact rule's path: whichever the host prefers, one of them is dead.
+  // …unless both send the path to the same place, in which case the host's ordering changes
+  // nothing: the wildcard is the same rule said once for the whole subtree.
   for (const wildcard of wildcards) {
     const prefix = normalise(wildcard.source.replace(/[*].*$/, '').replace(/:splat.*$/, ''));
-    for (const source of bySource.keys()) {
-      if (source !== prefix && source.startsWith(prefix === '/' ? '/' : `${prefix}/`)) {
-        problems.push({ kind: 'shadowed', detail: `${wildcard.source} covers ${source}, and which rule runs depends on the host's ordering` });
-      }
+    const destinationPrefix = wildcard.destination.replace(/:splat.*$/, '').replace(/[*].*$/, '');
+    for (const [source, destinations] of bySource) {
+      if (source === prefix || !source.startsWith(prefix === '/' ? '/' : `${prefix}/`)) continue;
+      const rest = source.slice(prefix === '/' ? 1 : prefix.length + 1);
+      if ([...destinations].every((destination) => normalise(`${destinationPrefix}${rest}`) === normalise(destination))) continue;
+      problems.push({ kind: 'shadowed', detail: `${wildcard.source} covers ${source}, and which rule runs depends on the host's ordering` });
     }
   }
 

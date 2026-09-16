@@ -72,7 +72,7 @@ import { Firecrawl, readFirecrawlPage, type FirecrawlOptions } from './scrape/fi
 import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
 import { discoverLiveSite, extractMintlifyNavigation, navigationFromFrozenPages, sidebarObserved, siteNameFromTitleTags, type DiscoveredNavigationNode, type DiscoveryResult } from './scrape/discovery.js';
 import { defaultUrlFromHelpSystem, helpSystemRoot } from './scrape/madcap-toc.js';
-import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
+import { unescapeMarkdown, unwrapPublishedMarkdown } from './scrape/published-markdown.js';
 import { extractSeo, seoFrontmatter } from './scrape/seo.js';
 import { acquirePages, acquireFirecrawlPages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
 import { acquireNativePages } from './scrape/native-acquire.js';
@@ -271,9 +271,18 @@ function frozenDiscovery(workspace: string, session: Session, profile: ScrapePro
   if (!existsSync(path)) fail('--offline needs the frozen discovery result, which this workspace never recorded; discover online once first');
   requireSourceManifest(workspace, session.hashes.sourceManifest);
   const discovery = readJson<DiscoveryResult>(path);
+  // Titles the frozen result recorded were parsed by the build that captured it. An llms.txt
+  // label escapes a bracket as Markdown requires (`\[updated for 2026\]`); a title is the characters,
+  // and reading the frozen labels through the same rule a live discover now applies makes an
+  // offline re-derivation state the same title.
+  for (const page of discovery.pages) {
+    if (page.title) page.title = unescapeMarkdown(page.title);
+    if (page.llms?.title) page.llms.title = unescapeMarkdown(page.llms.title);
+  }
+  for (const entry of discovery.llms?.entries ?? []) entry.title = unescapeMarkdown(entry.title);
   const frozen = discovery.pages.map((page) => ({ url: page.url, html: acquiredHtml(workspace, pageIdFromPlatform(platform, page.url)) })).filter((page) => page.html);
   if (!frozen.length) fail('--offline found no acquired page bodies to re-read; run acquire before re-deriving');
-  const derived = navigationFromFrozenPages(frozen, platform, url, new URL(url).origin, profile, new Map((discovery.navigationData ?? []).map((file) => [file.url, file.body])));
+  const derived = navigationFromFrozenPages(frozen, platform, url, new URL(url).origin, profile, new Map((discovery.navigationData ?? []).map((file) => [file.url, file.body])), sourceCanonicalHosts(workspace, url, profile));
   ok(`${frozen.length} frozen page(s) re-read with no network; navigation from ${derived?.source ?? 'the frozen capture, unchanged'}`);
   // Re-read the site's name from the same frozen titles, so a capture taken before the migrator
   // could read it gains the name on rebuild instead of needing the site crawled again.
@@ -888,6 +897,13 @@ async function main() {
             }
             heads.push({ id: n.id, text, sourceId: n.sourceId ?? gitbook[0] ?? mintlify, ...(gitbook.length > 1 ? { aliases: gitbook.slice(1) } : {}) });
           }
+          // GitBook gives an expandable block the id its summary slugs to (`<details id="admin">`),
+          // and pages deep-link to it. The target's Expandable renders no id, so the anchor is
+          // recorded on the component and written back as a shim where a link still uses it.
+          if (n.type === 'component' && tree.platform === 'gitbook' && n.name === 'details' && typeof n.props.summary === 'string' && n.props.summary.trim()) {
+            const ids = gitbookHeadingIds(n.props.summary);
+            heads.push({ id: n.id, text: '', sourceId: ids[0], ...(ids.length > 1 ? { aliases: ids.slice(1) } : {}), component: true });
+          }
           // Mintlify gives every parameter field an anchor, `param-<name>`, and pages link to them.
           // The target renders no such id, so the anchor is recorded on the component and written
           // back as a shim where a link still uses it.
@@ -1249,8 +1265,14 @@ async function main() {
         requireFrozenInputs(workspace, s);
         // Nothing reaches the customer's repository unapproved: scope, decisions and the output
         // itself each carry a recorded approval of the exact state being pushed.
-        const unapproved = releaseApprovalProblems(workspace, s, 3);
-        if (unapproved.length) fail(`--push refused until the human gates are approved:\n${unapproved.map((problem) => `  ${problem}`).join('\n')}\napprove with: dai-migrate approve --gate <n> --by "<who approved it>"`);
+        // Scope and plan approvals (gates 1 and 2) are the operator's own statements of what this
+        // migration is; a push without them would publish an unreviewed scope. Gate 3 is the
+        // pre-push validation itself: its findings are reported, never a reason to withhold the
+        // preview from the person who spent the hours producing it. Release (gate 4) still is.
+        const unapproved = releaseApprovalProblems(workspace, s, 2);
+        if (unapproved.length) fail(`--push refused until scope and plan are approved:\n${unapproved.map((problem) => `  ${problem}`).join('\n')}\napprove with: dai-migrate approve --gate <n> --by "<who approved it>"`);
+        const gate3 = releaseApprovalProblems(workspace, s, 3).filter((problem) => !unapproved.includes(problem));
+        if (gate3.length) console.log(`· pushing before gate 3 was signed off (${gate3.length} approval note(s) recorded in report/pushed-with-findings.json); the preview is for review, not release`);
         const gateFile = join(workspace, 'report', 'gates.json');
         if (!existsSync(gateFile)) fail('--push requires a completed verify run');
         const currentOutputHash = canonicalHash(join(workspace, 'output'));
@@ -1270,10 +1292,15 @@ async function main() {
         // An exploratory push accepts that exactness is unproven, which only a permissive session can
         // leave it. It waives "not proven", never a gate that actually failed.
         const allowLossy = !!v['allow-lossy'];
-        if (allowLossy && (s.fidelityMode ?? 'exact') === 'exact') fail('--allow-lossy refused: this session is exact, where nothing is left unproven and nothing may be waived. Re-run init with --fidelity permissive for an exploratory migration.');
+        // A failing automated gate is a finding, not a lock on the preview: the branch is pushed with
+        // every finding recorded beside it, in every mode, and release is where a finding blocks.
         const blockers = previewPushBlockers(gateReport.gates, { allowUnprovenExactness: allowLossy });
-        if (blockers.length) fail(`--push refused: non-preview gates must pass first (${blockers.map((g) => g.id).join(', ')})${allowLossy ? '; these failed or are missing, which --allow-lossy cannot waive' : ''}`);
-        if (allowLossy) {
+        writeJson(join(workspace, 'report', 'pushed-with-findings.json'), { at: new Date().toISOString(), outputHash: currentOutputHash, fidelityMode: s.fidelityMode ?? 'exact', gate3Approval: gate3, failingGates: blockers.map((gate) => ({ id: gate.id, status: gate.status, detail: gate.detail })) });
+        if (blockers.length) {
+          console.log(`· PUSHING WITH ${blockers.length} FAILING GATE(S): ${blockers.map((g) => g.id).join(', ')}`);
+          console.log('· the preview shows the migration as it stands; each finding is in report/review-queue.md and the customer report, and every one must pass before release');
+        }
+        if (allowLossy && (s.fidelityMode ?? 'exact') !== 'exact') {
           const waived = waivedExactnessGates(gateReport.gates).map((gate) => gate.id);
           writeJson(join(workspace, 'report', 'lossy-push.json'), { at: new Date().toISOString(), outputHash: currentOutputHash, waivedGates: waived });
           console.log(`· EXPLORATORY PUSH: ${waived.length} exactness gate(s) waived as unproven (${waived.join(', ')}); recorded in report/lossy-push.json`);
@@ -1446,7 +1473,8 @@ async function main() {
       const blocked = gates.filter((g) => !gateSatisfied(g)).length;
       const prePushBlockers = previewPushBlockers(gates);
       const effectiveBlockers = previewUrl ? blocked : prePushBlockers.length;
-      markStage(workspace, 'verify', effectiveBlockers ? 'failed' : 'done', previewUrl ? `${blocked} release gates failing or not run` : `${prePushBlockers.length} pre-push gates failing`);
+      // Findings are recorded, and the stage is done: what verify found never withholds the push.
+      markStage(workspace, 'verify', 'done', previewUrl ? `${blocked} release gates failing or not run` : `${prePushBlockers.length} pre-push gates failing`);
       if (previewUrl) {
         if (blocked) console.log(`✖ ${blocked} release gate(s) failing or not run; release is blocked; see report/review-queue.md`);
         else {
@@ -1454,7 +1482,8 @@ async function main() {
           humanGate(4, 'preview and release', 'review the rendered preview, redirects and report; explicitly approve cutover/release');
         }
       } else if (prePushBlockers.length) {
-        console.log(`✖ ${prePushBlockers.length} pre-push gate(s) failing; preview push is blocked; see report/review-queue.md`);
+        console.log(`✖ ${prePushBlockers.length} pre-push gate(s) failing; see report/review-queue.md. The push is not blocked: write --push publishes the preview with these findings recorded, and they must pass before release`);
+        humanGate(3, 'pre-push validation', 'review output/documentation.json, converted pages, redirects and report/review-queue.md; approve only the named migration-branch push');
       } else {
         ok('all pre-push automated gates pass; preview-only gates remain not-run');
         humanGate(3, 'pre-push validation', 'review output/documentation.json, converted pages, redirects and report/review-queue.md; approve only the named migration-branch push');

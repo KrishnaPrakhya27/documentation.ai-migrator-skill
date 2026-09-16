@@ -746,7 +746,7 @@ export interface FrozenPage { url: string; html?: string }
  * site divided into sections renders one sidebar per section, so each section's sidebar is
  * taken from a page inside it.
  */
-export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform: string, seed: string, origin: string, profile: ScrapeProfile, navigationData: FlareData = new Map()): { nodes: DiscoveredNavigationNode[]; source: 'platform-metadata' | 'dom-sidebar' } | undefined {
+export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform: string, seed: string, origin: string, profile: ScrapeProfile, navigationData: FlareData = new Map(), canonicalHosts?: CanonicalHosts): { nodes: DiscoveredNavigationNode[]; source: 'platform-metadata' | 'dom-sidebar' } | undefined {
   const path = (value: string): string => { try { return new URL(value).pathname.replace(/\/$/, ''); } catch { return ''; } };
   const home = pages.find((page) => page.html && path(page.url) === path(seed)) ?? pages.find((page) => page.html);
   if (!home?.html) return undefined;
@@ -787,16 +787,17 @@ export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform
     // frozen bytes yields the navigation discovery recorded rather than a shorter one that drops the
     // subpages of every branch the first page happened to render collapsed.
     const sidebars = new Map<string, DiscoveredNavigationNode[]>();
-    for (const page of pages) {
-      if (!page.html) continue;
-      const section = sectionOfUrl(page.url, sections);
+    const labels = new Map<string, string>();
+    for (const page of sidebarPagesInOrder(pages)) {
+      const section = sectionOfPage(page.html!, page.url, origin, profile, sections, canonicalHosts);
       if (!section) continue;
-      const dom = extractDomSidebarNavigation(page.html, page.url, origin, profile);
+      const dom = extractDomSidebarNavigation(page.html!, page.url, origin, profile, canonicalHosts);
       if (!dom) continue;
       const seen = sidebars.get(section.url);
       sidebars.set(section.url, seen ? mergeNavigationTrees(seen, dom) : dom);
+      labels.set(section.url, section.label);
     }
-    const navigation = siteSectionNavigation(sections, sidebars);
+    const navigation = siteSectionNavigation(spacesOf(sections, labels), sidebars);
     if (navigation) return { nodes: navigation, source: 'dom-sidebar' };
   }
   const dom = extractDomSidebarNavigation(home.html, seed, origin, profile);
@@ -892,6 +893,33 @@ export function siteSectionNavigation(sections: readonly SiteSection[], sidebars
     children: sidebars.get(section.url) ?? [{ type: 'page' as const, url: section.url }],
   }));
   return tabs.length >= 2 ? tabs : undefined;
+}
+
+/**
+ * The pages a section navigation is merged from, in an order nothing about a crawl can change: by
+ * address. Merging in the order pages happened to finish downloading placed a section wherever the
+ * first page to render it put it, and the verification re-read — in another order — put it
+ * elsewhere, so a navigation that was right by every other measure failed as different from itself.
+ */
+function sidebarPagesInOrder(pages: readonly FrozenPage[]): FrozenPage[] {
+  return pages.filter((page) => page.html).sort((a, b) => a.url.localeCompare(b.url));
+}
+
+/**
+ * Where a page says it belongs: the section its own switcher names, else the site's section that
+ * contains it. A page whose switcher names a single root (a language variant) belongs to that root.
+ */
+function sectionOfPage(html: string, url: string, origin: string, profile: ScrapeProfile, sections: readonly SiteSection[] | undefined, canonicalHosts?: CanonicalHosts): SiteSection | undefined {
+  const declared = extractSectionTabs(html, url, origin, profile, canonicalHosts, { requireSeveral: false });
+  return (declared ? sectionOfUrl(url, declared) : undefined) ?? (sections ? sectionOfUrl(url, sections) : undefined);
+}
+
+/** The site's own sections first, in the order it lists them, then every variant root the pages declared that those do not cover. */
+function spacesOf(sections: readonly SiteSection[] | undefined, labels: ReadonlyMap<string, string>): SiteSection[] {
+  return [
+    ...(sections ?? []),
+    ...[...labels].filter(([url]) => !(sections ?? []).some((section) => section.url === url)).map(([url, label]) => ({ url, label })),
+  ];
 }
 
 /** Every page URL the tree already places, at any depth — a container's own page included. */
@@ -1082,6 +1110,7 @@ export async function discoverLiveSite(input: {
   const sectionSidebars = new Map<string, DiscoveredNavigationNode[]>();
   /** Each space's own label as the source states it, including variant roots that are not site sections. */
   const spaceLabels = new Map<string, string>();
+  const pageSidebars = new Map<string, { html: string; dom: DiscoveredNavigationNode[]; declared: SiteSection[] | undefined }>();
   let siteName: string | undefined;
   let siteConfig: SiteConfig | undefined;
   const navigationData: NonNullable<DiscoveryResult['navigationData']> = [];
@@ -1381,15 +1410,13 @@ export async function discoverLiveSite(input: {
       // Resolved against the sections this page declares, not the site's: a translated page names its
       // own variant of each section, and matching against the default variant's paths would file every
       // translated page under the section whose path prefix it happens to share.
-      const space = (declared ? sectionOfUrl(pageUrl, declared) : undefined) ?? (sections ? sectionOfUrl(pageUrl, sections) : undefined);
       const dom = extractDomSidebarNavigation(response.body, pageUrl, origin, input.profile, canonicalHosts);
       if (dom) {
         navigationCandidates['dom-sidebar'] ??= dom;
-        if (space) {
-          const seen = sectionSidebars.get(space.url);
-          sectionSidebars.set(space.url, seen ? mergeNavigationTrees(seen, dom) : dom);
-          spaceLabels.set(space.url, space.label);
-        }
+        // Kept per page and merged once the crawl is complete, in address order: the order pages
+        // finish downloading is not repeatable, and the verification re-read merges the same
+        // pages in the same address order, so the two derive one navigation.
+        pageSidebars.set(pageUrl, { html: '', dom, declared });
       }
       for (const anchor of findAll(root, 'a[href]')) if (anchor.attribs.href) add(anchor.attribs.href, 'link-graph', response.finalUrl || url);
       const navSelector = input.profile.navSelector ?? 'nav, aside, .sidebar, [role=navigation]';
@@ -1406,12 +1433,17 @@ export async function discoverLiveSite(input: {
     }
   }
 
+  for (const pageUrl of [...pageSidebars.keys()].sort((a, b) => a.localeCompare(b))) {
+    const { dom, declared } = pageSidebars.get(pageUrl)!;
+    const space = (declared ? sectionOfUrl(pageUrl, declared) : undefined) ?? (sections ? sectionOfUrl(pageUrl, sections) : undefined);
+    if (!space) continue;
+    const seen = sectionSidebars.get(space.url);
+    sectionSidebars.set(space.url, seen ? mergeNavigationTrees(seen, dom) : dom);
+    spaceLabels.set(space.url, space.label);
+  }
   // Every space that stated a sidebar becomes a container: the site's own sections first, in the
   // order the source lists them, then any variant root the sections do not already cover.
-  const spaces: SiteSection[] = [
-    ...(sections ?? []),
-    ...[...spaceLabels].filter(([url]) => !(sections ?? []).some((section) => section.url === url)).map(([url, label]) => ({ url, label })),
-  ];
+  const spaces: SiteSection[] = spacesOf(sections, spaceLabels);
   const sectionNavigation = spaces.length ? siteSectionNavigation(spaces, sectionSidebars) : undefined;
   if (sectionNavigation) navigationCandidates['dom-sidebar'] = sectionNavigation;
 

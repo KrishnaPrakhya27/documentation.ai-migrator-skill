@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import type { Block, ComponentNode, DaiComponentNode, DocIR, Inline, ListItemNode, QuarantinedNode, RawHtmlNode } from '../ir/types.js';
 import { flareTocTree } from '../scrape/madcap-toc.js';
 import type { DiscoveredNavigationNode } from '../scrape/discovery.js';
-import { walkBlocks, inlineText, isBlockWithChildren } from '../ir/types.js';
+import { walkBlocks, inlineText, isBlockWithChildren, blocksPlainText } from '../ir/types.js';
 import { Ledger } from '../ledger/dispositions.js';
 import { sanitizeHtmlToJsx } from './sanitize.js';
 import { blocksToMdx } from '../ir/to-dai-mdx.js';
@@ -166,30 +166,6 @@ function matches(rule: MappingRule, node: ComponentNode): boolean {
 
 
 /** The plain text a run of blocks states, as one string; undefined when they state none. */
-/**
- * The text of a block tree, as a reader would copy it: paragraphs and headings by their words,
- * lists with their markers and nesting, quotes with theirs, code as written. A prompt that holds a
- * numbered list is the whole list, not its first paragraph.
- */
-function blocksText(blocks: readonly Block[], indent = ''): string | undefined {
-  const parts: string[] = [];
-  for (const block of blocks) {
-    if (block.type === 'paragraph' || block.type === 'heading') parts.push(indent + inlineText(block.children));
-    else if (block.type === 'code') parts.push(block.value.split('\n').map((line) => indent + line).join('\n'));
-    else if (block.type === 'list') {
-      parts.push(block.children.map((item, index) => {
-        const marker = block.ordered ? `${(block.start ?? 1) + index}. ` : '- ';
-        const body = blocksText(item.children, indent + ' '.repeat(marker.length)) ?? '';
-        return indent + marker + body.trimStart();
-      }).join('\n'));
-    } else if (block.type === 'blockquote') parts.push((blocksText(block.children, indent) ?? '').split('\n').map((line) => `> ${line}`).join('\n'));
-    else if (block.type === 'table') parts.push(block.children.map((row) => indent + row.children.map((cell) => inlineText(cell.children)).join(' | ')).join('\n'));
-    else if ('children' in block && Array.isArray(block.children)) { const inner = blocksText(block.children as Block[], indent); if (inner) parts.push(inner); }
-  }
-  const text = parts.join('\n\n').trim();
-  return text || undefined;
-}
-
 /** A Flare table of contents as the nested list of links its tile menu draws, cut at the depth the menu declares. */
 function flareTocList(nodes: readonly DiscoveredNavigationNode[], idBase: string, depth: number, maxDepth: number): Block {
   const items = nodes.map((node, index): ListItemNode => {
@@ -322,7 +298,7 @@ const HANDLERS: Record<string, RestructureHandler> = {
     const repo = str(node.props.repo);
     const images = node.children.filter((child): child is Extract<Block, { type: 'image' }> => child.type === 'image');
     const rest = node.children.filter((child) => child.type !== 'image');
-    const title = str(node.props.title) ?? repo ?? blocksText(rest) ?? 'Card';
+    const title = str(node.props.title) ?? repo ?? blocksPlainText(rest) ?? 'Card';
     const href = str(node.props.href) ?? (repo ? `https://github.com/${repo}` : undefined);
     const description = str(node.props.description);
     // The label of a button-shaped card became its title, so it is not repeated as body text.
@@ -368,7 +344,7 @@ const HANDLERS: Record<string, RestructureHandler> = {
   /** A prompt is text meant to be copied, which is what a code block is; its description becomes the line introducing it. */
   'prompt-to-code': { reads: ['description', 'actions'], run: (node) => {
     const description = typeof node.props.description === 'string' ? node.props.description.trim() : '';
-    const value = blocksText(node.children) ?? '';
+    const value = blocksPlainText(node.children) ?? '';
     if (!value) return quarantined(node, 'a prompt holds no text to copy');
     const blocks: Block[] = [];
     if (description) blocks.push({ id: `${node.id}:desc`, type: 'paragraph', children: [{ id: `${node.id}:desc:t`, type: 'text', value: description }] });
@@ -443,7 +419,7 @@ const HANDLERS: Record<string, RestructureHandler> = {
     // the title renders as a heading element, at the source level where the contract has one (h2, h3)
     const titleType = first.depth <= 2 ? 'h2' : 'h3';
     const lossy = [`leading heading "${title}" became the Step title`, ...(first.depth > 3 ? [`heading level ${first.depth} rendered as h3`] : [])];
-    return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title, titleType }, children: rest, rule: rule.id }], lossy };
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title, titleType }, children: rest, rule: rule.id, anchorFrom: first.id }], lossy };
   } },
   /** Embed: an Iframe when the host may be framed, otherwise the link a reader of the source followed. */
   'embed-to-iframe-or-link': { reads: ['src', 'url', 'title'], run: (node, rule, ctx) => {
@@ -500,6 +476,11 @@ export class RulesEngine {
           this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: b.id, tier: 'T7', rule: 'T7/raw-html-sanitise' });
           out.push({ id: b.id, type: 'rawHtml', value, reviewFlag: 'T7 preserve: sanitised raw HTML' });
         }
+      } else if (b.type === 'figure' && b.caption?.some((inline) => inline.type !== 'text')) {
+        // the platform's caption is words: a link or emphasis inside the caption is written as its words
+        this.opts.ledger.transformed(pageId, b.id, [b.id], 'T2/caption-words', ['caption formatting or link dropped; the platform caption holds words only']);
+        this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: b.id, tier: 'T2', rule: 'T2/caption-words', lossy: ['caption formatting dropped'] });
+        out.push(b);
       } else if ((b.type === 'image' && !b.alt) || (b.type === 'figure' && !b.image.alt)) {
         this.opts.ledger.transformed(pageId, b.id, [b.id], 'T2/alt-missing', ['alt text missing in source; emitted alt=""']);
         this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: b.id, tier: 'T2', rule: 'T2/alt-missing', lossy: ['alt missing'] });

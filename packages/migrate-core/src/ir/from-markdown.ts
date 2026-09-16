@@ -8,6 +8,7 @@ import { parse as parseYaml } from 'yaml';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { gfm } from 'micromark-extension-gfm';
+import { nameToEmoji } from 'gemoji';
 import { mdxjs } from 'micromark-extension-mdxjs';
 import { mdxFromMarkdown } from 'mdast-util-mdx';
 import { loadContract } from '@dai/content-contract';
@@ -106,7 +107,10 @@ function liquidAttrs(raw: string): string {
     // GitBook wraps the URL in angle brackets inside attributes: url="<https://…>". Its export
     // autolinks only the part it recognises, so a trailing `?` or an escaped `_` that belongs to the
     // address ends up after the closing bracket; the value is the two joined, with the escape undone.
-    attrs.push(`${name}="${quoteAttr((m[2] ?? m[3] ?? '').replace(/^<([^<>\s]+)>(.*)$/, (_whole, url: string, rest: string) => url + rest.replace(/\\(.)/g, '$1')))}"`);
+    // The export escapes Markdown punctuation inside attribute values as it does in text
+    // (`title="contribution\_analytics.py"`); the value is the characters, not the escapes.
+    const raw = (m[2] ?? m[3] ?? '').replace(/^<([^<>\s]+)>(.*)$/, (_whole, url: string, rest: string) => url + rest.replace(/\\(.)/g, '$1'));
+    attrs.push(`${name}="${quoteAttr(raw.replace(/\\([_*`~\\])/g, '$1'))}"`);
   }
   return attrs.length ? ' ' + attrs.join(' ') : '';
 }
@@ -172,8 +176,14 @@ function gitbookQuotedMarkdown(source: string): string {
 
 function preprocessSegment(source: string, platform: string): string {
   let out = source.replace(/^(#{1,6}\s+.*?)\s*\{#([A-Za-z][\w:.-]*)\}\s*$/gm, (_, heading, id) => `${heading} ${ANCHOR_OPEN}${id}${ANCHOR_CLOSE}`);
+  // GitBook's export states a heading's anchor itself: `## \u200bTitle <a href="#the-id" id="the-id"></a>`.
+  // The empty anchor is the id the site gives the heading — and every deep link uses — and the
+  // zero-width space is the editor's, not the author's. Read as text they became a heading whose
+  // words ended in an empty link and whose slug matched nothing, and 345 deep links on one site
+  // had nowhere to land.
+  if (platform === 'gitbook') out = out.replace(/^(#{1,6}\s+)\u200b?(.*?)\s*<a href="#([^"]+)" id="\3"><\/a>\s*$/gm, (_, hashes, title, id) => `${hashes}${title} ${ANCHOR_OPEN}${id}${ANCHOR_CLOSE}`).replace(/^(#{1,6}\s+)\u200b/gm, '$1');
   out = out.replace(/\{\{\s*snippet\.([^}]+?)\s*\}\}/g, (_, token) => `<snippetRef token="${quoteAttr(String(token).trim())}" />`);
-  if (platform === 'gitbook') out = gitbookMdxCompatible(gitbookLiteralBraces(gitbookTableAsterisks(gitbookLiquidBlocks(gitbookMathBraces(gitbookHtmlCodeBlocks(gitbookLiteralAngles(out)))))));
+  if (platform === 'gitbook') out = gitbookMdxCompatible(gitbookLiteralBraces(gitbookTableAsterisks(gitbookLiquidBlocks(gitbookMathBraces(gitbookHtmlCodeBlocks(gitbookLiteralAngles(gitbookEmojiShortcodes(out))))))));
   if (platform === 'readme') out = readmeMdxCompatible(out);
   if (platform === 'docusaurus') {
     out = out.replace(/^:::(note|tip|info|warning|danger|caution)(?:\s+([^\n]+))?\s*$/gm, (_, kind, title) => `<admonition kind="${kind}"${title ? ` title="${quoteAttr(String(title).trim())}"` : ''}>`);
@@ -340,6 +350,25 @@ function gitbookLiteralBraces(segment: string): string {
     .map((part, index) => (index % 2 === 1 ? part : part.replace(/(?<!\\)([{}])/g, '\\$1')))
     .join('')
     .replace(/^(import|export)(?=\s)/gm, (_, word: string) => `&#${word.charCodeAt(0)};${word.slice(1)}`));
+}
+
+/**
+ * GitBook writes an emoji as its shortcode (`:boom:`, `:frame\_photo:` with the export's escape)
+ * and renders the character; left as written, the reader sees the colons. The names are GitHub's,
+ * with a few GitBook spells its own way. A name nothing knows stays as written, visibly, rather
+ * than becoming a guess — and a `:word:` inside an identifier (`site:metadata:read`) is not a
+ * shortcode at all.
+ */
+const GITBOOK_EMOJI_ALIASES: Record<string, string> = { frame_photo: 'framed_picture', frame_with_picture: 'framed_picture', tada: 'tada', cross_mark: 'x', check_mark: 'heavy_check_mark', heavy_check: 'heavy_check_mark' };
+function gitbookEmojiShortcodes(segment: string): string {
+  return outsideCode(segment, (text) => text
+    .split(/(<[A-Za-z/][^<>]*>)/)
+    .map((part, index) => (index % 2 === 1 ? part : part.replace(/(?<![\w:/])(?<!:):([a-z0-9][a-z0-9_+\\-]*):(?![\w:])/g, (match, name: string) => {
+      const key = name.replace(/\\_/g, '_');
+      const emoji = nameToEmoji[key] ?? nameToEmoji[GITBOOK_EMOJI_ALIASES[key] ?? ''];
+      return emoji ?? match;
+    })))
+    .join(''));
 }
 
 function gitbookMdxCompatible(segment: string): string {
@@ -570,7 +599,10 @@ function gitbookOperationBlock(children: Block[]): { children: Block[]; operatio
   if (at < 0) return undefined;
   const block = children[at] as Extract<Block, { type: 'component' }>;
   const operation = { spec: capturedSpecFile(String(block.props.src)), method: String(block.props.method).toUpperCase(), path: String(block.props.path), document: '', specUrl: String(block.props.src) };
-  return { children: [...children.slice(0, at), ...block.children, ...children.slice(at + 1)], operation };
+  // What the export wrote inside the block is GitBook's own rendering of the operation — the spec
+  // link, "Test it (powered by Scalar)", the parameters — which the platform renders afresh from
+  // the spec the frontmatter names. Kept, the page would show the operation twice, once as chrome.
+  return { children: [...children.slice(0, at), ...children.slice(at + 1)], operation };
 }
 
 export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocIR {
@@ -625,6 +657,14 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       ...(width.unreadable !== undefined ? { unreadableWidth: width.unreadable } : {}),
       ...(height.unreadable !== undefined ? { unreadableHeight: height.unreadable } : {}),
     };
+  };
+
+  /** An `<Image caption="…">` this tool wrote is the figure it was written from; the caption is text the reader sees under it. */
+  const figureOrImage = (node: any, path: number[]): Block => {
+    const image = imageFromMdx(node, path);
+    const caption = (node.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && a.name === 'caption');
+    if (typeof caption?.value !== 'string' || !caption.value.trim()) return image;
+    return { id: `${image.id}:figure`, src: image.src, type: 'figure', image, caption: [{ id: `${image.id}:caption`, src: image.src, type: 'text', value: caption.value }] };
   };
 
   const inline = (nodes: any[], path: number[]): Inline[] => nodes.flatMap((node, index): Inline[] => {
@@ -704,8 +744,9 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         // ReadMe's glossary term renders as the term, with a definition from the project's glossary on hover; the page holds only the term
         if (opts.platform === 'readme' && node.name === 'Glossary') return inline(node.children ?? [], p);
         // ReadMe's editor writes some inline formatting as HTML elements
-        if (opts.platform === 'readme' && (name === 'strong' || name === 'b')) return [{ ...base, type: 'strong', children: inline(node.children ?? [], p) }];
-        if (opts.platform === 'readme' && (name === 'em' || name === 'i')) return [{ ...base, type: 'emphasis', children: inline(node.children ?? [], p) }];
+        if ((opts.platform === 'readme' || opts.platform === 'dai') && (name === 'strong' || name === 'b')) return [{ ...base, type: 'strong', children: inline(node.children ?? [], p) }];
+        if ((opts.platform === 'readme' || opts.platform === 'dai') && (name === 'em' || name === 'i')) return [{ ...base, type: 'emphasis', children: inline(node.children ?? [], p) }];
+        if (opts.platform === 'dai' && (name === 'del' || name === 's')) return [{ ...base, type: 'delete', children: inline(node.children ?? [], p) }];
         if (opts.platform === 'gitbook' && isGitbookHtmlInline(name)) return htmlInline(node, p);
         // Reading back a file this tool wrote, an inline HTML element it emitted verbatim reads back
         // as what was written. The marker below exists so a *source* platform's component reaches a
@@ -957,7 +998,25 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
   };
 
   const jsxFlow = (node: any, path: number[]): Block[] => {
-    if (isImageElement(node)) return [imageFromMdx(node, path)];
+    if (isImageElement(node)) return [figureOrImage(node, path)];
+    // An inline element alone on a line of this tool's own output — `<mark>This text is orange.</mark>` —
+    // is the paragraph it was written from: MDX reads it as a flow element, but `mark` has no block
+    // reading, so it is the inline it always was.
+    const flowInline = String(node.name).toLowerCase();
+    const phrasingOnly = (node.children ?? []).every((child: any) => child.type !== 'mdxJsxFlowElement' && !['paragraph', 'heading', 'list', 'code', 'blockquote'].includes(child.type));
+    // Emphasis this tool wrote as HTML (words that begin or end in punctuation) opening a line is
+    // the paragraph it was, with the emphasis it was.
+    if (opts.platform === 'dai' && ['strong', 'b', 'em', 'i', 'del', 's'].includes(flowInline) && phrasingOnly) {
+      const type = flowInline === 'strong' || flowInline === 'b' ? 'strong' : flowInline === 'em' || flowInline === 'i' ? 'emphasis' : 'delete';
+      const id = idOf(node, path);
+      return [{ id, src: srcOf(node), type: 'paragraph', children: [{ id: `${id}:${type}`, src: srcOf(node), type, children: inline(node.children ?? [], [...path, 0]) } as Inline] }];
+    }
+    if (opts.platform === 'dai' && ['mark', 'u', 'sup', 'sub', 'small', 'kbd'].includes(flowInline) && phrasingOnly) {
+      const children = inline(node.children ?? [], [...path, 0]);
+      const name = flowInline;
+      const value = `<${name}>${inlineText(children).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</${name}>`;
+      return [{ id: idOf(node, path), src: srcOf(node), type: 'paragraph', children: [{ id: `${idOf(node, path)}:html`, src: srcOf(node), type: 'inlineHtml', value }] }];
+    }
     if (String(node.name).toLowerCase() === 'picture') { const picture = pictureImage(node, path); if (picture) return [picture]; }
     if (opts.platform === 'gitbook') { const converted = gitbookFlow(node, path); if (converted) return converted; }
     if (opts.platform === 'readme') { const converted = readmeFlow(node, path); if (converted) return converted; }

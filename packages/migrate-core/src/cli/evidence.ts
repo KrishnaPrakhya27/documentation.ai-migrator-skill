@@ -15,6 +15,7 @@ import { frozenRootPath, sourceManifestPath, type SourceManifest } from '../evid
 import { nativeNavigationWitness } from '../evidence/native-navigation.js';
 import { buildDocumentationNavigation, type SourceNavigationNode, type Tree } from '../nav/tree.js';
 import { getProfile } from '../scrape/profiles.js';
+import { CanonicalHosts } from '../scrape/fetcher.js';
 import { navigationFromFrozenPages, type DiscoveredNavigationNode, type DiscoveryResult } from '../scrape/discovery.js';
 import { loadRawSourcePages, type RawSourcePage } from '../verify/source-truth.js';
 import { readManifest } from '../assets/manifest.js';
@@ -92,7 +93,7 @@ export function buildSourceEvidence(workspace: string, tree: Tree): SourceEviden
   if (seed && home.html) {
     const origin = new URL(seed).origin;
     const sourceById = new Map(tree.pages.map((page) => [page.id, page.source]));
-    const derived = navigationFromFrozenPages(pages.map((page) => ({ url: sourceById.get(page.pageId) ?? '', html: page.html })).filter((page) => /^https?:\/\//.test(page.url)), tree.platform, seed, origin, profile, frozenNavigationData(workspace));
+    const derived = navigationFromFrozenPages(pages.map((page) => ({ url: sourceById.get(page.pageId) ?? '', html: page.html })).filter((page) => /^https?:\/\//.test(page.url)), tree.platform, seed, origin, profile, frozenNavigationData(workspace), new CanonicalHosts(origin, existsSync(canonicalHostsPath(workspace)) ? readJson<{ aliases?: string[] }>(canonicalHostsPath(workspace)).aliases ?? [] : []));
     if (derived) {
       const nodes = derived.nodes;
       navigationSource = derived.source;

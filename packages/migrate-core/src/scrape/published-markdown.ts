@@ -121,7 +121,8 @@ export function parseLlmsIndex(body: string, sourceUrl?: string, options: ParseL
     const match = raw.trim().match(LLMS_ENTRY);
     if (!match) continue;
     const [, rawTitle, link, description] = match;
-    const title = rawTitle.trim();
+    // a label is Markdown, so a bracket in the title is written escaped; the title is the characters
+    const title = unescapeMarkdown(rawTitle.trim());
     let url: string;
     try { url = new URL(link, sourceUrl).toString(); } catch { throw new Error(`llms.txt entry "${title}" links to an unresolvable URL ${link}`); }
     if (options.indexSegment && hasPathSegment(url, options.indexSegment)) {
@@ -169,6 +170,11 @@ function normaliseWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/** A heading's words as written: the export escapes Markdown punctuation (`\\[updated for 2026\\]`) and a title is not Markdown. */
+export function unescapeMarkdown(text: string): string {
+  return text.replace(/\\([\\`*_{}\[\]()#+\-.!|<>~])/g, '$1');
+}
+
 function skipBlankLines(lines: string[], cursor: number): number {
   while (cursor < lines.length && !lines[cursor].trim()) cursor++;
   return cursor;
@@ -203,7 +209,7 @@ export function unwrapPublishedMarkdown(source: string, platform: string, option
   let title: string | undefined;
   const heading = lines[cursor]?.match(/^#\s+(.+?)\s*$/);
   if (heading) {
-    title = heading[1];
+    title = unescapeMarkdown(heading[1]);
     cursor = skipBlankLines(lines, cursor + 1);
   }
 
@@ -246,7 +252,7 @@ function unwrapReadmeMarkdown(source: string, options: UnwrapOptions): Published
   let title: string | undefined;
   const heading = lines[cursor]?.match(/^#\s+(.+?)\s*$/);
   if (heading) {
-    title = heading[1];
+    title = unescapeMarkdown(heading[1]);
     cursor = skipBlankLines(lines, cursor + 1);
   }
 
@@ -308,7 +314,7 @@ function unwrapGitbookMarkdown(source: string, options: UnwrapOptions): Publishe
   let title: string | undefined;
   const heading = lines[cursor]?.match(/^#\s+(.+?)\s*$/);
   if (heading) {
-    title = heading[1];
+    title = unescapeMarkdown(heading[1]);
     cursor = skipBlankLines(lines, cursor + 1);
   }
 

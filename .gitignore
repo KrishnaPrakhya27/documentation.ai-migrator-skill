@@ -1,4 +1,6 @@
 node_modules/
+# a worktree may hold node_modules as a symlink, which the directory pattern above does not match
+node_modules
 dist/
 *.tsbuildinfo
 # Run data must never live in this repository (external --workspace only)

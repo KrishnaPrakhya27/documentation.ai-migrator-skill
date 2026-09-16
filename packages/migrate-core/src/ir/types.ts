@@ -74,6 +74,8 @@ export interface DaiComponentNode extends BaseNode {
   children: Block[];
   /** Mapping rule id that produced it, for the ledger. */
   rule?: string;
+  /** The source heading this component's title was folded from, so an anchor that heading published is written with the component. */
+  anchorFrom?: string;
 }
 
 /** Sanitised raw HTML that the deployment contract accepts (T7 preserve). */
@@ -181,4 +183,28 @@ export function inlineText(nodes: Inline[] | undefined): string {
       default: return inlineText((n as any).children);
     }
   }).join('');
+}
+
+/**
+ * The text of a block tree, as a reader would copy it: paragraphs and headings by their words,
+ * lists with their markers and nesting, quotes with theirs, code as written. A prompt that holds a
+ * numbered list is the whole list, not its first paragraph.
+ */
+export function blocksPlainText(blocks: readonly Block[], indent = ''): string | undefined {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === 'paragraph' || block.type === 'heading') parts.push(indent + inlineText(block.children));
+    else if (block.type === 'code') parts.push(block.value.split('\n').map((line) => indent + line).join('\n'));
+    else if (block.type === 'list') {
+      parts.push(block.children.map((item, index) => {
+        const marker = block.ordered ? `${(block.start ?? 1) + index}. ` : '- ';
+        const body = blocksPlainText(item.children, indent + ' '.repeat(marker.length)) ?? '';
+        return indent + marker + body.trimStart();
+      }).join('\n'));
+    } else if (block.type === 'blockquote') parts.push((blocksPlainText(block.children, indent) ?? '').split('\n').map((line) => `> ${line}`).join('\n'));
+    else if (block.type === 'table') parts.push(block.children.map((row) => indent + row.children.map((cell) => inlineText(cell.children)).join(' | ')).join('\n'));
+    else if ('children' in block && Array.isArray(block.children)) { const inner = blocksPlainText(block.children as Block[], indent); if (inner) parts.push(inner); }
+  }
+  const text = parts.join('\n\n').trim();
+  return text || undefined;
 }
