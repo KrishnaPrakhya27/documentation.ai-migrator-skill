@@ -522,7 +522,44 @@ export function runGates(input: GateInput): GateResult[] {
     const catalog = JSON.parse(readFileSync(catalogFile, 'utf8')) as { issue?: string };
     if (catalog.issue && !input.pinnedOpenapi) specProblems.push(catalog.issue);
   }
-  gates.push({ id: 'openapi-preserved', status: input.fidelityMode === 'permissive' ? 'not-run' : specProblems.length ? 'fail' : 'pass', detail: specProblems.length ? specProblems.join('; ') : input.pinnedOpenapi ? 'all captured OpenAPI source and output documents match their pins' : 'no captured OpenAPI documents declared by acquisition', samples: specProblems.slice(0, 8), count: specProblems.length });
+  // An endpoint page renders its reference only when the platform can bind it: the operation on the
+  // page's own navigation entry, a spec file at that path in the output, and that method and path in
+  // the spec. A page carrying the operation anywhere else - its frontmatter - renders as bare prose,
+  // which is what a preview of mintlify.com/docs showed on every endpoint page while this gate passed.
+  const bindingsFile = join(input.workspace, 'inventory', 'page-openapi.json');
+  let bound = 0;
+  if (existsSync(bindingsFile)) {
+    const declared = JSON.parse(readFileSync(bindingsFile, 'utf8')) as Record<string, string>;
+    const docJson = join(input.outputDir, 'documentation.json');
+    const entries = new Map<string, string>();
+    if (existsSync(docJson)) {
+      const collect = (value: unknown): void => {
+        if (Array.isArray(value)) { value.forEach(collect); return; }
+        if (!value || typeof value !== 'object') return;
+        const record = value as Record<string, unknown>;
+        if (typeof record.path === 'string' && typeof record.openapi === 'string') entries.set(record.path, record.openapi);
+        Object.values(record).forEach((child) => { if (Array.isArray(child)) collect(child); });
+      };
+      collect((JSON.parse(readFileSync(docJson, 'utf8')) as { navigation?: unknown }).navigation);
+    }
+    const specs = new Map<string, Record<string, Record<string, unknown>> | null>();
+    for (const page of input.treePages) {
+      const operation = declared[page.id];
+      if (!operation || !page.migrate || !page.newPath || !outByPath.has(page.newPath)) continue;
+      const [file, method, ...rest] = operation.split(/\s+/);
+      const endpoint = rest.join(' ');
+      if (entries.get(page.newPath) !== operation) { specProblems.push(`${page.newPath}: navigation entry does not bind ${operation}, so the platform renders no reference`); continue; }
+      if (!specs.has(file)) {
+        const specPath = join(input.outputDir, file);
+        try { specs.set(file, existsSync(specPath) ? ((JSON.parse(readFileSync(specPath, 'utf8')) as { paths?: Record<string, Record<string, unknown>> }).paths ?? {}) : null); } catch { specs.set(file, null); }
+      }
+      const paths = specs.get(file);
+      if (!paths) { specProblems.push(`${page.newPath}: spec ${file} is missing from the output or unreadable`); continue; }
+      if (!paths[endpoint]?.[method.toLowerCase()]) { specProblems.push(`${page.newPath}: ${file} has no ${method.toUpperCase()} ${endpoint}`); continue; }
+      bound++;
+    }
+  }
+  gates.push({ id: 'openapi-preserved', status: input.fidelityMode === 'permissive' ? 'not-run' : specProblems.length ? 'fail' : 'pass', detail: specProblems.length ? `${specProblems.length} OpenAPI problem(s): ${specProblems.slice(0, 3).join('; ')}` : `${input.pinnedOpenapi ? 'all captured OpenAPI source and output documents match their pins' : 'no captured OpenAPI documents declared by acquisition'}; ${bound} endpoint page(s) bound to an operation their spec defines`, samples: specProblems.slice(0, 8), count: specProblems.length });
   if (input.fidelityMode === 'permissive') {
     for (const id of ['source-manifest-pinned', 'source-universe-accounted']) gates.push({ id, status: 'not-run', detail: 'permissive mode; source universe is not certified' });
   } else {

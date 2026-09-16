@@ -926,6 +926,9 @@ async function main() {
       const clusters = clusterComponents(comps);
       writeJson(join(workspace, 'inventory', 'components.json'), clusters);
       writeJson(join(workspace, 'inventory', 'anchors.json'), anchors);
+      // The operation each endpoint page names, as its published Markdown states it. The navigation
+      // carries it to the platform, which renders the reference from the spec at deployment.
+      writeJson(join(workspace, 'inventory', 'page-openapi.json'), Object.fromEntries(docs.flatMap((doc) => (typeof doc.frontmatter.openapi === 'string' && doc.frontmatter.openapi.trim() ? [[doc.pageId, doc.frontmatter.openapi.trim()]] : [])).sort(([a], [b]) => a.localeCompare(b))));
       writeJson(join(workspace, 'inventory', 'links.json'), links);
       const snapHash = sha256(readdirSync(snapDir).sort().map((f) => fileHash(join(snapDir, f))).join('\n'));
       s.hashes.snapshot = snapHash; writeSession(workspace, s);

@@ -24,11 +24,15 @@ export interface PlatformMeta {
   /** Source repository root the openapi specs are relative to. */
   root?: string;
   openapiCaptured?: boolean;
+  /** Endpoint pages by page id, recorded at inventory from the pinned snapshot. */
+  pageOpenapi?: Record<string, string>;
 }
 
 export function readPlatformMeta(workspace: string): PlatformMeta {
   const path = join(workspace, 'inventory', 'platform-meta.json');
-  return existsSync(path) ? readJson<PlatformMeta>(path) : {};
+  const meta = existsSync(path) ? readJson<PlatformMeta>(path) : {};
+  const bindings = join(workspace, 'inventory', 'page-openapi.json');
+  return existsSync(bindings) ? { ...meta, pageOpenapi: readJson<Record<string, string>>(bindings) } : meta;
 }
 
 /** The HTML `acquire` froze for a page, if it has one. */

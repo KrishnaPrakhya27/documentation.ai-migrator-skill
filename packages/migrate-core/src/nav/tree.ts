@@ -469,7 +469,15 @@ export function attachGroupOpenapi(nav: { navigation: Record<string, unknown> },
 /** A group-level OpenAPI connection the source adapter recorded (inventory/platform-meta.json `openapi`). */
 export interface GroupOpenapiRef { groupPath: string[]; spec: string; version?: string; locale?: string }
 
-export interface DocumentationNavigationMeta { openapi?: GroupOpenapiRef[] }
+export interface DocumentationNavigationMeta {
+  openapi?: GroupOpenapiRef[];
+  /**
+   * Endpoint pages, by page id: `"api-reference/<spec> METHOD /path"`. Documentation.AI binds a page
+   * to an operation from its navigation entry, not from the page's frontmatter - the deployment step
+   * reads `openapi` beside `path` and injects the rendered reference above the page's own prose.
+   */
+  pageOpenapi?: Record<string, string>;
+}
 
 /**
  * The navigation nav writes to documentation.json and the one verify expects back: the pages
@@ -509,9 +517,33 @@ export function landingChild(node: { label: string; children: SourceNavigationNo
   return undefined;
 }
 
+/**
+ * Writes each endpoint page's operation onto its own navigation entry, where the platform reads it.
+ * Only a page entry is bound: a container's `path` is not an endpoint the deployment step looks at.
+ */
+function bindPageOperations(node: unknown, bindings: ReadonlyMap<string, string>): Record<string, unknown> {
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (!value || typeof value !== 'object') return value;
+    const record = value as Record<string, unknown>;
+    const isContainer = CONTAINER_KINDS.some((kind) => typeof record[kind] === 'string');
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) out[key] = Array.isArray(child) ? visit(child) : child;
+    const operation = !isContainer && typeof record.path === 'string' && typeof record.title === 'string' ? bindings.get(record.path) : undefined;
+    return operation ? { ...out, openapi: operation } : out;
+  };
+  return visit(node) as Record<string, unknown>;
+}
+
 export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlySet<string>, platformMeta: DocumentationNavigationMeta, unplaced: TreePage[] = []): { navigation: Record<string, unknown> } {
   const written = tree.pages.filter((page) => page.newPath !== undefined && writtenPaths.has(page.newPath));
   let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation, placeUnlisted: !!tree.unlistedPlacement, unplaced });
+  const bindings = new Map<string, string>();
+  for (const page of written) {
+    const operation = platformMeta.pageOpenapi?.[page.id];
+    if (operation) bindings.set(page.newPath!, operation);
+  }
+  if (bindings.size) navigation = { navigation: bindPageOperations(navigation.navigation, bindings) };
   for (const ref of platformMeta.openapi ?? []) {
     try {
       navigation = attachGroupOpenapi(navigation, ref.groupPath, specOutputPath(ref.spec), ref.version, ref.locale);
