@@ -901,7 +901,8 @@ export function runGates(input: GateInput): GateResult[] {
   // 8. redirects
   const plan = readUrlPlan(input.workspace);
   if (plan) {
-    const r = redirectMaps(plan);
+    const migrating = new Set(input.treePages.filter((page) => page.migrate).map((page) => page.id));
+    const r = redirectMaps(plan, (id) => migrating.has(id));
     // The rules are also read as a graph: a set of individually valid rules can still loop, chain,
     // claim one old path twice, or land on a page nobody wrote.
     const graph = redirectProblems([...r.exact, ...r.wildcard], new Set(outByPath.keys()));

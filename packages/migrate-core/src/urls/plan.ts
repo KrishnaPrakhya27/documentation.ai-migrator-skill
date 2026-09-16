@@ -125,13 +125,22 @@ export function applyUrlPlan(tree: Tree, plan: UrlPlan): Tree {
 
 export interface RedirectRule { source: string; destination: string; statusCode: number }
 
-/** Exact rules for every page whose old path differs from its new path; wildcard rules for renamed subtrees. */
-export function redirectMaps(plan: UrlPlan): { exact: RedirectRule[]; wildcard: RedirectRule[]; issues: string[] } {
+/**
+ * Exact rules for every page whose old path differs from its new path; wildcard rules for renamed
+ * subtrees.
+ *
+ * `writes` names the pages this migration actually writes. A page that left the scope keeps its
+ * entry in the plan — plans are the operator's file and a stage never edits one — but it has no
+ * destination to send a reader to, so it gets no rule. Without this a page excluded after planning
+ * left a redirect pointing at a route nobody wrote.
+ */
+export function redirectMaps(plan: UrlPlan, writes?: (pageId: string) => boolean): { exact: RedirectRule[]; wildcard: RedirectRule[]; issues: string[] } {
   const exact: RedirectRule[] = [];
   const issues: string[] = [];
   const norm = (p: string) => '/' + p.replace(/^\/+|\/+$/g, '');
   for (const p of plan.pages) {
     if (!p.old) continue;
+    if (writes && !writes(p.id)) continue;
     const from = norm(p.old); const to = norm(p.new);
     if (from === to) continue;
     exact.push({ source: from, destination: to, statusCode: 308 });

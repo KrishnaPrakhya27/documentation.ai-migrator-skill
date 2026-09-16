@@ -1212,7 +1212,8 @@ async function main() {
       // An earlier run may have carried source branding into this file; it must not survive a re-run.
       writeJson(docJsonPath, { ...withoutSourceBranding(existing), ...(initialRoute ? { initialRoute } : {}), ...site, ...navigation });
       const plan = readUrlPlan(workspace)!;
-      const r = redirectMaps(plan);
+      const migrating = new Set(tree.pages.filter((page) => page.migrate).map((page) => page.id));
+      const r = redirectMaps(plan, (id) => migrating.has(id));
       const platformExact = (meta.redirects?.exact ?? []).filter((x) => !r.exact.some((e) => e.source === x.source));
       const platformWildcard = (meta.redirects?.wildcard ?? []).filter((x) => !r.wildcard.some((e) => e.source === x.source));
       r.exact.push(...platformExact); r.wildcard.push(...platformWildcard);

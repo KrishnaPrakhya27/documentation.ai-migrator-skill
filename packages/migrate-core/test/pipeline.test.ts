@@ -8,6 +8,7 @@ import { fingerprint } from '../src/scrape/fingerprint.js';
 import { legalisePath, headingSlug, slugify } from '../src/urls/slugger.js';
 import { defaultUrlPlan, redirectMaps, anchorMap, applyUrlPlan } from '../src/urls/plan.js';
 import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor } from '../src/urls/site-links.js';
+import { redirectProblems } from '../src/urls/redirect-graph.js';
 import { buildDocumentationNavigation, buildNavigation, pagesWithoutPlacement, placedPageIds, type Tree, type TreePage } from '../src/nav/tree.js';
 import { loadContract, validateMdx, validateNavigation } from '@dai/content-contract';
 import { RulesEngine, loadMappings, type MappingTable } from '../src/components/rules-engine.js';
@@ -1066,5 +1067,27 @@ describe('a crawled path has no filename convention in it', () => {
     // in a repository the same spelling IS the index of its directory, and still is
     const repo = { platform: 'gitbook', pages: [page('docs/migration/readme.md', '/docs/migration/readme', 'migration')] } as any;
     expect(siteLinksFor(repo).routes['/docs/migration']).toBe('migration');
+  });
+});
+
+describe('a page that left the migration leaves no redirect behind', () => {
+  const plan = {
+    mode: 'preserve' as const,
+    pages: [
+      { id: 'kept', old: '/Guides/setup.htm', new: 'Guides/setup', reason: 'preserve' },
+      { id: 'gone', old: '/Search.htm', new: 'Search', reason: 'preserve' },
+    ],
+  };
+  it('writes no rule for a page the migration does not write', () => {
+    const r = redirectMaps(plan as never, (id) => id === 'kept');
+    expect(r.exact.map((rule) => rule.source)).toEqual(['/Guides/setup.htm']);
+    expect(redirectProblems(r.exact, new Set(['Guides/setup']))).toEqual([]);
+  });
+  it('still writes every rule when no page set is given', () => {
+    expect(redirectMaps(plan as never).exact).toHaveLength(2);
+  });
+  it('would otherwise point the excluded page at a route nobody wrote', () => {
+    const r = redirectMaps(plan as never);
+    expect(redirectProblems(r.exact, new Set(['Guides/setup'])).map((p) => p.kind)).toContain('missing-target');
   });
 });
