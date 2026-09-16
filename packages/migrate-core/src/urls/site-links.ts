@@ -20,6 +20,12 @@ export interface SiteLinks {
   hosts: string[];
   /** The live source's origin, where `source` sends a link to a page the migration does not write. */
   origin?: string;
+  /**
+   * The path every known source page sits under (`/docs` for a site published beside a marketing
+   * site). A link on the source host outside it — `/pricing`, `/contact/sales` — is to the other
+   * site, not to a page this migration could have written. Absent when nothing is known.
+   */
+  base?: string;
   /** `keep` leaves a link to a page the migration does not write as authored; `source` points it at the source site. */
   unmigrated: 'keep' | 'source';
 }
@@ -66,6 +72,32 @@ function pathCandidates(path: string, fromFilenames: boolean): string[] {
   return [...new Set([exact, withoutExtension, withoutIndex])];
 }
 
+/** The longest directory prefix shared by every path: `/docs` for `/docs`, `/docs/a` and `/docs/b/c`; `/` when they share none. */
+function commonBase(paths: readonly string[]): string {
+  let prefix: string[] | undefined;
+  for (const path of paths) {
+    const segments = normalisePath(path).split('/').filter(Boolean);
+    if (!prefix) { prefix = segments; continue; }
+    let shared = 0;
+    while (shared < prefix.length && shared < segments.length && prefix[shared] === segments[shared]) shared++;
+    prefix = prefix.slice(0, shared);
+    if (!prefix.length) break;
+  }
+  return `/${(prefix ?? []).join('/')}`;
+}
+
+/** Whether a link on the source host names something under the site's own base; `/` confines nothing. */
+export function withinSourceBase(pathname: string, base: string | undefined): boolean {
+  if (!base || base === '/') return true;
+  const path = normalisePath(pathname);
+  return path === base || path.startsWith(`${base}/`);
+}
+
+/** A path that names a served file rather than a page: a sitemap, `llms.txt`, a page's `.md` export, a PDF. */
+export function isSourceResource(pathname: string): boolean {
+  return /\.(?:xml|txt|md|mdx|json|ya?ml|pdf|zip|csv|rss|atom)$/i.test(normalisePath(pathname));
+}
+
 function sourceKey(location: string): string {
   if (/^https?:\/\//i.test(location)) {
     try { const url = new URL(location); url.hash = ''; url.search = ''; return url.toString(); } catch { /* use the literal value */ }
@@ -109,7 +141,10 @@ export function siteLinksFor(tree: Tree, options: { unmigrated?: 'keep' | 'sourc
   const listed = [...(options.sourcePages ?? []), ...tree.pages.flatMap((page) => [page.oldPath, ...(page.aliases ?? [])])];
   const sourcePages = [...new Set(listed.filter((path): path is string => !!path).flatMap((path) => pathCandidates(pathOf(path), !live)))];
   const hosts = origin ? [...new Set([new URL(origin).hostname, ...(options.hosts ?? []).map((host) => (/^https?:\/\//i.test(host) ? new URL(host).hostname : host))].map((host) => host.toLowerCase()))] : [];
-  return { routes, sourceBases, sourcePages, hosts, ...(origin ? { origin } : {}), unmigrated: options.unmigrated ?? 'keep' };
+  // From the tree's own pages, not the sitemap: a site's sitemap lists the marketing pages beside
+  // the docs too, which would widen the base to `/` and make every link on the host a docs link.
+  const base = live ? commonBase(tree.pages.flatMap((page) => (page.oldPath ? [page.oldPath, ...(page.aliases ?? [])] : []))) : undefined;
+  return { routes, sourceBases, sourcePages, hosts, ...(origin ? { origin } : {}), ...(base !== undefined ? { base } : {}), unmigrated: options.unmigrated ?? 'keep' };
 }
 
 /** How a link written in a source page resolves in the migrated site; undefined for a link that is not to the source site. */

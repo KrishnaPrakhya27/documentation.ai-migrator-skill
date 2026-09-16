@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 
 export type Disposition =
   | { kind: 'identical'; pageId: string; sourceNodeId: string; outputNodeIds: string[] }
-  | { kind: 'transformed'; pageId: string; sourceNodeId: string; outputNodeIds: string[]; rule: string; lossy: string[] }
+  | { kind: 'transformed'; pageId: string; sourceNodeId: string; outputNodeIds: string[]; rule: string; lossy: string[]; /** Links the rule wrote by the operator's decision (a card to a live tool on the source site). */ declaredLinks?: string[] }
   | { kind: 'excluded'; pageId: string; sourceNodeId: string; reason: string; reviewer?: string; at: string }
   | { kind: 'quarantined'; pageId: string; sourceNodeId: string; reason: string };
 
@@ -26,7 +26,7 @@ export class Ledger {
     appendFileSync(this.path, JSON.stringify(d) + '\n', { mode: 0o600 });
   }
   identical(pageId: string, sourceNodeId: string, outputNodeIds = [sourceNodeId]) { this.write({ kind: 'identical', pageId, sourceNodeId, outputNodeIds }); }
-  transformed(pageId: string, sourceNodeId: string, outputNodeIds: string[], rule: string, lossy: string[] = []) { this.write({ kind: 'transformed', pageId, sourceNodeId, outputNodeIds, rule, lossy }); }
+  transformed(pageId: string, sourceNodeId: string, outputNodeIds: string[], rule: string, lossy: string[] = [], declaredLinks: string[] = []) { this.write({ kind: 'transformed', pageId, sourceNodeId, outputNodeIds, rule, lossy, ...(declaredLinks.length ? { declaredLinks } : {}) }); }
   excluded(pageId: string, sourceNodeId: string, reason: string, reviewer?: string) { this.write({ kind: 'excluded', pageId, sourceNodeId, reason, reviewer, at: new Date().toISOString() }); }
   quarantined(pageId: string, sourceNodeId: string, reason: string) { this.write({ kind: 'quarantined', pageId, sourceNodeId, reason }); }
 

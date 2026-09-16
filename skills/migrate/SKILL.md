@@ -37,6 +37,7 @@ Three platforms need saying at gate 1, because each states its navigation somewh
 - **Hidden containers.** A Mintlify tab, group or page marked `hidden` is published but not shown. Its pages migrate and are reported as unlisted; nothing places them in a sidebar the source never showed.
 - **Menus.** A Mintlify `menu` of `item`s is what the platform calls dropdowns, and is written as `dropdowns`; an item that is only a link stays a link.
 - **URL case.** The default URL plan preserves a path as the site served it, letter case included: `/Procedures/Composer` stays `Procedures/Composer`. Pass `plan --case lower` to lowercase deliberately.
+- **Pages added after planning.** `plan` keeps an existing `plan/urls.yaml` as the operator wrote it and adds the default entry for every migrating page the tree gained since (a scope exclusion lifted, a page a rerun discovered). A new page whose default route the plan already gives another page is refused with the route named, not renumbered.
 - **A help centre.** `nav --help-center "<container>" --by "<who>"` opens that container on a hub page the platform renders with `<CollectionList>`: its categories as cards, drawn from its own navigation. The page carries no words of the migration's; it is still a page the source never had, so it is recorded on the tree with its approver, applied identically at verification, and named in the customer report. `--hub-path <route>` places it somewhere other than `<container>/index`.
 
 ## API reference pages

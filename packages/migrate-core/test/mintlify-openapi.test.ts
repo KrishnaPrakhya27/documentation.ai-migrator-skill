@@ -46,6 +46,14 @@ describe('a Mintlify endpoint page', () => {
     expect(doc.openapiOperation?.document).toContain('openapi: 3.1.0');
   });
 
+  it('finds the section when the export appends related topics after it', () => {
+    const source = page('analytics.openapi.json', 'GET', '/v1/x') + '\n## Related topics\n\n- [Views](/docs/api/analytics/views)\n';
+    const doc = read(source);
+    expect(doc.frontmatter.openapi).toBe('api-reference/analytics.openapi.json GET /v1/x');
+    const headings = doc.children.filter((block) => block.type === 'heading').map((block) => block.type === 'heading' ? inlineText(block.children) : '');
+    expect(headings).toEqual(['Usage', 'Related topics']);
+  });
+
   it('keeps a spec path as the site wrote it, locale directory included', () => {
     // es/analytics.openapi.json and analytics.openapi.json are different documents, in different languages
     expect(read(page('es/analytics.openapi.json', 'GET', '/v1/x')).frontmatter.openapi).toBe('api-reference/es/analytics.openapi.json GET /v1/x');

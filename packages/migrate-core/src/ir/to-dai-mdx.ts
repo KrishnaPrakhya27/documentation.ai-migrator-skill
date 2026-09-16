@@ -94,6 +94,10 @@ export function inlineToMdx(nodes: Inline[], insideLink = false): string {
       case 'emphasis': return wrapEmphasis(inlineToMdx(n.children, insideLink), '*');
       case 'delete': return wrapEmphasis(inlineToMdx(n.children, insideLink), '~~');
       case 'link': {
+        // A link inside a link (Mintlify's export writes `<a href="mailto:x">[x](mailto:x)</a>`) is
+        // what a browser flattens to one link; Markdown cannot nest them, and writing both would put
+        // literal brackets on the page. The inner one is its label.
+        if (insideLink) return inlineToMdx(n.children, true);
         const url = markdownUrl(n.url, 'link');
         const label = inlineToMdx(n.children, true);
         const title = n.title?.replace(/["\r\n]/g, ' ').trim();
@@ -102,6 +106,7 @@ export function inlineToMdx(nodes: Inline[], insideLink = false): string {
       case 'break': return '<br />';
       case 'kbd': return `<kbd>${inlineToMdx(n.children, insideLink)}</kbd>`;
       case 'inlineHtml': return n.value;
+      case 'footnoteReference': return `[^${n.identifier}]`;
       case 'image': return imageToMdx(n);
     }
   }).join('');
@@ -152,7 +157,10 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
         // so it is written as a fence, which carries its lines exactly as they are.
         const only = b.children.length === 1 ? b.children[0] : undefined;
         if (only?.type === 'inlineCode' && only.value.includes('\n')) { out.push(fencedCode(only.value)); break; }
-        out.push(inlineToMdx(b.children));
+        // A paragraph that opens with `import` or `export` is prose (a GitBook page quoting a line of
+        // code in a sentence). MDX would read it as ESM and drop it, so its first letter is written
+        // as the character reference it stands for: the same word, read as text.
+        out.push(inlineToMdx(b.children).replace(/^(import|export)(?=\s)/, (word) => `&#${word.charCodeAt(0)};${word.slice(1)}`));
         break;
       }
       case 'heading': {
@@ -175,6 +183,12 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
       case 'list': out.push(listToMdx(b, opts)); break;
       case 'table': out.push(tableToMdx(b)); break;
       case 'thematicBreak': out.push('---'); break;
+      // GFM: the first line carries the label, continuation lines are indented four spaces
+      case 'footnoteDefinition': {
+        const body = blocksToMdx(b.children, opts).split('\n');
+        out.push(`[^${b.identifier}]: ${body[0] ?? ''}${body.length > 1 ? '\n' + body.slice(1).map((line) => (line ? `    ${line}` : line)).join('\n') : ''}`);
+        break;
+      }
       case 'image': out.push(imageToMdx(b)); break;
       case 'figure': {
         out.push(imageToMdx(b.image));
@@ -184,6 +198,9 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
       case 'html': out.push(b.value); break;
       case 'rawHtml': out.push(b.value); break;
       case 'dai': {
+        // An anchor the source published on this component, kept where something still links to it.
+        const componentShim = opts.anchorShims?.get(b.id);
+        if (componentShim) out.push(`<a id="${componentShim}"></a>`);
         const inner = blocksToMdx(b.children, opts);
         if (!inner.trim()) out.push(openTag(b.name, b.props, true));
         else out.push(`${openTag(b.name, b.props)}\n${indent(inner)}\n</${b.name}>`);

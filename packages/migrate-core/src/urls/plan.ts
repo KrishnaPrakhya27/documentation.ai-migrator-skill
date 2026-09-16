@@ -91,6 +91,28 @@ export function defaultUrlPlan(tree: Tree, opts: { mode?: UrlPlan['mode']; strip
 }
 
 export function writeUrlPlan(workspace: string, plan: UrlPlan): void { writeFileSync(join(workspace, 'plan', 'urls.yaml'), toYaml(plan), { mode: 0o600 }); }
+/**
+ * An existing plan, plus the default entry for every migrating page it does not name. The
+ * operator's entries are never changed; a new page whose default route collides with one of
+ * theirs is refused rather than renumbered, because a route is an address the site publishes.
+ */
+export function extendUrlPlan(existing: UrlPlan, tree: Tree, opts: { mode?: UrlPlan['mode']; stripPrefix?: string; case?: 'preserve' | 'lower' } = {}): UrlPlan {
+  const known = new Set(existing.pages.map((page) => page.id));
+  const missing = tree.pages.filter((page) => page.migrate && !known.has(page.id));
+  if (!missing.length) return existing;
+  const defaults = defaultUrlPlan(tree, { ...opts, mode: existing.mode ?? opts.mode });
+  const taken = new Map(existing.pages.map((page) => [page.new, page.id]));
+  const added: UrlPlanPage[] = [];
+  for (const page of defaults.pages) {
+    if (known.has(page.id)) continue;
+    const holder = taken.get(page.new);
+    if (holder !== undefined && holder !== page.id) throw new Error(`page ${page.id} (${page.old ?? 'no source path'}) would take route ${page.new}, which plan/urls.yaml already gives page ${holder}; set its "new" path in plan/urls.yaml and run plan again`);
+    added.push(page);
+  }
+  const erased = [...(existing.erased ?? []), ...(defaults.erased ?? []).filter((page) => !known.has(page.id))];
+  return { ...existing, pages: [...existing.pages, ...added], ...(erased.length ? { erased } : {}) };
+}
+
 export function readUrlPlan(workspace: string): UrlPlan | undefined {
   const p = join(workspace, 'plan', 'urls.yaml');
   return existsSync(p) ? (parseYaml(readFileSync(p, 'utf8')) as UrlPlan) : undefined;
@@ -150,7 +172,7 @@ export function redirectMaps(plan: UrlPlan): { exact: RedirectRule[]; wildcard: 
 export interface AnchorEntry { pageId: string; headingText: string; oldId?: string; newId: string; needsShim: boolean; inboundLinks: number }
 
 /** Compare source heading ids with the renderer's slugs; shim where an inbound link targets a differing id. */
-export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }>; titleAnchor?: string }>, inbound: Map<string, number>): { entries: AnchorEntry[]; shims: Map<string, Map<string, string>>; leading: Map<string, string> } {
+export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string; aliases?: string[]; component?: boolean }>; titleAnchor?: string }>, inbound: Map<string, number>): { entries: AnchorEntry[]; shims: Map<string, Map<string, string>>; leading: Map<string, string> } {
   const entries: AnchorEntry[] = [];
   const shims = new Map<string, Map<string, string>>();
   /** pageId → the anchor its title heading published, for pages something still links to by it. */
@@ -161,12 +183,15 @@ export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: s
     if (p.titleAnchor && (inbound.get(`${p.pageId}#${p.titleAnchor}`) ?? inbound.get(`#${p.titleAnchor}`) ?? 0) > 0) leading.set(p.pageId, p.titleAnchor);
     const slugger = new GithubSlugger();
     for (const h of p.headings) {
-      const newId = headingSlug(h.text, slugger);
-      const key = `${p.pageId}#${h.sourceId ?? ''}`;
-      const links = h.sourceId ? (inbound.get(key) ?? inbound.get(`#${h.sourceId}`) ?? 0) : 0;
-      const needsShim = !!h.sourceId && h.sourceId !== newId && links > 0;
-      entries.push({ pageId: p.pageId, headingText: h.text, oldId: h.sourceId, newId, needsShim, inboundLinks: links });
-      if (needsShim) { if (!shims.has(p.pageId)) shims.set(p.pageId, new Map()); shims.get(p.pageId)!.set(h.id, h.sourceId!); }
+      // A component's anchor is not a heading: the renderer gives it no id of its own to compare with.
+      const newId = h.component ? '' : headingSlug(h.text, slugger);
+      // The source may have linked one heading under more than one spelling; the one a link uses is the one shimmed.
+      const candidates = [h.sourceId, ...(h.aliases ?? [])].filter((id): id is string => !!id);
+      const linked = candidates.find((id) => (inbound.get(`${p.pageId}#${id}`) ?? inbound.get(`#${id}`) ?? 0) > 0);
+      const links = linked ? (inbound.get(`${p.pageId}#${linked}`) ?? inbound.get(`#${linked}`) ?? 0) : 0;
+      const needsShim = !!linked && linked !== newId && links > 0;
+      entries.push({ pageId: p.pageId, headingText: h.text, oldId: linked ?? h.sourceId, newId, needsShim, inboundLinks: links });
+      if (needsShim) { if (!shims.has(p.pageId)) shims.set(p.pageId, new Map()); shims.get(p.pageId)!.set(h.id, linked!); }
     }
   }
   return { entries, shims, leading };

@@ -52,10 +52,47 @@ export function legalisePath(path: string, opts: { case: 'preserve' | 'lower' })
   return { path: joined, changed, reason: reasons.length ? reasons.join('; ') : undefined, ...(erased.length ? { erased } : {}) };
 }
 
+/**
+ * The id GitBook gives a heading, read from the links GitBook's own site writes: "3. Payment terms"
+ * is linked as `#id-3.-payment-terms` and "Edit on GitHub/GitLab" as `#edit-on-github-gitlab`.
+ * Lowercase; any run of characters other than letters, digits and dots becomes one dash; an id that
+ * would begin with a digit is prefixed `id-`. Some of GitBook's links omit the dots (`#a-how-does-
+ * this-work`), so `gitbookHeadingIds` offers that spelling too.
+ */
+export function gitbookHeadingId(text: string): string {
+  const slug = text.trim().toLowerCase().replace(/[^\p{L}\p{N}.]+/gu, '-').replace(/^-+|-+$/g, '');
+  return /^\d/.test(slug) ? `id-${slug}` : slug;
+}
+
+/** Every id GitBook may have linked a heading by. */
+export function gitbookHeadingIds(text: string): string[] {
+  const dotted = gitbookHeadingId(text);
+  const dotless = dotted.replace(/\.+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '');
+  return [...new Set([dotted, dotless])];
+}
+
 /** Heading id as the renderer computes it: github-slugger, then dashes collapsed. */
 export function headingSlug(text: string, slugger = new GithubSlugger()): string {
   // Space around a heading is not part of its name. A Flare topic that wrote "Steps " would
   // otherwise be asked for `#steps-` while every renderer, reading the heading as trimmed text,
   // gives it `#steps` — and every link to it would land nowhere.
   return slugger.slug(text.trim()).replace(/-{2,}/g, '-');
+}
+
+/**
+ * The id Mintlify's renderer gives a heading, read from 9,773 rendered headings across one site:
+ * lowercase, backticks dropped, runs of whitespace, dots and hyphens become one hyphen, and the
+ * characters `( ) , * :` are removed after that (so `Étape 1 : Installer` keeps the two hyphens the
+ * spaces around the colon became). Everything else — apostrophes, `/`, `_`, `$`, `&`, CJK
+ * punctuation — stays. A repeated heading on one page takes `-2`, `-3`: the caller counts.
+ */
+export function mintlifyHeadingId(text: string): string {
+  return text
+    .replace(/\u200b/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/`/g, '')
+    .replace(/[\s.\-]+/g, '-')
+    .replace(/[(),*:"“”]/g, '')
+    .replace(/^-+|-+$/g, '');
 }

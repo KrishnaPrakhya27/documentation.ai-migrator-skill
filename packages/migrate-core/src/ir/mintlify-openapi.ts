@@ -22,18 +22,21 @@ const OPERATION_INFO = /^(\S+)\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE)\
 
 /** The trailing OpenAPI section, split from the page it ends; undefined when the page has none. */
 export function mintlifyOperationSection(children: Block[]): { children: Block[]; operation: OpenApiOperationFragment } | undefined {
-  const count = children.length;
-  if (count < 2) return undefined;
-  const heading = children[count - 2];
-  const code = children[count - 1];
-  if (heading.type !== 'heading' || heading.depth !== 2 || inlineText(heading.children).trim() !== 'OpenAPI') return undefined;
-  if (code.type !== 'code' || !/^(?:ya?ml|json)$/i.test(code.lang ?? '')) return undefined;
-  const info = OPERATION_INFO.exec((code.meta ?? '').trim());
-  if (!info) return undefined;
-  return {
-    children: children.slice(0, count - 2),
-    operation: { spec: info[1].replace(/^\.?\/+/, ''), method: info[2].toUpperCase(), path: info[3], document: code.value },
-  };
+  // The export writes the section near the end, but may follow it with a "Related topics" list; it
+  // is found by its shape, searching from the end, rather than assumed to be the last two blocks.
+  for (let at = children.length - 2; at >= 0; at--) {
+    const heading = children[at];
+    const code = children[at + 1];
+    if (heading.type !== 'heading' || heading.depth !== 2 || inlineText(heading.children).trim() !== 'OpenAPI') continue;
+    if (code.type !== 'code' || !/^(?:ya?ml|json)$/i.test(code.lang ?? '')) continue;
+    const info = OPERATION_INFO.exec((code.meta ?? '').trim());
+    if (!info) continue;
+    return {
+      children: [...children.slice(0, at), ...children.slice(at + 2)],
+      operation: { spec: info[1].replace(/^\.?\/+/, ''), method: info[2].toUpperCase(), path: info[3], document: code.value },
+    };
+  }
+  return undefined;
 }
 
 /** The frontmatter value the platform reads: the spec under `api-reference/`, then the operation. */

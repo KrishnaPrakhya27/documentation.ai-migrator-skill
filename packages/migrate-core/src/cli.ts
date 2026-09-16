@@ -8,6 +8,28 @@
  *
  * Every stage reads and writes files in the workspace; re-runs are safe.
  */
+import { gitbookHeadingIds, mintlifyHeadingId } from './urls/slugger.js';
+
+/** The anchor a link names, as the page spells it: `#split-configuration-with-%24ref` names `split-configuration-with-$ref`. */
+function fragmentOf(url: string): string | undefined {
+  const raw = url.split('#')[1];
+  if (!raw) return undefined;
+  try { return decodeURIComponent(raw); } catch { return raw; }
+}
+
+/** A parse failure names the page it happened on: an operator with 1,255 pages cannot bisect one by line number alone. */
+function named<T>(source: string, read: () => T): T {
+  try { return read(); } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith(source)) throw error;
+    throw new Error(`${source}: ${message}`);
+  }
+}
+
+/** A heading's rendered words, badge text included: inline HTML contributes what a reader sees of it, not its tags. */
+function anchorText(nodes: import('./ir/types.js').Inline[]): string {
+  return nodes.map((n) => (n.type === 'inlineHtml' ? n.value.replace(/<[^<>]*>/g, '') : n.type === 'text' || n.type === 'inlineCode' ? n.value : 'children' in n ? anchorText(n.children) : '')).join('');
+}
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -64,7 +86,7 @@ import { readReadmeRepo, ReadmeApi, readmeApiTree } from './adapters/readme.js';
 import { scanComponentDefinitions, attachDefinitions } from './adapters/definitions.js';
 import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacement, placedPageIds, type GroupOpenapiRef, type SourceNavigationNode, type Tree, type TreePage } from './nav/tree.js';
 import { documentationSiteSettings, withoutSourceBranding } from './nav/site-settings.js';
-import { defaultUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
+import { defaultUrlPlan, extendUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
 import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor, type SiteLinks } from './urls/site-links.js';
 import { RulesEngine, applyDeclaredLosses, loadMappings, collectComponents, planEntryIsDecided, type ComponentPlanEntry } from './components/rules-engine.js';
 import { clusterComponents, type ClusterEntry } from './components/signature.js';
@@ -737,7 +759,7 @@ async function main() {
             // reads, and for them this is the file unchanged.
             const published = tree.platform === 'gitbook' ? unwrapPublishedMarkdown(raw, 'gitbook', { expectedDescription: p.description }) : { body: raw, title: undefined as string | undefined };
             const title = published.title ?? p.title;
-            docs.push(attachDefinitions(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, resolveSnippet: tree.platform === 'mintlify' ? mintlifySnippetResolver(root) : undefined, codeMetaStrip: profile.codeMetaStrip }), definitions));
+            docs.push(attachDefinitions(named(p.source, () => markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, resolveSnippet: tree.platform === 'mintlify' ? mintlifySnippetResolver(root) : undefined, codeMetaStrip: profile.codeMetaStrip })), definitions));
           }
           else {
             const ir = htmlToIr(raw, htmlAdapterOptions(profile, { platform: tree.platform, file: p.source }));
@@ -764,7 +786,7 @@ async function main() {
             // so it is read from the frozen HTML and carried; a canonical naming another page is
             // retargeted at convert, with the links.
             const seo = page.html ? seoFrontmatter(extractSeo(page.html, p.source), { url: p.source, title, description }, () => undefined, profile.generatedOgImage) : {};
-            docs.push(markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}), ...seo }, codeMetaStrip: profile.codeMetaStrip }));
+            docs.push(named(p.source, () => markdownToIr(published.body, { platform: tree.platform, file: p.source, pageId: p.id, title, frontmatter: { title, ...(description ? { description } : {}), ...seo }, codeMetaStrip: profile.codeMetaStrip })));
           }
           else {
             if (page.html === undefined) fail(`acquired record for ${p.source} holds neither published Markdown nor HTML; run dai-migrate acquire again`);
@@ -823,10 +845,33 @@ async function main() {
       const snapDir = join(workspace, 'snapshot', 'pages'); resetDir(snapDir);
       for (const doc of docs) {
         writeJson(join(snapDir, `${doc.pageId}.json`), doc);
-        const heads: Array<{ id: string; text: string; sourceId?: string }> = [];
+        const heads: Array<{ id: string; text: string; sourceId?: string; aliases?: string[]; component?: boolean }> = [];
+        // Mintlify numbers a repeated heading -2, -3 within a page; the count is per page.
+        const mintlifySeen = new Map<string, number>();
         walkBlocks(doc.children, (n, depth) => {
           if (n.type === 'component') comps.push({ pageId: doc.pageId, node: n, depth, source: doc.source });
-          if (n.type === 'heading') heads.push({ id: n.id, text: inlineText(n.children), sourceId: n.sourceId });
+          if (n.type === 'heading') {
+            const text = inlineText(n.children);
+            // GitBook publishes no explicit ids; its links use the ids its own slugger gives, which is
+            // not the renderer's. Recorded as the source id so a link to it gets its shim.
+            const gitbook = tree.platform === 'gitbook' && !n.sourceId ? gitbookHeadingIds(text) : [];
+            // Mintlify's id is slugged from the rendered heading, badge text included, and differs
+            // from the target renderer's on a dot, a badge, or a repeat; a link to it gets its shim.
+            let mintlify: string | undefined;
+            if (tree.platform === 'mintlify' && !n.sourceId) {
+              const base = mintlifyHeadingId(anchorText(n.children));
+              const seen = (mintlifySeen.get(base) ?? 0) + 1; mintlifySeen.set(base, seen);
+              mintlify = seen > 1 ? `${base}-${seen}` : base;
+            }
+            heads.push({ id: n.id, text, sourceId: n.sourceId ?? gitbook[0] ?? mintlify, ...(gitbook.length > 1 ? { aliases: gitbook.slice(1) } : {}) });
+          }
+          // Mintlify gives every parameter field an anchor, `param-<name>`, and pages link to them.
+          // The target renders no such id, so the anchor is recorded on the component and written
+          // back as a shim where a link still uses it.
+          if (n.type === 'component' && tree.platform === 'mintlify' && (n.name === 'ParamField' || n.name === 'ResponseField')) {
+            const name = ['name', 'path', 'query', 'body', 'header'].map((key) => n.props[key]).find((value) => typeof value === 'string');
+            if (typeof name === 'string') heads.push({ id: n.id, text: '', sourceId: `param-${name}`, component: true });
+          }
         });
         // Every link the document holds, not only those directly in a paragraph: a page's own
         // contents links to its sections from inside table cells and list items, and a link nested
@@ -878,7 +923,12 @@ async function main() {
         return entry;
       });
       writeFileSync(planPath, toYaml({ components }), { mode: 0o600 });
-      const urlPlan = readUrlPlan(workspace) ?? defaultUrlPlan(tree, { mode: (v.mode as any) ?? 'preserve', stripPrefix: v['strip-prefix'], case: (v.case as any) ?? 'preserve' });
+      const urlOptions = { mode: (v.mode as any) ?? 'preserve', stripPrefix: v['strip-prefix'], case: (v.case as any) ?? 'preserve' } as const;
+      const existingUrlPlan = readUrlPlan(workspace);
+      // An existing plan is the operator's and is kept; a page the tree gained since it was written
+      // (a scope exclusion lifted, a page discovery found on a rerun) gets the entry the default
+      // rules give it, or convert would silently skip the page for want of a route.
+      const urlPlan = existingUrlPlan ? extendUrlPlan(existingUrlPlan, tree, urlOptions) : defaultUrlPlan(tree, urlOptions);
       writeUrlPlan(workspace, urlPlan);
       if (urlPlan.erased?.length) {
         // The platform's paths are ASCII, and these titles are written in a script it cannot carry.
@@ -985,7 +1035,7 @@ async function main() {
       const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }>; titleAnchor?: string }>>(join(workspace, 'inventory', 'anchors.json')) : [];
       const links = existsSync(join(workspace, 'inventory', 'links.json')) ? readJson<Array<{ pageId: string; url: string }>>(join(workspace, 'inventory', 'links.json')) : [];
       const inbound = new Map<string, number>();
-      for (const l of links) { const h = l.url.split('#')[1]; if (h) inbound.set(`#${h}`, (inbound.get(`#${h}`) ?? 0) + 1); }
+      for (const l of links) { const h = fragmentOf(l.url); if (h) inbound.set(`#${h}`, (inbound.get(`#${h}`) ?? 0) + 1); }
       const { shims, leading: leadingAnchors } = anchorMap(anchors, inbound);
       let converted = 0; let heldForSnippets = 0; let quarantinedForFidelity = 0;
       // every snapshot page gets a record, so verify can tell a page convert skipped on purpose from one it never saw
@@ -1150,7 +1200,7 @@ async function main() {
       const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }>; titleAnchor?: string }>>(join(workspace, 'inventory', 'anchors.json')) : [];
       const links = existsSync(join(workspace, 'inventory', 'links.json')) ? readJson<Array<{ pageId: string; url: string }>>(join(workspace, 'inventory', 'links.json')) : [];
       const inbound = new Map<string, number>();
-      for (const l of links) { const h = l.url.split('#')[1]; if (h) inbound.set(`#${h}`, (inbound.get(`#${h}`) ?? 0) + 1); }
+      for (const l of links) { const h = fragmentOf(l.url); if (h) inbound.set(`#${h}`, (inbound.get(`#${h}`) ?? 0) + 1); }
       const am = anchorMap(anchors, inbound);
       writeJson(join(workspace, 'report', 'anchors.json'), am.entries);
       if (unlisted.length) writeJson(join(workspace, 'report', 'unlisted-pages.json'), unlisted.map((page) => ({ id: page.id, source: page.source, newPath: page.newPath, title: page.title, reason: page.reason })));

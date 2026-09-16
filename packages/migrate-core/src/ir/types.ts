@@ -22,11 +22,13 @@ export interface LinkNode extends BaseNode { type: 'link'; url: string; title?: 
 export interface BreakNode extends BaseNode { type: 'break' }
 export interface KbdNode extends BaseNode { type: 'kbd'; children: Inline[] }
 export interface InlineHtmlNode extends BaseNode { type: 'inlineHtml'; value: string }
+/** A GFM footnote mark, `[^id]`; the platform renders it as the numbered superscript the source shows. */
+export interface FootnoteReferenceNode extends BaseNode { type: 'footnoteReference'; identifier: string }
 /** `unreadableWidth`/`unreadableHeight` hold a dimension the source states that the target's integer-pixel contract cannot carry (`100%`, `2rem`), so the loss stays visible instead of being guessed at or dropped. */
 /** `sources` holds the srcset candidates the source offered; the target renders one URL, so they are hosted and reported rather than dropped with the old platform. */
 export interface ImageNode extends BaseNode { type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number; unreadableWidth?: string; unreadableHeight?: string; sources?: string[] }
 
-export type Inline = TextNode | InlineCodeNode | StrongNode | EmphasisNode | DeleteNode | LinkNode | BreakNode | KbdNode | InlineHtmlNode | ImageNode;
+export type Inline = TextNode | InlineCodeNode | StrongNode | EmphasisNode | DeleteNode | LinkNode | BreakNode | KbdNode | InlineHtmlNode | ImageNode | FootnoteReferenceNode;
 
 export interface ParagraphNode extends BaseNode { type: 'paragraph'; children: Inline[] }
 export interface HeadingNode extends BaseNode { type: 'heading'; depth: 1 | 2 | 3 | 4 | 5 | 6; children: Inline[]; /** id from the source, if it had one */ sourceId?: string }
@@ -82,10 +84,12 @@ export interface QuarantinedNode extends BaseNode { type: 'quarantined'; reason:
 
 /** Reusable content token, e.g. {{snippet.All Plans}}, <<glossary:term>>, {{ vars.x }}. */
 export interface SnippetRefNode extends BaseNode { type: 'snippetRef'; token: string; platform: string; body?: Block[] }
+/** A GFM footnote body, `[^id]: …`, which the platform lists at the foot of the page as the source does. */
+export interface FootnoteDefinitionNode extends BaseNode { type: 'footnoteDefinition'; identifier: string; children: Block[] }
 
 export type Block =
   | ParagraphNode | HeadingNode | CodeNode | BlockquoteNode | ListNode | TableNode | ThematicBreakNode
-  | HtmlNode | FigureNode | ComponentNode | DaiComponentNode | RawHtmlNode | QuarantinedNode | SnippetRefNode | ImageNode;
+  | HtmlNode | FigureNode | ComponentNode | DaiComponentNode | RawHtmlNode | QuarantinedNode | SnippetRefNode | ImageNode | FootnoteDefinitionNode;
 
 export interface Frontmatter {
   title: string;
@@ -153,7 +157,7 @@ export function mapBlocks(blocks: Block[], fns: { inline?: (node: Inline) => Inl
     switch (block.type) {
       case 'paragraph': case 'heading': rebuilt = { ...block, children: inlines(block.children) }; break;
       case 'list': rebuilt = { ...block, children: block.children.map((item) => ({ ...item, children: mapBlocks(item.children, fns) })) }; break;
-      case 'blockquote': rebuilt = { ...block, children: mapBlocks(block.children, fns) }; break;
+      case 'blockquote': case 'footnoteDefinition': rebuilt = { ...block, children: mapBlocks(block.children, fns) }; break;
       case 'table': rebuilt = { ...block, children: block.children.map((row) => ({ ...row, children: row.children.map((cell) => ({ ...cell, children: inlines(cell.children) })) })) }; break;
       case 'figure': rebuilt = block.caption ? { ...block, caption: inlines(block.caption) } : block; break;
       case 'dai': case 'component': rebuilt = { ...block, children: mapBlocks(block.children, fns) }; break;
@@ -173,6 +177,7 @@ export function inlineText(nodes: Inline[] | undefined): string {
       case 'break': return '\n';
       case 'image': return n.alt;
       case 'inlineHtml': return '';
+      case 'footnoteReference': return '';
       default: return inlineText((n as any).children);
     }
   }).join('');

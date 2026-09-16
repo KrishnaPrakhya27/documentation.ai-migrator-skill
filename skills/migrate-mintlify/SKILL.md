@@ -21,7 +21,7 @@ A hosted Mintlify site states its own content, and exact mode uses only those st
 - Translates `redirects`: exact rules now; trailing `:slug*` or `*` become `:splat` candidates in `report/redirects.wildcard.json` (platform dependency); mid-path wildcards are reported and skipped.
 - Records group-level `openapi` references; `nav` copies the spec into the output and sets `openapi` on the matching group.
 - Resolves `import X from "/snippets/x.mdx"` and inlines `<X />` (no props) from the repo's `snippets/`; `.jsx` snippets and snippets used with props stay as source components for review.
-- Lifts `## Title {#custom-id}` into the anchor map; shims are emitted where inbound links need them.
+- Lifts `## Title {#custom-id}` into the anchor map; shims are emitted where inbound links need them. Mintlify's own heading ids (dots and spaces to hyphens, badge text included, `( ) , * :` dropped, repeats numbered `-2`, `-3`) are recorded as each heading's source id, so a link written against the Mintlify id lands after the target renderer slugs the heading its own way. An empty `<div id="…"></div>` is the anchor an older link still uses and is written as one.
 - Copies `name` into `documentation.json`. The source's `logo`, `favicon`, `colors` and `theme` are recorded in `inventory/platform-meta.json` but never carried: the migrated site shows Documentation.AI's own branding.
 - Scans `snippets/`, `components/`, `src/components/` and `custom-blocks/` for component definitions and attaches their hashes to signatures, so custom components cluster per definition.
 

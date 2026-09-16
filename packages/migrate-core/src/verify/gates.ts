@@ -2,12 +2,14 @@
  * Release gates. Any failure blocks release. Gates that need a preview or a
  * browser report `not-run` and count as failed unless explicitly allowed.
  */
+import { gitbookHeadingIds, mintlifyHeadingId } from '../urls/slugger.js';
+import { withinSourceBase, isSourceResource } from '../urls/site-links.js';
 import { readdirSync, readFileSync, existsSync, statSync, lstatSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { validateMdx, validateNavigation } from '@dai/content-contract';
 import { Ledger, effectiveExclusions, summarize, type LedgerSummary } from '../ledger/dispositions.js';
 import type { Block, DocIR, Inline } from '../ir/types.js';
-import { walkBlocks, inlineText } from '../ir/types.js';
+import { walkBlocks, mapBlocks, inlineText } from '../ir/types.js';
 import { redirectMaps, readUrlPlan } from '../urls/plan.js';
 import { redirectProblems } from '../urls/redirect-graph.js';
 import type { SiteLinks } from '../urls/site-links.js';
@@ -141,12 +143,22 @@ function chromeContentIds(doc: DocIR): Set<string> {
  * `Send 50% discount…` joins into `offersend` and the segment reads as missing though every word
  * of it is in the output.
  */
+/**
+ * The words of source inline content as the output normaliser will see them: a code span is written
+ * as the span the serializer emits, so both sides pad it the same way — `(oneOf / anyOf)` in the
+ * source and `( oneof / anyof )` in the output were the same text read two ways.
+ */
 function proseText(nodes: Inline[] | undefined): string {
   if (!nodes) return '';
   return nodes.map((n) => {
     switch (n.type) {
       case 'text': return n.value;
-      case 'inlineCode': return n.value;
+      case 'inlineCode': {
+        const longest = Math.max(0, ...Array.from(n.value.matchAll(/`+/g), (m) => m[0].length));
+        const fence = '`'.repeat(longest + 1);
+        return `${fence}${n.value}${fence}`;
+      }
+      case 'footnoteReference': return '';
       case 'break': return '\n';
       case 'image': return ` ${n.alt} `;
       // Raw inline HTML (`<u>prior to store catalog ingest</u>`) is emitted as written, and the output
@@ -186,22 +198,51 @@ export function proseSegments(doc: DocIR, excludedIds: ReadonlySet<string> = new
   return segs;
 }
 
+/**
+ * The prose segments that sit under the given source nodes. A prompt's text is written as the code
+ * block a reader copies (the ledger records the rule that did it), so its sentences are looked for
+ * in the output's code as well as its prose; every other segment must be prose in the output.
+ */
+export function proseSegmentsUnder(doc: DocIR, ids: ReadonlySet<string>): Map<string, string> {
+  const out = new Map<string, string>();
+  walkBlocks(doc.children, (b) => {
+    if (!ids.has(b.id)) return;
+    // the segment as prose (how proseSegments lists it) → the same words as the code block spells
+    // them, code spans unwrapped, since a copied prompt carries no backticks
+    const wrapped = proseSegments({ ...doc, children: [b] });
+    const plain = proseSegments({ ...doc, children: [mapBlocks([b], { inline: (n) => (n.type === 'inlineCode' ? { ...n, type: 'text', value: n.value } as Inline : n) })[0]] });
+    wrapped.forEach((seg, index) => out.set(seg, plain[index] ?? seg));
+    return false;
+  });
+  return out;
+}
+
 export function normaliseMdxText(mdx: string): string {
   return mdx
     .replace(/^---[\s\S]*?---\n/, '')
     .replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1\s*$/gm, ' ')
+    // a code span is text: `<MDX>` in one is the four characters, not a tag to strip
+    .replace(/(`+)((?:(?!\1)[^\n])*)\1/g, (_, _quote: string, code: string) => ` ${code.replace(/</g, '&lt;')} `)
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, ' ')
     // the one expression the contract allows; any other brace is text, which the serializer writes as a character reference
     .replace(/\{user\.[A-Za-z_]\w*\}/g, ' ')
     // brace references read as the braces they stand for, so escaped output text compares with the source's text
-    .replace(/&quot;/g, '"').replace(/&#123;/g, '{').replace(/&#125;/g, '}')
+    .replace(/&quot;/g, '"').replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
     .replace(/<Image\b[^>]*\balt="([^"]*)"[^>]*\/?>/gi, ' $1 ')
-    .replace(/<Step\b[^>]*\btitle="([^"]*)"[^>]*>/g, ' $1 ')
+    // a component's title is text the reader sees: a Step's, a Card's (a PreviewButton's label became one), an Accordion's
+    .replace(/<[A-Z]\w*\b[^>]*\btitle="([^"]*)"[^>]*\/?>/g, ' $1 ')
+    // a key cap wraps its text without a space either side: `(<kbd>Ctrl</kbd>` reads `(Ctrl`
+    .replace(/<\/?kbd>/g, '')
     // a tag opens with a name; a literal `<` (`1 < 2`, `<<remove`) is text, and no tag reaches past the next `<`
     .replace(/<\/?[A-Za-z][^<>]*>/g, ' ')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/[*_`\\]+/g, '')
+    // a footnote mark or label renders as a number, not as these characters
+    .replace(/\[\^[^\]]+\]:?/g, ' ')
+    // a link is its label; a link the source nested inside another (an export's `<a>` around a
+    // Markdown link) is read label by label until none is left
+    .replace(/\[([^\[\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\[\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\[\]]*)\]\([^)]*\)/g, '$1')
+    // emphasis, code and strikethrough markers are not text: `~~deprecated~~` reads as the word
+    .replace(/[*_`\\~]+/g, '')
     .replace(/[#>|-]+/g, ' ')
     // a less-than written as a reference is text, so it is read only once tags are gone
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
@@ -223,6 +264,38 @@ export function normaliseSourceText(text: string): string {
   return normaliseMdxText(text.replace(/</g, '&lt;'));
 }
 
+/** Every anchor a source document offered a link: heading ids under each spelling a platform may have linked, and component anchors. */
+function sourceAnchorsOf(doc: DocIR): Set<string> {
+  const anchors = documentAnchors(doc, '');
+  // Each platform's own id rule, and only that platform's: GitBook's rule applied to a Mintlify
+  // heading invented `navigation` for a heading whose id is `navigation-required`, and a link the
+  // source itself had broken was then charged to the migration.
+  const mintlifySeen = new Map<string, number>();
+  walkBlocks(doc.children, (b) => {
+    if (b.type === 'heading' && doc.platform === 'gitbook') for (const id of gitbookHeadingIds(inlineText(b.children))) anchors.add(id);
+    if (b.type === 'heading' && doc.platform === 'mintlify') {
+      const base = mintlifyHeadingId(proseText(b.children).replace(/`/g, ''));
+      const seen = (mintlifySeen.get(base) ?? 0) + 1; mintlifySeen.set(base, seen);
+      anchors.add(seen > 1 ? `${base}-${seen}` : base);
+    }
+    if (b.type === 'component' && (b.name === 'ParamField' || b.name === 'ResponseField')) {
+      const name = ['name', 'path', 'query', 'body', 'header'].map((key) => b.props[key]).find((value) => typeof value === 'string');
+      if (typeof name === 'string') anchors.add(`param-${name}`);
+    }
+    if (b.type === 'heading' && b.sourceId) anchors.add(b.sourceId);
+  });
+  return anchors;
+}
+
+/** Whether a route names a page the source had under its old address, migrated or not. */
+function sourceAnchorsByRouteHasPage(pages: Array<{ source?: string; newPath?: string }>, route: string): boolean {
+  const wanted = route.replace(/\/index$/, '');
+  return pages.some((page) => {
+    const path = (page.source ?? '').replace(/^https?:\/\/[^/]+/, '').replace(/^\/+|\/+$/g, '').replace(/\.(?:mdx?|html?)$/, '');
+    return path === wanted;
+  });
+}
+
 /** Ordered outline: heading depth + normalised text. Structure must survive one to one, not just the words. */
 /**
  * A step with no title of its own (GitBook) opens with the heading that becomes its Step title, and a
@@ -237,15 +310,23 @@ export function headingOutline(doc: DocIR): string[] {
     if (b.type === 'component' && b.name.toLowerCase() === 'step' && !b.props.title && b.children[0]?.type === 'heading') stepTitles.add(b.children[0].id);
   });
   walkBlocks(doc.children, (b) => {
-    if (b.type !== 'heading' || chrome.has(b.id)) return;
-    const text = normaliseSourceText(inlineText(b.children)).trim();
+    if (chrome.has(b.id)) return;
+    // A raw <h1>…<h6> the source carries as HTML renders as a heading, and the migration writes one.
+    if (b.type === 'component' && /^h[1-6]$/i.test(b.name)) {
+      const text = normaliseSourceText(b.children.map((child) => (child.type === 'paragraph' || child.type === 'heading' ? inlineText(child.children) : '')).join(' ')).trim();
+      if (text) out.push(`${b.name.slice(1)}:${text}`);
+      return;
+    }
+    if (b.type !== 'heading') return;
+    // the words a reader sees, a badge's included: Mintlify writes `### \`navigation\` <Badge>required</Badge>`
+    const text = normaliseSourceText(proseText(b.children)).trim();
     out.push(stepTitles.has(b.id) ? `step:${text}` : `${b.depth}:${text}`);
   });
   return out;
 }
 
 export function mdxHeadingOutline(mdx: string): string[] {
-  const body = mdx.replace(/^---[\s\S]*?---\n/, '').replace(/^ {0,8}(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n {0,8}\1[ \t]*$/gm, '');
+  const body = mdx.replace(/^---[\s\S]*?---\n/, '').replace(/^ {0,40}(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n {0,40}\1[ \t]*$/gm, '');
   return [...body.matchAll(/^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]?)*(#{1,6})(?:[ \t]+|$)(.*?)[ \t]*$|<Step\b([^>]*)>/gm)].flatMap((m) => {
     if (m[1]) return [`${m[1].length}:${normaliseMdxText(m[2]).trim()}`];
     const title = m[3].match(/\btitle="([^"]*)"/)?.[1];
@@ -261,7 +342,7 @@ export function codeBlocks(doc: DocIR): string[] {
 
 export function mdxCodeBlocks(mdx: string): string[] {
   // fences may be indented (children of components and list items); dedent captured lines by the fence's own indent
-  return [...mdx.matchAll(/^( {0,8})(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\1\2[ \t]*$/gm)].map((m) => m[3].split('\n').map((l) => (m[1] && l.startsWith(m[1]) ? l.slice(m[1].length) : l)).join('\n').replace(/\n$/, '').replace(/\s+$/gm, ''));
+  return [...mdx.matchAll(/^( {0,40})(`{3,}|~{3,})[^\n]*\n([\s\S]*?)^\1\2[ \t]*$/gm)].map((m) => m[3].split('\n').map((l) => (m[1] && l.startsWith(m[1]) ? l.slice(m[1].length) : l)).join('\n').replace(/\n$/, '').replace(/\s+$/gm, ''));
 }
 
 function tableCellText(value: string): string {
@@ -272,7 +353,9 @@ export function tableSignatures(doc: DocIR): string[] {
   const out: string[] = [];
   walkBlocks(doc.children, (b) => {
     if (b.type !== 'table') return;
-    const rows = b.children.map((row) => row.children.map((cell) => tableCellText(inlineText(cell.children))));
+    // the same escape the prose comparison applies: a `<` in a source cell is written as `&lt;`, and
+    // a code span's `</records>` is text on both sides rather than a tag on one
+    const rows = b.children.map((row) => row.children.map((cell) => tableCellText(escapeSourceText(proseText(cell.children)))));
     // an empty header row shows the reader nothing, and the MDX reader drops it the same way
     if (rows.length && rows[0].every((cell) => !cell)) rows.shift();
     out.push(JSON.stringify(rows));
@@ -551,14 +634,32 @@ export function runGates(input: GateInput): GateResult[] {
     if (!page) { page = new Set(); excludedByPage.set(d.pageId, page); }
     page.add(d.sourceNodeId);
   }
+  // A source node a rule turned into a code block (a prompt the reader copies): its prose is in the output's code.
+  const codeBackedByPage = new Map<string, Set<string>>();
+  for (const d of dispositions) {
+    if (d.kind !== 'transformed' || !(d.outputNodeIds ?? []).some((id) => id.endsWith(':code'))) continue;
+    let page = codeBackedByPage.get(d.pageId);
+    if (!page) { page = new Set(); codeBackedByPage.set(d.pageId, page); }
+    page.add(d.sourceNodeId);
+  }
   let unmatched = 0; const unmatchedSamples: string[] = [];
   let codeMismatch = 0; const codeSamples: string[] = [];
   let tableMismatch = 0; const tableSamples: string[] = [];
+  /** The anchors each source page offered, by output route: its headings under every id the source could have linked them by, and the anchors its components published. */
+  const sourceDocAnchors = new Map<string, Set<string>>();
   for (const { doc, outputFile } of input.sourceDocs) {
     if (!outputFile || !existsSync(outputFile)) continue;
+    sourceDocAnchors.set(relative(input.outputDir, outputFile).replace(/\.mdx?$/, ''), sourceAnchorsOf(doc));
     const mdx = readFileSync(outputFile, 'utf8');
     const hay = normaliseMdxText(mdx);
-    for (const seg of proseSegments(doc, excludedByPage.get(doc.pageId))) if (!hay.includes(seg)) { unmatched++; if (unmatchedSamples.length < 5) unmatchedSamples.push(`${doc.source}: "${seg.slice(0, 60)}"`); }
+    const codeBacked = codeBackedByPage.get(doc.pageId);
+    const inCode = codeBacked ? proseSegmentsUnder(doc, codeBacked) : undefined;
+    // code is compared as the source side is: a `<url>` in it is text, escaped the same way
+    const codeHay = inCode?.size ? normaliseMdxText(escapeSourceText(mdxCodeBlocks(mdx).join('\n'))) : '';
+    for (const seg of proseSegments(doc, excludedByPage.get(doc.pageId))) {
+      if (hay.includes(seg) || (inCode?.has(seg) && codeHay.includes(inCode.get(seg)!))) continue;
+      unmatched++; if (unmatchedSamples.length < 5) unmatchedSamples.push(`${doc.source}: "${seg.slice(0, 60)}"`);
+    }
     const src = codeBlocks(doc); const out = new Set(mdxCodeBlocks(mdx));
     for (const c of src) if (!out.has(c)) { codeMismatch++; if (codeSamples.length < 5) codeSamples.push(`${doc.source}: ${c.slice(0, 40)}`); }
     const outputTables = mdxTableSignatures(mdx);
@@ -693,14 +794,26 @@ export function runGates(input: GateInput): GateResult[] {
 
   // 6. internal links resolve
   let broken = 0; const brokenSamples: string[] = [];
+  // A link to a route no page of the source ever had was broken before the migration: the source
+  // site 404s on it too. It is the customer's to fix and is listed for them; a link to a page the
+  // source has and the output lacks is this migration's, and blocks.
+  const sourceRoutes = new Set(input.treePages.flatMap((page) => (page.newPath ? [page.newPath, `${page.newPath}/index`] : [])));
+  const inheritedLinks: Array<{ from: string; link: string }> = [];
   for (const f of outMdx) {
     const from = relative(input.outputDir, f).replace(/\.mdx?$/, '');
     for (const url of outputLinks.get(f) ?? []) {
       const target = outputRoute(url, from);
-      if (target && !outByPath.has(target)) { broken++; if (brokenSamples.length < 5) brokenSamples.push(`${relative(input.outputDir, f)} → ${url}`); }
+      if (!target || outByPath.has(target)) continue;
+      // only a tree that names the source's pages can say a route was never one of them
+      if (input.treePages.length && !sourceRoutes.has(target) && !sourceAnchorsByRouteHasPage(input.treePages, target)) { inheritedLinks.push({ from, link: url }); continue; }
+      broken++; if (brokenSamples.length < 5) brokenSamples.push(`${relative(input.outputDir, f)} → ${url}`);
     }
   }
-  gates.push({ id: 'internal-links', status: broken ? 'fail' : 'pass', detail: `${broken} internal links do not resolve to an output page`, count: broken, samples: brokenSamples });
+  if (inheritedLinks.length) {
+    mkdirSync(join(input.workspace, 'report'), { recursive: true });
+    writeFileSync(join(input.workspace, 'report', 'inherited-broken-page-links.json'), JSON.stringify(inheritedLinks, null, 2), { mode: 0o600 });
+  }
+  gates.push({ id: 'internal-links', status: broken ? 'fail' : 'pass', detail: `${broken} internal links do not resolve to an output page${inheritedLinks.length ? `; ${inheritedLinks.length} more point at routes the source never had (report/inherited-broken-page-links.json)` : ''}`, count: broken, samples: brokenSamples });
 
   // 6a. a deep link must land where it says: a fragment naming an anchor the page does not have
   // loads the page at the top and reports nothing, and until now that was only caught on a preview.
@@ -712,6 +825,8 @@ export function runGates(input: GateInput): GateResult[] {
   // content; anything the source did offer and the output does not still blocks.
   const sourceAnchorsByRoute = new Map<string, ReadonlySet<string>>();
   for (const page of sourcePages) if (page.html) sourceAnchorsByRoute.set(page.route.replace(/^\/+/, ''), htmlAnchors(page.html));
+  // A source read from published Markdown froze no HTML; its headings and component anchors say what it offered.
+  for (const [route, anchors] of sourceDocAnchors) sourceAnchorsByRoute.set(route, new Set([...(sourceAnchorsByRoute.get(route) ?? []), ...anchors]));
   const { broken: fragmentsBroken, inherited: fragmentsInherited } = splitInheritedFragments(fragmentProblems, sourceAnchorsByRoute);
   if (fragmentsInherited.length) {
     mkdirSync(join(input.workspace, 'report'), { recursive: true });
@@ -730,24 +845,51 @@ export function runGates(input: GateInput): GateResult[] {
   // 6b. links that leave the migrated site for the source site, which usually moves to Documentation.AI
   const unmigratedMode = readUrlPlan(input.workspace)?.unmigratedLinks ?? 'keep';
   const sourceHosts = new Set(input.sourceEvidence?.links?.hosts ?? []);
+  const sourceBase = input.sourceEvidence?.links?.base;
   let unmigrated = 0; const unmigratedSamples: string[] = [];
+  // A link to the host outside the docs' own base is to the site beside the docs (`/pricing`), and a
+  // link to a served file (`llms.txt`, a sitemap, a page's `.md` export) is to that file: neither is a
+  // page this migration could have written, so both stay as authored and are counted apart.
+  let beside = 0; let resources = 0; let selfLinks = 0; let declared = 0;
+  // Links a mapping rule wrote by the operator's decision (a card to a live tool the migration
+  // cannot carry), recorded in the ledger; they are the operator's, not the source's.
+  const declaredByPage = new Map<string, Set<string>>();
+  for (const d of dispositions) {
+    if (d.kind !== 'transformed' || !d.declaredLinks?.length) continue;
+    let page = declaredByPage.get(d.pageId);
+    if (!page) { page = new Set(); declaredByPage.set(d.pageId, page); }
+    for (const link of d.declaredLinks) page.add(link);
+  }
+  const pageIdOfRoute = new Map(input.treePages.flatMap((page) => (page.newPath ? [[page.newPath, page.id]] : [])));
+  // A page that links its own source address points at the live original of something the
+  // migration could not carry (a rule turned a live demo into a card to the working tool). That is
+  // the one place the source page is the right target, and it is counted apart.
+  const sourceOfRoute = new Map(input.treePages.flatMap((page) => (page.newPath && page.source ? [[page.newPath, page.source.replace(/\/+$/, '')]] : [])));
   if (sourceHosts.size) {
     for (const f of outMdx) {
+      const route = relative(input.outputDir, f).replace(/\.mdx?$/, '');
+      const ownSource = sourceOfRoute.get(route);
+      const declaredHere = declaredByPage.get(pageIdOfRoute.get(route) ?? '');
       for (const url of outputLinks.get(f) ?? []) {
-        let host: string | undefined;
-        try { host = new URL(url).hostname; } catch { host = undefined; }
-        if (!host || !sourceHosts.has(host)) continue;
+        if (declaredHere?.has(url)) { declared++; continue; }
+        let parsed: URL | undefined;
+        try { parsed = new URL(url); } catch { parsed = undefined; }
+        if (!parsed || !sourceHosts.has(parsed.hostname)) continue;
+        if (!withinSourceBase(parsed.pathname, sourceBase)) { beside++; continue; }
+        if (isSourceResource(parsed.pathname)) { resources++; continue; }
+        if (ownSource && url.replace(/[?#].*$/, '').replace(/\/+$/, '') === ownSource) { selfLinks++; continue; }
         unmigrated++;
         if (unmigratedSamples.length < 5) unmigratedSamples.push(`${relative(input.outputDir, f)} → ${url}`);
       }
     }
   }
+  const aside = [beside ? `${beside} link(s) to the source host outside ${sourceBase} are to the site beside the docs and stay as authored` : '', resources ? `${resources} link(s) to files the source serves (sitemap, llms.txt, .md exports) stay as authored` : '', selfLinks ? `${selfLinks} link(s) from a page to its own source address point at a live tool the migration could not carry and stay as authored` : '', declared ? `${declared} link(s) a mapping rule wrote by decision (a card to a live tool on the source site) are the operator's and are listed in the ledger` : ''].filter(Boolean).join('; ');
   gates.push({
     id: 'unmigrated-links',
     status: unmigrated && unmigratedMode === 'keep' ? 'fail' : 'pass',
-    detail: !unmigrated ? 'no link points at the source site'
+    detail: (!unmigrated ? 'no link points at a source-site page'
       : unmigratedMode === 'source' ? `${unmigrated} links point at the source site, which plan/urls.yaml (unmigratedLinks: source) says stays up; listed in report/unmigrated-links.json`
-      : `${unmigrated} links point at the source site, which usually moves to Documentation.AI: migrate their pages, fix the links, or set unmigratedLinks: source in plan/urls.yaml if the source site stays up (listed in report/unmigrated-links.json)`,
+      : `${unmigrated} links point at the source site, which usually moves to Documentation.AI: migrate their pages, fix the links, or set unmigratedLinks: source in plan/urls.yaml if the source site stays up (listed in report/unmigrated-links.json)`) + (aside ? `; ${aside}` : ''),
     count: unmigrated, samples: unmigratedSamples,
   });
 

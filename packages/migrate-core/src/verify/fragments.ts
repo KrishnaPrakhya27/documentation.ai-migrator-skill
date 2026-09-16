@@ -22,6 +22,14 @@ export function documentAnchors(doc: DocIR, text: string, readSpec?: (spec: stri
   const slugger = new GithubSlugger();
   walkBlocks(doc.children, (block) => {
     if (block.type === 'heading') anchors.add(headingSlug(inlineText(block.children), slugger));
+    // A Step whose title renders as a heading gets that heading's id from the platform (Steps.tsx:
+    // a fresh slugger per title, hyphen runs collapsed), so a GitBook heading that became a step
+    // title is still a deep-link target.
+    if ((block.type === 'component' || block.type === 'dai') && block.name === 'Step' && typeof block.props.title === 'string' && /^h[2-6]$/.test(String(block.props.titleType ?? block.props['title-type'] ?? ''))) {
+      anchors.add(new GithubSlugger().slug(block.props.title).replace(/-+/g, '-').replace(/^-+|-+$/g, ''));
+    }
+    // GFM footnotes: remark-rehype ids the note `user-content-fn-<id>` and its mark `user-content-fnref-<id>`.
+    if (block.type === 'footnoteDefinition') { anchors.add(`user-content-fn-${block.identifier}`); anchors.add(`user-content-fnref-${block.identifier}`); }
   });
   // An explicit id — an anchor shim for a renamed heading, or one the author wrote — is an anchor too.
   for (const match of text.matchAll(/\b(?:id|name)=["']([^"']+)["']/g)) anchors.add(match[1]);
@@ -40,9 +48,14 @@ export function documentAnchors(doc: DocIR, text: string, readSpec?: (spec: stri
 export function htmlAnchors(html: string): Set<string> {
   const anchors = new Set<string>();
   for (const match of html.matchAll(/\b(?:id|name)=["']([^"']+)["']/g)) anchors.add(match[1]);
+  // A heading that publishes its own id has that anchor and no other; only a heading without one
+  // is reached by the slug the renderer would give it. Slugging every heading invented anchors the
+  // site never had (`navigation` for a heading whose id is `navigation-required`), and a link the
+  // source itself had broken was then charged to the migration.
   const slugger = new GithubSlugger();
-  for (const match of html.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)) {
-    const text = match[1].replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;|&#\d+;/gi, ' ').replace(/\s+/g, ' ').trim();
+  for (const match of html.matchAll(/<h[1-6]([^>]*)>([\s\S]*?)<\/h[1-6]>/gi)) {
+    if (/\bid=["'][^"']+["']/.test(match[1])) continue;
+    const text = match[2].replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;|&#\d+;/gi, ' ').replace(/\s+/g, ' ').trim();
     if (text) anchors.add(headingSlug(text, slugger));
   }
   return anchors;

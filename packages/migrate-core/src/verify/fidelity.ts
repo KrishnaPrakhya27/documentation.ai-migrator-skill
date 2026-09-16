@@ -56,6 +56,7 @@ function inlineShape(nodes: Inline[], insideLink = false): FidelityValue[] {
         return { type: 'link', url, title: node.title ?? '', children };
       }
       case 'inlineHtml': return { type: 'html', value: node.value.trim() };
+      case 'footnoteReference': return { type: 'footnoteReference', identifier: node.identifier };
       case 'strong': case 'emphasis': {
         // `***x***` is bold and italic together; nothing in it says which wraps which, so a re-parse
         // is free to choose the other order. Both say the same thing, so the pair is always written
@@ -458,6 +459,7 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
         return [{ type: 'table', align: ordered(align), children: rows }];
       }
       case 'thematicBreak': return [{ type: 'thematicBreak' }];
+      case 'footnoteDefinition': return [{ type: 'footnoteDefinition', identifier: block.identifier, children: blocksShape(block.children, exactComponents) }];
       case 'image': return [{ type: 'image', url: sameAddress(block.url), alt: block.alt, title: block.title ?? '', width: block.width ?? null, height: block.height ?? null }];
       case 'figure': {
         if (exactComponents) return [blocksShape([block.image], true)[0], ...(block.caption?.length ? [{ type: 'paragraph', children: [{ type: 'emphasis', children: inlineShape(block.caption) }] } as FidelityValue] : [])];

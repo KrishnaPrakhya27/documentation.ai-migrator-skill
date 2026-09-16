@@ -25,8 +25,10 @@ describe('source constructs cannot disappear in a shared parser', () => {
     expect(documentImages(output)).toEqual(documentImages(parsed));
   });
 
-  it('stops on unsupported footnotes instead of dropping their markers and flattening their bodies', () => {
-    expect(() => markdownToIr('Text[^note]\n\n[^note]: Authored body\n', options)).toThrow(/synthetic.md:.*unsupported Markdown node footnoteReference/);
+  it('carries footnotes as footnotes: the marker stays a marker and the body stays a note', () => {
+    const doc = markdownToIr('Text[^note]\n\n[^note]: Authored body\n', options);
+    expect(doc.children[0]).toMatchObject({ type: 'paragraph', children: [{ type: 'text', value: 'Text' }, { type: 'footnoteReference', identifier: 'note' }] });
+    expect(doc.children[1]).toMatchObject({ type: 'footnoteDefinition', identifier: 'note', children: [{ type: 'paragraph' }] });
   });
 
   it('assigns distinct ledger identities to repeated snippet uses', () => {

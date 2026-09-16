@@ -527,8 +527,15 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
         const summary = find(n, 'summary');
         return [componentOf(n, { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] }, p)];
       }
-      default:
+      default: {
+        // An empty element that carries an id is an anchor target other links use — Mintlify writes
+        // `<div id="draft-changelog"></div>` before a heading it renamed. Transparent handling would
+        // drop the address; it is kept as the empty target the named-anchor case writes.
+        const anchorId = (n.attribs.id ?? '').trim();
+        const empty = !(n.children ?? []).some((c) => c.type === 'tag' || (c.type === 'text' && c.data.trim()));
+        if (anchorId && empty) return [{ id: id(p, `anchor:${anchorId}`), type: 'paragraph', children: [{ id: id(p, `anchor-inline:${anchorId}`), type: 'inlineHtml', value: `<a id="${anchorId.replace(/"/g, '&quot;')}"></a>` }] }];
         return blocksOf(n.children, p); // div, section, article, span-wrappers: transparent
+      }
     }
   };
 

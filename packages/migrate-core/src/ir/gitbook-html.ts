@@ -19,6 +19,19 @@ const HTML_INLINE = new Set(['a', 'abbr', 'b', 'del', 'em', 'i', 'label', 'mark'
 export const TRANSPARENT_HTML: ReadonlySet<string> = new Set(['article', 'div', 'section']);
 const VOID = new Set(['area', 'br', 'col', 'hr', 'img', 'input', 'source', 'track', 'wbr']);
 
+/** Elements GitBook itself writes into its published Markdown, beyond the block and inline sets: table and list parts, figure captions, details, and this tool's own snippet marker. */
+const HTML_OTHER = new Set(['kbd', 'code', 'figcaption', 'summary', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'li', 'dd', 'dt', 'embed', 'object', 'svg', 'path', 'snippetref', 'nav', 'main', 'span']);
+
+/**
+ * Whether GitBook would render `<name …>` as an element. GitBook's editor allows no HTML of the
+ * author's: anything else in angle brackets — `gitbook integrations new <dir>`, `<num>` — is text
+ * the author typed, which GitBook shows as typed and MDX would swallow as a tag.
+ */
+export function isGitbookHtmlTag(name: string): boolean {
+  const lower = name.toLowerCase();
+  return HTML_BLOCK.has(lower) || HTML_INLINE.has(lower) || VOID.has(lower) || TRANSPARENT_HTML.has(lower) || HTML_OTHER.has(lower);
+}
+
 export function isGitbookHtmlBlock(name: string): boolean {
   return HTML_BLOCK.has(name.toLowerCase());
 }

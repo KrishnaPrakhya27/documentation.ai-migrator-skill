@@ -74,6 +74,11 @@ rules:
     match: { name: button, props: { data-action: ask } }
     children: drop
     note: "GitBook Assistant prompt: it works only inside GitBook, so verify treats it as platform chrome like script and style"
+  - id: gitbook/search-button
+    tier: T7
+    match: { name: button, props: { data-action: search } }
+    children: drop
+    note: "GitBook search prompt: it opens GitBook's own search, so verify treats it as platform chrome like the assistant button"
   - id: gitbook/api-param
     tier: T2
     match: { name: api-param }

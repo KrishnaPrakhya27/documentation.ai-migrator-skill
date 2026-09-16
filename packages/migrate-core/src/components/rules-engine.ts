@@ -79,7 +79,7 @@ export interface EngineOptions {
   iframeHosts?: string[];
 }
 
-interface HandlerResult { blocks: Block[]; lossy?: string[] }
+interface HandlerResult { blocks: Block[]; lossy?: string[]; /** Links the rule wrote by the operator's decision, recorded in the ledger so verify can tell them from links the source authored. */ declaredLinks?: string[] }
 type Handler = (node: ComponentNode, rule: MappingRule, ctx: EngineOptions) => HandlerResult;
 /** A restructure handler with the source props it reads, so every other authored prop is reported as dropped. */
 interface RestructureHandler { reads: string[]; run: Handler }
@@ -137,11 +137,25 @@ function matches(rule: MappingRule, node: ComponentNode): boolean {
 
 
 /** The plain text a run of blocks states, as one string; undefined when they state none. */
-function blocksText(blocks: readonly Block[]): string | undefined {
+/**
+ * The text of a block tree, as a reader would copy it: paragraphs and headings by their words,
+ * lists with their markers and nesting, quotes with theirs, code as written. A prompt that holds a
+ * numbered list is the whole list, not its first paragraph.
+ */
+function blocksText(blocks: readonly Block[], indent = ''): string | undefined {
   const parts: string[] = [];
   for (const block of blocks) {
-    if (block.type === 'paragraph' || block.type === 'heading') parts.push(inlineText(block.children));
-    else if (block.type === 'code') parts.push(block.value);
+    if (block.type === 'paragraph' || block.type === 'heading') parts.push(indent + inlineText(block.children));
+    else if (block.type === 'code') parts.push(block.value.split('\n').map((line) => indent + line).join('\n'));
+    else if (block.type === 'list') {
+      parts.push(block.children.map((item, index) => {
+        const marker = block.ordered ? `${(block.start ?? 1) + index}. ` : '- ';
+        const body = blocksText(item.children, indent + ' '.repeat(marker.length)) ?? '';
+        return indent + marker + body.trimStart();
+      }).join('\n'));
+    } else if (block.type === 'blockquote') parts.push((blocksText(block.children, indent) ?? '').split('\n').map((line) => `> ${line}`).join('\n'));
+    else if (block.type === 'table') parts.push(block.children.map((row) => indent + row.children.map((cell) => inlineText(cell.children)).join(' | ')).join('\n'));
+    else if ('children' in block && Array.isArray(block.children)) { const inner = blocksText(block.children as Block[], indent); if (inner) parts.push(inner); }
   }
   const text = parts.join('\n\n').trim();
   return text || undefined;
@@ -227,6 +241,10 @@ const HANDLERS: Record<string, RestructureHandler> = {
   'anchor-div-to-heading': { reads: ['id'], run: (node) => {
     const id = typeof node.props.id === 'string' ? node.props.id.trim() : '';
     const [first, ...rest] = node.children;
+    // An empty div with an id is the anchor an older link still uses (`<div id="draft-changelog"></div>`
+    // before a heading that has since been renamed). It has no content to lose: it is written as the
+    // same anchor element the renamed-heading shims use, so the old link still lands.
+    if (id && !node.children.length) return { blocks: [{ id: node.id, type: 'paragraph', children: [{ id: `${node.id}-anchor`, type: 'inlineHtml', value: `<a id="${id.replace(/"/g, '&quot;')}"></a>` }] }] };
     if (!id || first?.type !== 'heading') return quarantined(node, 'a div carrying an id is a heading anchor only when a heading leads it; this one does not');
     return { blocks: [{ ...first, sourceId: id }, ...rest] };
   } },
@@ -315,6 +333,7 @@ const HANDLERS: Record<string, RestructureHandler> = {
     return {
       blocks: [{ id: node.id, type: 'dai', name: 'Card', props, children: node.children, rule: rule.id }],
       lossy: [`<${node.name}> is a live demo and cannot be reproduced statically; it became a card linking to the working tool${rule.note ? ` — ${rule.note}` : ''}. Needs a customer-controlled home before cutover.`],
+      ...(href ? { declaredLinks: [href] } : {}),
     };
   } },
   /**
@@ -395,7 +414,8 @@ export class RulesEngine {
       } else if (b.type === 'list') {
         this.opts.ledger.identical(pageId, b.id);
         out.push({ ...b, children: b.children.map((li) => { this.opts.ledger.identical(pageId, li.id); return { ...li, children: this.resolveBlocks(li.children, pageId) }; }) });
-      } else if (b.type === 'blockquote') {
+      } else if (b.type === 'blockquote' || b.type === 'footnoteDefinition') {
+        // a container whose children are content in their own right: each gets its own disposition
         this.opts.ledger.identical(pageId, b.id);
         out.push({ ...b, children: this.resolveBlocks(b.children, pageId) });
       } else if (b.type === 'dai') {
@@ -463,12 +483,14 @@ export class RulesEngine {
     /** Source props the rule carries into the output; every other authored prop is a recorded loss. */
     let mapped: string[];
     let handlerLossy: string[] = [];
+    let declaredLinks: string[] = [];
     if (rule.handler) {
       const handler = HANDLERS[rule.handler];
       if (!handler) throw new Error(`Unknown handler ${rule.handler} in rule ${rule.id}`);
       const outcome = handler.run(node, rule, this.opts);
       result = outcome.blocks;
       handlerLossy = outcome.lossy ?? [];
+      declaredLinks = outcome.declaredLinks ?? [];
       mapped = handler.reads;
     } else if (rule.children === 'unwrap') {
       result = node.children;
@@ -504,7 +526,7 @@ export class RulesEngine {
       this.opts.ledger.quarantined(pageId, node.id, quarantined.reason);
       this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: node.id, signature: signatureOf(node).hash, tier: 'T7', rule: rule.id, note: quarantined.reason });
     } else {
-      this.opts.ledger.transformed(pageId, node.id, outIds, rule.id, lossy);
+      this.opts.ledger.transformed(pageId, node.id, outIds, rule.id, lossy, declaredLinks);
       this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: node.id, signature: signatureOf(node).hash, tier: rule.tier, rule: rule.id, lossy, original: `<${node.name}>`, output: result.map((r) => (r.type === 'dai' ? `<${r.name}>` : r.type)).join(',') });
     }
     return result;

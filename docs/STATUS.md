@@ -113,3 +113,30 @@ Limitations: this is page-universe and byte-integrity evidence, not an independe
 Merged `fix/gitbook-link-graph-scope`, `migrate/mintlify-docs` and `migrate/sessionm-helpsystems` (the latter two carrying the shared `fix/hosted-asset-fidelity` work). The auto-merge duplicated two things both branches had invented independently — `withinSiteBase` and the site-base confinement in `discoverLiveSite` — reconciled to one rule: everything outside the site's base is refused except what a sitemap the site itself serves declares. `mergeNavigation` (Mintlify scoped sidebars) and `mergeNavigationTrees` (GitBook per-section sidebars) still coexist; unifying them is a follow-up.
 
 Fixed on top: a container's own page is its `path` (not a duplicate child); Mintlify `hidden` containers and `menu` items; `\u0026` in Flare TOC titles; URL case preserved; the Flare copyright line no longer reaches the topic; Mintlify and GitBook endpoint pages carry `openapi:` frontmatter over assembled or captured specs under `api-reference/`; `#param-` links follow parameters to the platform's anchors; GitBook `<picture>` unwrapped; GitBook `prompt`, `file`, `br`, `esm` mapped; `nav --help-center`; the strict validator reads multi-backtick code spans.
+
+## 2026-09-16 — gates re-run against the real captured workspaces
+
+The three 2026-09-15 migrations were re-derived offline from their frozen captures (copies of the GitBook and Mintlify workspaces, on the integrated build) and every remaining gate failure was traced to its cause in the source bytes rather than waived. What changed:
+
+- **Verify read the two sides differently.** The output normaliser padded a code span with spaces and the source side did not, so `(oneOf / anyOf)` and `( oneof / anyof )` were "different prose"; a `<kbd>` was padded the same way; a code fence nested more than eight spaces deep (Steps › Expandable › CodeGroup) was invisible to the code-block gate; a heading's badge text (`### \`navigation\` <Badge>required</Badge>`) was in the output outline and not the source's; a Card's title, a PreviewButton's label become, was not read as prose; `~~strikethrough~~` markers were compared as text. The source side now renders inline content exactly as the serializer writes it and the output side reads titles and key caps as the reader sees them. Mintlify prose misses went 2427 → 0-order and tables 100 → 0; GitBook prose 823 → single digits.
+- **Anchors.** The platform gives a Step title rendered as a heading its own id (Steps.tsx); verify now counts it, which closed every GitBook stepper deep link. Mintlify's heading ids (dots and spaces to hyphens, badge text included, `( ) , * :` dropped, repeats `-2`, `-3`; derived from 9,773 rendered headings) are recorded as the source id so a link written against them gets its shim. An empty `<div id>` is an anchor and is written as one instead of quarantined. Source HTML no longer has slugged anchors invented for headings that publish their own id, so a link the source itself had broken is reported as inherited, not charged to the migration.
+- **GitBook pages an operator had excluded "for the preview run".** Thirty-one pages could not be read into MDX: a brace in prose or a table cell, a `{% openapi %}` quoted in escaped backticks, a paragraph opening with `import`, `{% file %}` never closed, footnotes, and an embed URL whose tail the export left outside the autolink brackets. Each is now read as the author's text (braces escaped outside code and tags, `import` written with its first letter as a character reference on both sides, footnotes carried as GFM footnotes with their anchors, `file` self-closing, the URL re-joined). All thirty-one convert.
+- **`unmigrated-links`** counts only links to pages under the docs' own base (derived from the tree's pages, not the sitemap, which lists the marketing site too) and lists links to served files (`llms.txt`, sitemaps, `.md` exports) without failing.
+- `internal-links` with no tree context no longer classifies every broken link as inherited.
+- `plan` extends an existing URL plan with the default entry for every page the tree gained since it was written (a lifted scope exclusion, a page a rerun discovered); before, such pages had no route and convert skipped them silently. A rule that writes a link by the operator's decision (a live-demo card) records it in the ledger, and `unmigrated-links` counts it apart. GitBook's inline search and assistant buttons are chrome, inline and as blocks.
+- A link nested inside a link (Mintlify's export writes `<a href="mailto:x">[x](mailto:x)</a>`) is written once, as a browser shows it; a link fragment is matched to its heading after percent-decoding (`#…-%24ref` is `$ref`); a prompt copies its whole text, numbered lists included, and the prose gate looks for a prompt's sentences in the code block the ledger says they became; `inventory` names the page a parse failure happened on.
+
+Gate counts on the re-derived copies, before this batch → after (permissive sessions; `assets --provider none`):
+
+| Gate | Mintlify (1050 pages) | GitBook (1224 → 1255 pages) | MadCap (427 pages) |
+| --- | --- | --- | --- |
+| prose-match | 827 → 0 | 505 → 0 | 0 |
+| fragments-resolve | 1029 → 0 (1009 inherited, listed) | 758 → 0 (775 inherited, listed) | 0 |
+| no-unresolved-blocks | 384 → 0 | 6 → 0 | 0 |
+| headings-sequence | 8 → 0 | 5 → 0 | 0 |
+| tables-exact | 11 → 0 | 12 → 0 | 0 |
+| code-blocks-exact | 12 → 0 | 0 | 0 |
+| internal-links | 9 → 0 (9 inherited, listed) | 77 → 0 (9 inherited, listed) | 0 |
+| unmigrated-links | 43 → 0 (23 beside the docs, 20 declared by rule) | 20 → 0 (7 beside, 17 files) | 0 |
+
+The only failures left on a rerun are `human-gates-approved` (the tree changed since the approval, by design), `migrator-pinned` (an uncommitted build) and, on GitBook, `assets-ready` under `--provider none`. The thirty-one GitBook pages excluded on 2026-09-15 are in the 1255.

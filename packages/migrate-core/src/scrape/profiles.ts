@@ -247,7 +247,7 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     navSectionSelector: '[data-gb-sections] a[href]',
     chromeStrings: [...COMMON_CHROME_STRINGS, 'Powered by GitBook', 'Was this helpful?', 'Last updated', 'Ask or search…', 'Ctrl K'],
     recognisers: [
-      { selector: 'button[data-action=ask]', name: 'button', props: { 'data-action': '@attr:data-action' } },
+      { selector: 'button[data-action]', name: 'button', props: { 'data-action': '@attr:data-action' } },
       { selector: '.hint, [data-hint]', name: 'hint', props: { style: '@class-suffix:hint-' } },
       { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] },
       { selector: '[role=tablist]', name: 'tabs' },

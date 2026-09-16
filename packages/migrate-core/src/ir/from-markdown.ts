@@ -16,8 +16,8 @@ import { sanitizeHtmlToJsx } from '../components/sanitize.js';
 import type { Block, ComponentNode, DaiComponentNode, DocIR, Frontmatter, ImageNode, Inline, ListItemNode, TableCellNode, TableRowNode } from './types.js';
 import { readPixelDimension } from './dimensions.js';
 import { htmlToIr } from './from-html.js';
-import { mapBlocks } from './types.js';
-import { gitbookHtmlBlockToIr, isGitbookHtmlBlock, isGitbookHtmlInline, TRANSPARENT_HTML } from './gitbook-html.js';
+import { mapBlocks, inlineText } from './types.js';
+import { gitbookHtmlBlockToIr, isGitbookHtmlBlock, isGitbookHtmlInline, isGitbookHtmlTag, TRANSPARENT_HTML } from './gitbook-html.js';
 import { gitbookOpenApiBlocks } from './gitbook-openapi.js';
 import { mintlifyOperationSection, operationFrontmatter } from './mintlify-openapi.js';
 import { srcsetUrls } from '../assets/html-media.js';
@@ -103,8 +103,10 @@ function liquidAttrs(raw: string): string {
   const attrs: string[] = [];
   for (const m of raw.matchAll(/([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
     const name = m[1] === 'url' ? 'src' : m[1];
-    // GitBook wraps URLs in angle brackets inside attributes: url="<https://…>"
-    attrs.push(`${name}="${quoteAttr((m[2] ?? m[3] ?? '').replace(/^<([^<>\s]+)>$/, '$1'))}"`);
+    // GitBook wraps the URL in angle brackets inside attributes: url="<https://…>". Its export
+    // autolinks only the part it recognises, so a trailing `?` or an escaped `_` that belongs to the
+    // address ends up after the closing bracket; the value is the two joined, with the escape undone.
+    attrs.push(`${name}="${quoteAttr((m[2] ?? m[3] ?? '').replace(/^<([^<>\s]+)>(.*)$/, (_whole, url: string, rest: string) => url + rest.replace(/\\(.)/g, '$1')))}"`);
   }
   return attrs.length ? ' ' + attrs.join(' ') : '';
 }
@@ -112,8 +114,35 @@ function liquidAttrs(raw: string): string {
 /** Convert block syntaxes that micromark intentionally treats as plain text. */
 /** Apply `fn` only to text outside fenced and inline code, so documentation *about* a syntax is never rewritten. */
 function outsideCode(source: string, fn: (segment: string) => string): string {
-  const parts = source.split(/(^ {0,3}(?:`{3,}|~{3,})[^\n]*\n[\s\S]*?\n {0,3}(?:`{3,}|~{3,})[ \t]*$|`[^`\n]+`)/m);
-  return parts.map((p, i) => (i % 2 === 1 ? p : fn(p))).join('');
+  // Fences are tracked by hand: a ```` block quoting ``` inside it is one block, which no regex
+  // pairing the first two delimiters can tell. A backslash-escaped backtick is the character, not
+  // a code-span delimiter, and a span opened with two backticks closes only on two.
+  const parts: Array<{ code: boolean; text: string }> = [];
+  const push = (code: boolean, text: string): void => {
+    const last = parts[parts.length - 1];
+    if (last && last.code === code) last.text += text; else parts.push({ code, text });
+  };
+  let fence: string | undefined;
+  const lines = source.split('\n');
+  lines.forEach((line, index) => {
+    const newline = index < lines.length - 1 ? '\n' : '';
+    const delimiter = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      push(true, line + newline);
+      if (delimiter && delimiter[1][0] === fence[0] && delimiter[1].length >= fence.length && /^ {0,3}(?:`{3,}|~{3,})[ \t]*$/.test(line)) fence = undefined;
+      return;
+    }
+    if (delimiter) { fence = delimiter[1]; push(true, line + newline); return; }
+    let at = 0;
+    for (const span of line.matchAll(/(?<!\\)(`+)(?:(?!\1)[^\n])*?\1(?!`)/g)) {
+      const start = span.index ?? 0;
+      if (start > at) push(false, line.slice(at, start));
+      push(true, span[0]);
+      at = start + span[0].length;
+    }
+    push(false, line.slice(at) + newline);
+  });
+  return parts.map((part) => (part.code ? part.text : fn(part.text))).join('');
 }
 
 export function preprocessPlatformMarkdown(source: string, platform: string): string {
@@ -144,7 +173,7 @@ function gitbookQuotedMarkdown(source: string): string {
 function preprocessSegment(source: string, platform: string): string {
   let out = source.replace(/^(#{1,6}\s+.*?)\s*\{#([A-Za-z][\w:.-]*)\}\s*$/gm, (_, heading, id) => `${heading} ${ANCHOR_OPEN}${id}${ANCHOR_CLOSE}`);
   out = out.replace(/\{\{\s*snippet\.([^}]+?)\s*\}\}/g, (_, token) => `<snippetRef token="${quoteAttr(String(token).trim())}" />`);
-  if (platform === 'gitbook') out = gitbookMdxCompatible(gitbookLiquidBlocks(gitbookMathBraces(gitbookHtmlCodeBlocks(out))));
+  if (platform === 'gitbook') out = gitbookMdxCompatible(gitbookLiteralBraces(gitbookTableAsterisks(gitbookLiquidBlocks(gitbookMathBraces(gitbookHtmlCodeBlocks(gitbookLiteralAngles(out)))))));
   if (platform === 'readme') out = readmeMdxCompatible(out);
   if (platform === 'docusaurus') {
     out = out.replace(/^:::(note|tip|info|warning|danger|caution)(?:\s+([^\n]+))?\s*$/gm, (_, kind, title) => `<admonition kind="${kind}"${title ? ` title="${quoteAttr(String(title).trim())}"` : ''}>`);
@@ -208,6 +237,9 @@ function gitbookHtmlCodeBlocks(segment: string): string {
   });
 }
 
+/** Liquid tags GitBook never closes: the element carries everything in its attributes. */
+const GITBOOK_SELF_CLOSING = new Set(['embed', 'file']);
+
 function gitbookLiquidBlocks(segment: string): string {
   const out: string[] = [];
   // A page that documents a block writes the block's own syntax inside a fence. That is code a
@@ -229,7 +261,7 @@ function gitbookLiquidBlocks(segment: string): string {
     // the embed cannot render. The element carries the URL and is self-closing either way, so the
     // closing tag is dropped rather than left behind — left behind, its `{` reads as the start of an
     // MDX expression and the page will not parse.
-    if (m[2] && m[3] === 'embed') continue;
+    if (m[2] && GITBOOK_SELF_CLOSING.has(m[3])) continue;
     const quote = Array.from({ length: (m[1].match(/>/g) ?? []).length }, () => '>').join(' ');
     const inQuote = (text: string) => (quote && text ? `${quote} ${text}` : quote || text);
     for (let i = out.length - 1; i >= 0; i--) {
@@ -238,7 +270,7 @@ function gitbookLiquidBlocks(segment: string): string {
       out[i] = trimmed;
       if (trimmed.replace(/^[ \t>]*/, '')) break;
     }
-    const tag = m[3] === 'embed' ? `<embed${liquidAttrs(m[4])} />` : m[2] ? `</${m[3]}>` : `<${m[3]}${liquidAttrs(m[4])}>`;
+    const tag = GITBOOK_SELF_CLOSING.has(m[3]) ? `<${m[3]}${liquidAttrs(m[4])} />` : m[2] ? `</${m[3]}>` : `<${m[3]}${liquidAttrs(m[4])}>`;
     out.push(inQuote(''), inQuote(tag), inQuote(''));
   }
   return out.join('\n');
@@ -267,6 +299,49 @@ function autolinksMdxCompatible(segment: string): string {
  * same; a `](<url>)` link destination is valid MDX and is left as written, and an escaped link
  * around an autolink is the link it stands for.
  */
+/**
+ * Angle brackets around a word GitBook does not render as an element are the author's text. Read
+ * as MDX, `gitbook integrations new <dir>` lost `<dir>` from a heading and everything after it from
+ * a paragraph, on a site whose readers see those characters. Runs on the raw Markdown, before Liquid
+ * tags become elements, so only what the source wrote in angle brackets is judged.
+ */
+function gitbookLiteralAngles(segment: string): string {
+  return segment.replace(/<(\/?)([A-Za-z][\w-]*)(?=[\s/>])/g, (match, slash: string, name: string) => (isGitbookHtmlTag(name) ? match : `&lt;${slash}${name}`));
+}
+
+/**
+ * A brace in GitBook prose is the author's character. GitBook is not MDX: `{if} blocks`, a
+ * `{% openapi %}` named inside escaped backticks, `(response) => { … }` in a table cell — read as
+ * MDX every one starts an expression and the page fails to parse, which is how thirty-one pages of
+ * one site were excluded from a run. Runs after the block-level Liquid tags have become elements,
+ * so only braces that are still text are escaped, and never inside code, a tag, or a formula
+ * (`gitbookMathBraces` has already escaped those).
+ *
+ * A paragraph that opens with `import ` or `export ` is prose here too — MDX would read it as ESM
+ * and drop it — so its first letter is written as the character reference it stands for.
+ */
+/**
+ * GitBook writes a required parameter as `<td><code>clientId</code>*</td>` inside an HTML table.
+ * Read as MDX, that `*` opens an emphasis that runs across the cells until the next one and the
+ * table fails to parse. A `*` that touches a tag boundary, or is the only one in its cell, pairs
+ * with nothing and is the character.
+ */
+function gitbookTableAsterisks(segment: string): string {
+  return segment.replace(/<t[dh]\b[^>]*>[\s\S]*?<\/t[dh]>/g, (cell) => {
+    const count = (cell.match(/\*/g) ?? []).length;
+    // a character reference, not a backslash: the cell is read by the HTML adapter, where `\*` would stay two characters
+    return cell.replace(/\*/g, (star, offset: number, whole: string) => (count === 1 || whole[offset - 1] === '>' || whole[offset + 1] === '<' ? '&#42;' : star));
+  });
+}
+
+function gitbookLiteralBraces(segment: string): string {
+  return outsideCode(segment, (text) => text
+    .split(/(<\/?[A-Za-z][^<>]*>)/)
+    .map((part, index) => (index % 2 === 1 ? part : part.replace(/(?<!\\)([{}])/g, '\\$1')))
+    .join('')
+    .replace(/^(import|export)(?=\s)/gm, (_, word: string) => `&#${word.charCodeAt(0)};${word.slice(1)}`));
+}
+
 function gitbookMdxCompatible(segment: string): string {
   return autolinksMdxCompatible(voidElementsMdxCompatible(segment).replace(ESCAPED_AUTOLINK_LINK, (_, label, url) => `[${label}](${url})`));
 }
@@ -558,6 +633,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     switch (node.type) {
       case 'text': return [{ ...base, type: 'text', value: node.value }];
       case 'inlineCode': return [{ ...base, type: 'inlineCode', value: node.value }];
+      case 'footnoteReference': return [{ ...base, type: 'footnoteReference', identifier: String(node.identifier ?? node.label ?? '') }];
       case 'strong': return [{ ...base, type: 'strong', children: inline(node.children ?? [], p) }];
       case 'emphasis': return [{ ...base, type: 'emphasis', children: inline(node.children ?? [], p) }];
       case 'delete': return [{ ...base, type: 'delete', children: inline(node.children ?? [], p) }];
@@ -590,6 +666,32 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         if (name === 'picture') { const picture = pictureImage(node, p); if (picture) return [picture]; }
         if (name === 'source') return [];
         if (name === 'br') return [{ ...base, type: 'break' }];
+        const attribute = (key: string): string | undefined => {
+          const found = (node.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && a.name === key);
+          return typeof found?.value === 'string' ? found.value : undefined;
+        };
+        const plainText = (): string => inlineText(inline(node.children ?? [], p));
+        const escapeHtmlText = (value: string): string => value.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        // Inline HTML any platform's Markdown may carry, read as what it renders: a link, a code
+        // span, a superscript. Left as unknown components, each one was a marker in the output.
+        if (name === 'a' && attribute('href') && opts.platform !== 'dai') return [{ ...base, type: 'link', url: attribute('href')!, title: attribute('title'), children: inline(node.children ?? [], p) }];
+        if (name === 'code' && (node.children ?? []).every((c: any) => c.type === 'text')) return [{ ...base, type: 'inlineCode', value: (node.children ?? []).map((c: any) => String(c.value)).join('') }];
+        // GitBook's inline assistant and search buttons open GitBook's own panels: platform chrome,
+        // dropped here exactly as the block rule drops them when they stand alone.
+        if (opts.platform === 'gitbook' && name === 'button' && ['ask', 'search'].includes(attribute('data-action') ?? '')) return [];
+        if (['sup', 'sub', 'mark', 'u', 'small'].includes(name) && opts.platform !== 'dai') return [{ ...base, type: 'inlineHtml', value: `<${name}>${escapeHtmlText(plainText())}</${name}>` }];
+        if (opts.platform === 'mintlify') {
+          // Mintlify's inline components. An <Icon> is a glyph with no words and no target
+          // equivalent: decoration the page loses. A <Badge> keeps its text as the badge span the
+          // block rule writes. A <Tooltip tip="…"> keeps its text, and the tip as the title a browser
+          // shows on hover, which is what the reader had.
+          if (node.name === 'Icon') return [];
+          if (node.name === 'Badge') return [{ ...base, type: 'inlineHtml', value: `<span className="dai-mig-badge">${escapeHtmlText(plainText())}</span>` }];
+          if (node.name === 'Tooltip') {
+            const tip = attribute('tip');
+            return tip ? [{ ...base, type: 'inlineHtml', value: `<abbr title="${tip.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')}">${escapeHtmlText(plainText())}</abbr>` }] : inline(node.children ?? [], p);
+          }
+        }
         if (name === 'kbd') return [{ ...base, type: 'kbd', children: inline(node.children ?? [], p) }];
         if (opts.platform === 'readme' && node.name === 'Anchor') {
           // ReadMe's link component: its children are the visible text (label repeats it); target only opens a new tab
@@ -954,6 +1056,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
         return [{ ...base, type: 'table', align: node.align ?? undefined, children: rows }];
       }
       case 'thematicBreak': return [{ ...base, type: 'thematicBreak' }];
+      case 'footnoteDefinition': return [{ ...base, type: 'footnoteDefinition', identifier: String(node.identifier ?? node.label ?? ''), children: blocks(node.children ?? [], p) }];
       // Definition targets are consumed by reference nodes, never rendered independently.
       case 'definition': return [];
       case 'html': return [{ ...base, type: 'html', value: node.value ?? '' }];
