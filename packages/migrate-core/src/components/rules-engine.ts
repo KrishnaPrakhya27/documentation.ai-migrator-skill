@@ -96,6 +96,14 @@ interface RestructureHandler { reads: string[]; run: Handler }
 export const EMBED_FALLBACK_TITLE = 'Embedded content';
 
 /**
+ * The title a Step is given when the source states none. GitBook numbers its steps and offers no
+ * title field, so a step whose first line is ordinary prose states no title at all; the contract
+ * requires one, and this is what fills it. Like the frame's fallback it is the migration's word,
+ * not the author's, so the fidelity comparison reads it as no title.
+ */
+export const STEP_FALLBACK_TITLE = 'Step';
+
+/**
  * The player address of a video the source links by its watch or share URL. `youtu.be/<id>`,
  * `youtube.com/watch?v=<id>` and `youtube.com/embed/<id>` are one video; the embed is the spelling
  * that plays in a frame, and the one both sides of the fidelity comparison canonicalise to.
@@ -431,7 +439,7 @@ const HANDLERS: Record<string, RestructureHandler> = {
       ? inlineText(first.children).trim() : '';
     if (boldTitle) return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title: boldTitle }, children: rest, rule: rule.id }], lossy: [`leading bold paragraph "${boldTitle}" became the Step title`] };
     const title = first?.type === 'heading' ? inlineText(first.children).trim() : '';
-    if (!title || first?.type !== 'heading') return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title: 'Step' }, children: node.children, rule: rule.id }], lossy: ['no leading heading; Step title defaulted to "Step"'] };
+    if (!title || first?.type !== 'heading') return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title: STEP_FALLBACK_TITLE }, children: node.children, rule: rule.id }], lossy: ['the step states no title; the contract\'s required title is filled with "Step"'] };
     // the title renders as a heading element, at the source level where the contract has one (h2, h3)
     const titleType = first.depth <= 2 ? 'h2' : 'h3';
     const lossy = [`leading heading "${title}" became the Step title`, ...(first.depth > 3 ? [`heading level ${first.depth} rendered as h3`] : [])];

@@ -1,7 +1,7 @@
 /** Lossless, ID-independent representations used by exact migration gates. */
 import type { Block, DocIR, Inline } from '../ir/types.js';
 import { inlineText } from '../ir/types.js';
-import { EMBED_FALLBACK_TITLE, embedPlayerUrl } from '../components/rules-engine.js';
+import { EMBED_FALLBACK_TITLE, STEP_FALLBACK_TITLE, embedPlayerUrl } from '../components/rules-engine.js';
 
 export type FidelityValue = null | boolean | number | string | FidelityValue[] | { [key: string]: FidelityValue };
 
@@ -183,20 +183,24 @@ function contentProps(props: Record<string, string | number | boolean | null>): 
  * folding it would have read that heading as the update's label.
  */
 function titleFold(props: FidelityValue, children: Block[]): { props: FidelityValue; children: Block[] } {
-  const stated = props as Record<string, FidelityValue>;
+  // A title equal to the one the migration supplies when the source states none says nothing the
+  // component said: it is the contract's required field, filled by us. Dropping it here lets the
+  // fold compare what the component actually states — and an authored title still counts.
+  const all = props as Record<string, FidelityValue>;
+  const stated = Object.fromEntries(Object.entries(all).filter(([key, value]) => !(key === 'title' && value === STEP_FALLBACK_TITLE))) as Record<string, FidelityValue>;
   const [first, ...rest] = children;
-  if (Object.keys(stated).length) return { props, children };
+  if (Object.keys(stated).length) return { props: ordered(stated), children };
   // A step's title is its first line, written either as a heading or — GitBook's usual spelling,
   // since its editor offers a step no title field — as a paragraph that is entirely bold. Both
   // state the same words to a reader, so both fold, and the words still have to match.
   const isBoldLine = first?.type === 'paragraph' && first.children.length === 1 && first.children[0]?.type === 'strong';
-  if (first?.type !== 'heading' && !isBoldLine) return { props, children };
+  if (first?.type !== 'heading' && !isBoldLine) return { props: ordered(stated), children };
   // A bold line's words sit inside the `strong`, not beside it, so they are read through the
   // inline tree rather than off the top-level nodes — which yielded an empty title, and so no fold.
   const words = isBoldLine
     ? cleanText(inlineText(first.children))
     : cleanText(inlineShape(first.children).map((node) => ((node as { value?: string }).value ?? '')).join(' '));
-  if (!words) return { props, children };
+  if (!words) return { props: ordered(stated), children };
   return { props: ordered({ ...stated, title: words }), children: rest };
 }
 
