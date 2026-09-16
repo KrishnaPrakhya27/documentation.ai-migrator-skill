@@ -9,7 +9,9 @@
  */
 import { parse as parseYaml } from 'yaml';
 import { readFileSync } from 'node:fs';
-import type { Block, ComponentNode, DaiComponentNode, DocIR, Inline, QuarantinedNode, RawHtmlNode } from '../ir/types.js';
+import type { Block, ComponentNode, DaiComponentNode, DocIR, Inline, ListItemNode, QuarantinedNode, RawHtmlNode } from '../ir/types.js';
+import { flareTocTree } from '../scrape/madcap-toc.js';
+import type { DiscoveredNavigationNode } from '../scrape/discovery.js';
 import { walkBlocks, inlineText, isBlockWithChildren } from '../ir/types.js';
 import { Ledger } from '../ledger/dispositions.js';
 import { sanitizeHtmlToJsx } from './sanitize.js';
@@ -77,6 +79,8 @@ export interface EngineOptions {
   ledger: Ledger;
   log: DecisionLog;
   iframeHosts?: string[];
+  /** MadCap Flare navigation data frozen with the capture, by URL: the tables of contents a landing page's tile menus draw. */
+  flareData?: ReadonlyMap<string, string>;
 }
 
 interface HandlerResult { blocks: Block[]; lossy?: string[]; /** Links the rule wrote by the operator's decision, recorded in the ledger so verify can tell them from links the source authored. */ declaredLinks?: string[] }
@@ -161,8 +165,42 @@ function blocksText(blocks: readonly Block[], indent = ''): string | undefined {
   return text || undefined;
 }
 
+/** A Flare table of contents as the nested list of links its tile menu draws, cut at the depth the menu declares. */
+function flareTocList(nodes: readonly DiscoveredNavigationNode[], idBase: string, depth: number, maxDepth: number): Block {
+  const items = nodes.map((node, index): ListItemNode => {
+    const id = `${idBase}:${depth}:${index}`;
+    const label = node.type === 'page' ? (node.title ?? node.url) : node.label;
+    const url = node.type === 'page' ? node.url : node.pageUrl;
+    const inline: Inline = url
+      ? { id: `${id}:link`, type: 'link', url, children: [{ id: `${id}:text`, type: 'text', value: label }] }
+      : { id: `${id}:text`, type: 'text', value: label };
+    const children: Block[] = [{ id: `${id}:p`, type: 'paragraph', children: [inline] }];
+    if (node.type === 'group' && node.children.length && depth < maxDepth) children.push(flareTocList(node.children, id, depth + 1, maxDepth));
+    return { id, type: 'listItem', children };
+  });
+  return { id: `${idBase}:list:${depth}`, type: 'list', ordered: false, children: items };
+}
+
 /** Restructure handlers (T3). */
 const HANDLERS: Record<string, RestructureHandler> = {
+  /**
+   * A MadCap Flare tile menu (`<ul data-mc-linked-toc="Data/Tocs/x.js">`) is empty in the HTML and
+   * drawn in the browser from the table of contents it names. Discovery froze that data; the menu
+   * is written as the list of links the reader sees, one level per `data-mc-max-depth`. Without the
+   * data the tile would be a heading over nothing, so the page is held instead.
+   */
+  'linked-toc-to-list': { reads: ['toc', 'tocUrl', 'helpRoot', 'maxDepth'], run: (node, _rule, ctx) => {
+    const tocUrl = typeof node.props.tocUrl === 'string' ? node.props.tocUrl : undefined;
+    const root = typeof node.props.helpRoot === 'string' ? node.props.helpRoot : undefined;
+    if (!tocUrl || !root) return quarantined(node, `linked table of contents ${String(node.props.toc ?? '')} could not be resolved against the page's help system`);
+    if (!ctx.flareData?.has(tocUrl)) return quarantined(node, `linked table of contents ${tocUrl} was not captured with the site; run discover and acquire again on this build`);
+    let tree: { nodes: DiscoveredNavigationNode[]; unresolved: number };
+    try { tree = flareTocTree(tocUrl, root, (url) => ctx.flareData?.get(url)); } catch (error) { return quarantined(node, (error as Error).message); }
+    const declared = Number(node.props.maxDepth);
+    const maxDepth = Number.isInteger(declared) && declared > 0 ? declared : Number.POSITIVE_INFINITY;
+    if (!tree.nodes.length) return quarantined(node, `linked table of contents ${tocUrl} names no entries`);
+    return { blocks: [flareTocList(tree.nodes, node.id, 1, maxDepth)], lossy: tree.unresolved ? [`${tree.unresolved} table-of-contents entries had no chunk data and are not listed`] : [] };
+  } },
   /** Wrapper whose children are cards: <CardGroup cols={3}> → <Columns cols={3}> with Card children. */
   'cards-to-columns': { reads: ['cols', 'columns'], run: (node, rule) => {
     const { allowed, fallback } = columnsPolicy();

@@ -325,3 +325,19 @@ describe('a live Flare site, crawled', () => {
     expect(found.navigationData).toBeUndefined();
   });
 });
+
+describe('linked tables of contents', () => {
+  it('finds the TOCs a page names, resolved against its help system, and fetches each with its chunks', async () => {
+    const { linkedTocUrls, fetchFlareToc } = await import('../src/scrape/madcap-toc.js');
+    const html = '<ul data-mc-linked-toc="Data/Tocs/a.js"></ul><ul data-mc-linked-toc="Data/Tocs/a.js"></ul><ul data-mc-linked-toc="Data/Tocs/b.js"></ul>';
+    expect(linkedTocUrls(html, 'https://h.example.com/developer/')).toEqual(['https://h.example.com/developer/Data/Tocs/a.js', 'https://h.example.com/developer/Data/Tocs/b.js']);
+    const served: Record<string, string> = {
+      'https://h.example.com/developer/Data/Tocs/a.js': "define({numchunks:2,prefix:'a_Chunk',tree:{n:[]}})",
+      'https://h.example.com/developer/Data/Tocs/a_Chunk0.js': 'define({})',
+      'https://h.example.com/developer/Data/Tocs/a_Chunk1.js': 'define({})',
+    };
+    const files = await fetchFlareToc('https://h.example.com/developer/Data/Tocs/a.js', async (url) => ({ status: url in served ? 200 : 404, body: served[url] ?? '' }));
+    expect([...files!.keys()]).toHaveLength(3);
+    expect(await fetchFlareToc('https://h.example.com/developer/Data/Tocs/none.js', async () => ({ status: 404, body: '' }))).toBeUndefined();
+  });
+});

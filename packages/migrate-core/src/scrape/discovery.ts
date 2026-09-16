@@ -11,7 +11,7 @@ import { parseLlmsIndex, type LlmsEntry, type ParsedLlmsIndex } from './publishe
 import { mapConcurrent } from './concurrency.js';
 import { sha256 } from '../session/ids.js';
 import { sourceFingerprint } from './drift.js';
-import { defaultUrlFromHelpSystem, fetchFlareData, flareNavigationFromData, helpSystemRoot, type FlareData } from './madcap-toc.js';
+import { defaultUrlFromHelpSystem, fetchFlareData, fetchFlareToc, flareNavigationFromData, helpSystemRoot, linkedTocUrls, type FlareData } from './madcap-toc.js';
 
 export interface DiscoveredUrl {
   url: string;
@@ -1270,6 +1270,18 @@ export async function discoverLiveSite(input: {
         // read once, and the seed's is the site's navigation; a second one is reported rather than
         // merged, because concatenating two sidebars would state a structure the source does not.
         const flareRoot = helpSystemRoot(response.body, page);
+        // A landing page draws tile menus from tables of contents it names itself, which the
+        // skeleton HTML does not contain: frozen here, they are what convert lists in each tile.
+        if (flareRoot) {
+          for (const tocUrl of linkedTocUrls(response.body, flareRoot)) {
+            if (navigationData.some((file) => file.url === tocUrl)) continue;
+            try {
+              const files = await fetchFlareToc(tocUrl, flareFetch);
+              if (!files) { failures.push({ url: tocUrl, error: `linked table of contents named by ${page} is not served` }); continue; }
+              for (const [dataUrl, body] of files) if (!navigationData.some((file) => file.url === dataUrl)) navigationData.push({ url: dataUrl, body });
+            } catch (error) { failures.push({ url: tocUrl, error: (error as Error).message }); }
+          }
+        }
         if (flareRoot && !flareRoots.has(flareRoot)) {
           flareRoots.add(flareRoot);
           try {

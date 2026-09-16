@@ -65,7 +65,11 @@ function splitDescendantCompounds(selector: string): string[] {
 }
 
 function matchesCompound(el: El, compound: string): boolean {
-  const m = compound.match(/^(\*|[a-z0-9-]+)?(#[A-Za-z0-9_-]+)?((?:\.[A-Za-z0-9_-]+)*)((?:\[[^\]]+\])*)$/i);
+  // `:not(<compound>)` excludes what its argument matches; one level, which is what profiles need
+  const excluded: string[] = [];
+  const positive = compound.replace(/:not\(([^()]+)\)/g, (_, inner: string) => { excluded.push(inner); return ''; });
+  if (excluded.some((inner) => matchesCompound(el, inner))) return false;
+  const m = positive.match(/^(\*|[a-z0-9-]+)?(#[A-Za-z0-9_-]+)?((?:\.[A-Za-z0-9_-]+)*)((?:\[[^\]]+\])*)$/i);
   if (!m) return false;
   const [, tag, idSel, classes, attrs] = m;
   if (tag && tag !== '*' && el.name !== tag.toLowerCase()) return false;
@@ -387,7 +391,10 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
   };
 
   const isParagraphElement = (n: El) => (opts.paragraphSelectors ?? []).some((s) => matchesSelector(n, s));
-  const isBlockish = (n: Dom) => n.type === 'tag' && (!INLINE.has(n.name) || isParagraphElement(n));
+  // An inline element a profile recognises as a component (a link styled as a tile in a card grid) is
+  // a block of its own: left in the inline run it could never reach the recogniser.
+  const isRecognised = (n: Dom) => n.type === 'tag' && (opts.recognisers ?? []).some((r) => matchesSelector(n, r.selector));
+  const isBlockish = (n: Dom) => n.type === 'tag' && (!INLINE.has(n.name) || isParagraphElement(n) || isRecognised(n));
 
   const blocksOf = (nodes: Dom[], path: number[]): Block[] => {
     const out: Block[] = [];
@@ -571,6 +578,9 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
     if (r.contentSelector) content = find(n, r.contentSelector) ?? n;
     if (r.strip?.length) content = { ...content, children: content.children.filter((c) => !(c.type === 'tag' && r.strip!.some((s) => matchesSelector(c, s)))) };
     if (lifted.size) content = without(content, lifted);
+    // `@text` with no selector lifts the element's whole text into a prop (a tile's label as its
+    // card title); the words are not content as well, or the reader sees the label twice.
+    if (Object.values(r.props ?? {}).includes('@text')) content = { ...content, children: [] };
     const styleDeps = (n.attribs.class ?? '').split(/\s+/).filter(Boolean);
     return { id: id(p, `${r.name}:${textOf(n).slice(0, 80)}`), type: 'component', name: r.name, platform: opts.platform, props, children: blocksOf(content.children, [...p, 0]), styleDeps: styleDeps.length ? styleDeps : undefined, src: { file: opts.file } };
   };

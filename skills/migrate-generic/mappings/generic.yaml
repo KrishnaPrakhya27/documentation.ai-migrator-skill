@@ -16,6 +16,21 @@ rules:
     match: { name: MCDropDown }
     to: { name: Expandable, props: { title: $title } }
     note: "MadCap Flare collapsible section; the head's label titles the Expandable and the body becomes its content"
+  - id: generic/card-group
+    tier: T2
+    match: { name: CardGroup }
+    handler: cards-to-columns
+    note: "a grid of cards a profile recognised (MadCap Flare landing-page tiles); the profile states the columns the skin draws"
+  - id: generic/card
+    tier: T2
+    match: { name: Card }
+    to: { name: Card, props: { title: $title, href: $href, icon: $icon, image: $image } }
+    note: "a tile: its label is the card's title and its target its link"
+  - id: generic/madcap-linked-toc
+    tier: T3
+    match: { name: MCLinkedToc }
+    handler: linked-toc-to-list
+    note: "MadCap Flare tile menu drawn from a linked table of contents; written as the list of links the reader sees, from the data discovery froze"
   - id: generic/iframe
     tier: T3
     match: { name: iframe }

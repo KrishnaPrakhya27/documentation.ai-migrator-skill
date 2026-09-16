@@ -162,8 +162,19 @@ export function flareNavigationFromData(pageUrl: string, html: string, data: Fla
   const root = helpSystemRoot(html, pageUrl);
   if (!root) return undefined;
   const tocUrl = tocUrlFor(root, read);
-  const toc = tocUrl === undefined ? undefined : read(tocUrl);
-  if (tocUrl === undefined || toc === undefined) return undefined;
+  if (tocUrl === undefined || read(tocUrl) === undefined) return undefined;
+  const { nodes, unresolved } = flareTocTree(tocUrl, root, read);
+  return { nodes, toc: tocUrl, unresolved };
+}
+
+/**
+ * One table of contents as the tree it draws, from its data files. The site's sidebar is the TOC
+ * its help system declares; a landing page's tile menus are other TOCs the page names with
+ * `data-mc-linked-toc`, drawn by the same code from the same shape of data.
+ */
+export function flareTocTree(tocUrl: string, root: string, read: (url: string) => string | undefined): { nodes: DiscoveredNavigationNode[]; unresolved: number } {
+  const toc = read(tocUrl);
+  if (toc === undefined) throw new Error(`${tocUrl}: table of contents was not captured`);
   const { chunks, tree } = tocShape(tocUrl, toc);
 
   const byIndex = new Map<number, { link: string; title: string; bookmark: string }>();
@@ -201,7 +212,34 @@ export function flareNavigationFromData(pageUrl: string, html: string, data: Fla
     return out;
   };
 
-  return { nodes: walk(tree.n ?? []), toc: tocUrl, unresolved };
+  return { nodes: walk(tree.n ?? []), unresolved };
+}
+
+/** The tables of contents a page draws inside its body (`data-mc-linked-toc`), as absolute URLs. */
+export function linkedTocUrls(html: string, root: string): string[] {
+  const out = new Set<string>();
+  for (const match of html.matchAll(/\bdata-mc-linked-toc=["']([^"']+)["']/g)) {
+    try { out.add(new URL(match[1], root).toString()); } catch { /* not an address */ }
+  }
+  return [...out];
+}
+
+/** A table of contents and every chunk it names, fetched; undefined when the site does not serve it. */
+export async function fetchFlareToc(tocUrl: string, fetch: FlareFetch): Promise<Map<string, string> | undefined> {
+  const data = new Map<string, string>();
+  const load = async (url: string): Promise<string | undefined> => {
+    const response = await fetch(url);
+    if (response.status !== 200) return undefined;
+    data.set(url, response.body);
+    return response.body;
+  };
+  const toc = await load(tocUrl);
+  if (toc === undefined) return undefined;
+  const { chunks } = tocShape(tocUrl, toc);
+  for (const [chunk, chunkUrl] of chunks.entries()) {
+    if (await load(chunkUrl) === undefined) throw new Error(`${chunkUrl}: chunk ${chunk} of ${chunks.length} is missing, so the sidebar cannot be read in full`);
+  }
+  return data;
 }
 
 /**
@@ -226,12 +264,9 @@ export async function fetchFlareData(pageUrl: string, html: string, fetch: Flare
   const tocPath = tocPathFromHelpSystem(helpSystem);
   if (!tocPath) return undefined;
   const tocUrl = new URL(tocPath, root).toString();
-  const toc = await load(tocUrl);
-  if (toc === undefined) return undefined;
-  const { chunks } = tocShape(tocUrl, toc);
-  for (const [chunk, chunkUrl] of chunks.entries()) {
-    if (await load(chunkUrl) === undefined) throw new Error(`${chunkUrl}: chunk ${chunk} of ${chunks.length} is missing, so the sidebar cannot be read in full`);
-  }
+  const toc = await fetchFlareToc(tocUrl, fetch);
+  if (!toc) return undefined;
+  for (const [url, body] of toc) data.set(url, body);
   return data;
 }
 

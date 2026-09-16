@@ -164,11 +164,17 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
         if (page) out.push({ ...pageMetadata(page), ...pageMetadata(node), ...pageLayout(page), title: node.title ?? page.sidebarTitle ?? page.title, path: page.newPath! });
         continue;
       }
-      const children = convert(node.children);
+      // A container whose first page is its own landing page — titled as the container is, or
+      // sitting at the container's own route (`assistant` above `assistant/configure`, or its
+      // `index`/`readme`) — opens on that page: the platform reads it from the container's `path`,
+      // and listing it again as a first child would show the same name twice in the sidebar.
+      const lifted = !node.pageId ? landingChild(node, eligible) : undefined;
+      const remaining = lifted ? node.children.filter((child) => child !== lifted) : node.children;
+      const children = convert(remaining);
       const kind = node.kind ?? 'group';
       // The container's own page, which the platform reads from the container's `path`. A container
       // with nothing left beneath it is simply that page.
-      const own = node.pageId ? eligible.get(node.pageId) : undefined;
+      const own = node.pageId ? eligible.get(node.pageId) : lifted ? eligible.get(lifted.pageId) : undefined;
       if (own && !children.length && !node.href) { out.push({ ...pageMetadata(own), ...pageLayout(own), title: node.label, path: own.newPath! }); continue; }
       if (children.length || node.href) out.push({ [kind]: node.label, ...navigationMetadata(node), ...(own ? { path: own.newPath!, ...pageLayout(own) } : {}), ...(children.length ? collection(children, kind) : {}) });
       }
@@ -290,6 +296,37 @@ export interface DocumentationNavigationMeta { openapi?: GroupOpenapiRef[] }
  * both sides, so a difference between them can only come from the output itself. A connection
  * whose group is absent from the navigation is an error, never a silently skipped entry.
  */
+/** Words compared as a sidebar shows them: case, surrounding space and a trailing colon or period aside. */
+function sameLabel(a: string | undefined, b: string): boolean {
+  const norm = (value: string): string => value.trim().toLowerCase().replace(/[\s]+/g, ' ').replace(/[.:]+$/, '');
+  return !!a && norm(a) === norm(b);
+}
+
+/**
+ * The first page beneath a container when it is the container's own landing page: it carries the
+ * container's name, or its route is the directory its siblings sit in (or that directory's
+ * `index`/`readme`). Anything else stays a child. Only the first page counts: an index page leads.
+ */
+export function landingChild(node: { label: string; children: SourceNavigationNode[] }, eligible: ReadonlyMap<string, TreePage>): Extract<SourceNavigationNode, { type: 'page' }> | undefined {
+  const first = node.children[0];
+  // only a first page, and only when something else stays beneath the container: a container with
+  // one page is the source's structure, and lifting it would collapse the container into a page
+  if (!first || first.type !== 'page' || !eligible.has(first.pageId) || node.children.length < 2) return undefined;
+  const page = eligible.get(first.pageId)!;
+  if (sameLabel(first.title ?? page.sidebarTitle ?? page.title, node.label)) return first;
+  const isIndex = /\/(?:index|readme)$/i.test(page.newPath!);
+  const route = page.newPath!.replace(/\/(?:index|readme)$/i, '');
+  const siblings = node.children.slice(1).flatMap((child) => (child.type === 'page' ? [eligible.get(child.pageId)?.newPath] : []));
+  const dir = (path: string): string => path.replace(/\/[^/]+$/, '');
+  const underIt = siblings.length > 0 && siblings.every((sibling) => sibling && dir(sibling) === route);
+  // the container's own route: named for the container (`assistant` under "Assistant"), or the
+  // index of the directory its siblings sit in; a site's root page under its first group is neither
+  const slug = (value: string): string => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+  const named = slug(route.split('/').pop() ?? '') === slug(node.label);
+  if (underIt && (named || isIndex)) return first;
+  return undefined;
+}
+
 export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlySet<string>, platformMeta: DocumentationNavigationMeta): { navigation: Record<string, unknown> } {
   const written = tree.pages.filter((page) => page.newPath !== undefined && writtenPaths.has(page.newPath));
   let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation, placeUnlisted: !!tree.unlistedPlacement });

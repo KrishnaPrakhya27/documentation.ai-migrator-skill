@@ -49,7 +49,7 @@ import { titleHeading } from './ir/page-title.js';
 import { documentLinks } from './verify/source-truth.js';
 import { progressReporter } from './cli/progress.js';
 import { canonicalHostsPath, loadSnapshot, readJson, readSnapshotPage, resetDir, snapshotPageCount, snapshotPages, sourceFiles, writeJson } from './cli/io.js';
-import { buildSourceEvidence, expectedSidebar, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
+import { buildSourceEvidence, expectedSidebar, frozenNavigationData, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
 import { captureOpenapi, type OpenapiCapture } from './cli/openapi-capture.js';
 import { attachHelpCenterHub, defaultHubPath, helpCenterHubMdx } from './nav/help-center.js';
 import { mergeOperationDocuments, openapiAnchors, parameterLinkRewriter } from './ir/mintlify-openapi.js';
@@ -71,7 +71,7 @@ import { CanonicalHosts, Fetcher, type FetchOptions } from './scrape/fetcher.js'
 import { Firecrawl, readFirecrawlPage, type FirecrawlOptions } from './scrape/firecrawl.js';
 import { getProfile, htmlAdapterOptions, profileHostAliases, type ScrapeProfile } from './scrape/profiles.js';
 import { discoverLiveSite, extractMintlifyNavigation, navigationFromFrozenPages, sidebarObserved, siteNameFromTitleTags, type DiscoveredNavigationNode, type DiscoveryResult } from './scrape/discovery.js';
-import { defaultUrlFromHelpSystem } from './scrape/madcap-toc.js';
+import { defaultUrlFromHelpSystem, helpSystemRoot } from './scrape/madcap-toc.js';
 import { unwrapPublishedMarkdown } from './scrape/published-markdown.js';
 import { extractSeo, seoFrontmatter } from './scrape/seo.js';
 import { acquirePages, acquireFirecrawlPages, acquiredPath, type AcquiredPage } from './scrape/acquire.js';
@@ -791,6 +791,15 @@ async function main() {
           else {
             if (page.html === undefined) fail(`acquired record for ${p.source} holds neither published Markdown nor HTML; run dai-migrate acquire again`);
             const ir = htmlToIr(page.html, htmlAdapterOptions(profile, { platform: tree.platform, file: p.source }));
+            // A Flare tile menu names its table of contents relative to the page's help system; the
+            // absolute address is what convert reads it under.
+            if (tree.platform === 'madcap') {
+              const root = helpSystemRoot(page.html, p.source);
+              walkBlocks(ir.children, (b) => {
+                if (b.type !== 'component' || b.name !== 'MCLinkedToc' || typeof b.props.toc !== 'string' || !root) return;
+                try { b.props.tocUrl = new URL(b.props.toc, root).toString(); b.props.helpRoot = root; } catch { /* left unresolved; the handler holds the page */ }
+              });
+            }
             // No published Markdown here, so the page's own title heading is the one the rendered
             // article states: its H1, or the heading it opens with on a generator that reserves H1
             // for the page masthead.
@@ -1020,7 +1029,7 @@ async function main() {
       // fresh ledger and log per convert run
       for (const f of ['ledger/dispositions.jsonl', 'logging/decisions.jsonl']) { const p = join(workspace, f); if (existsSync(p)) writeFileSync(p, ''); }
       const ledger = new Ledger(workspace); const log = new DecisionLog(workspace, !!v['log-originals']);
-      const engine = new RulesEngine({ platform: tree.platform, mappings: loadMappings(mappingPaths(tree.platform)), plan, ledger, log, iframeHosts: assetsPlan.iframeHosts });
+      const engine = new RulesEngine({ platform: tree.platform, mappings: loadMappings(mappingPaths(tree.platform)), plan, ledger, log, iframeHosts: assetsPlan.iframeHosts, flareData: frozenNavigationData(workspace) });
       // a link to another page follows it to its new route; one to a page this migration does not write is kept, or sent to
       // the source site when the URL plan says so, and listed in report/unmigrated-links.json
       const siteLinks = siteLinksForWorkspace(workspace, tree);
@@ -1337,7 +1346,7 @@ async function main() {
       // cannot express) is not re-reported here as a difference from the source.
       const verifyEngine = new RulesEngine({
         platform: tree.platform, mappings: loadMappings(mappingPaths(tree.platform)), plan: readComponentPlan(workspace),
-        ledger: new Ledger(join(workspace, 'plan')), log: new DecisionLog(join(workspace, 'plan')),
+        ledger: new Ledger(join(workspace, 'plan')), log: new DecisionLog(join(workspace, 'plan')), flareData: frozenNavigationData(workspace),
         iframeHosts: existsSync(join(workspace, 'plan', 'assets.yaml')) ? (parseYaml(readFileSync(join(workspace, 'plan', 'assets.yaml'), 'utf8')) as { iframeHosts?: string[] }).iframeHosts : undefined,
       });
       const sourceEvidence = buildSourceEvidence(workspace, tree);

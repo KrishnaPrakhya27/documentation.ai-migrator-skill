@@ -388,10 +388,11 @@ export const PROFILES: Record<string, ScrapeProfile> = {
     removeSelectors: [
       '.skip-to-content', '.title-bar-container', '.off-canvas', '.search-bar-container', '.central-account-wrapper', 'nav[data-mc-side-nav-menu]', 'footer',
       // Flare renders skin components *inside* the topic body and marks them `nocontent` — its own
-      // statement that they are not content. On a surveyed site these are the topic toolbar's
-      // Previous/Next buttons (406 pages) and the menu skins (18); not one is authored text.
-      // `mc-component` is required alongside so a topic that writes the word itself keeps it.
-      '.mc-component.nocontent',
+      // statement that they are not content: the topic toolbar's Previous/Next buttons and the side
+      // menu skins. `mc-component` is required alongside so a topic that writes the word itself keeps
+      // it. A menu drawn from a linked table of contents is the exception: it is a landing page's
+      // tile content, which the reader sees, and is recognised below rather than dropped.
+      '.mc-component.nocontent:not([data-mc-linked-toc])',
       // The skin's search boxes: one in the nav, one in the landing-page hero. `.search-bar-container`
       // above takes their innards, which would otherwise leave the wrapper and an empty
       // <form class="search"> behind as a component of its own. The hero's heading is left alone:
@@ -406,6 +407,9 @@ export const PROFILES: Record<string, ScrapeProfile> = {
       // The skin's copyright line. It sits inside the content body but outside the topic, and on
       // a surveyed site it reached 427 written pages before the topic selector was tried first.
       '.light-footer', '.copyright',
+      // The landing-page header the skin draws inside the content body: the site logo and the
+      // "Developers Center" link, the same chrome the title bar carries on every other page.
+      '.home-nav-header',
     ],
     // Recorded as the independent witness verification cross-checks; it is empty on a live site,
     // and `navigationData` carries the tree the site actually renders.
@@ -419,6 +423,20 @@ export const PROFILES: Record<string, ScrapeProfile> = {
       // A collapsible section: the head holds the clickable label, the body holds the content.
       { selector: '.MCDropDown', name: 'MCDropDown', props: { title: '@text:.MCDropDownHead' }, strip: ['.MCDropDownHead'] },
       { selector: 'details', name: 'details', props: { summary: '@text:summary' }, strip: ['summary'] },
+      // The landing page's tile grid: a container of links the skin lays out as tiles, four to a row.
+      // Each tile is a card (its label the title, its target the link), and the grid is the columns
+      // they sit in — which is what the reader sees, not a column of underlined links.
+      { selector: '.procedure-tiles', name: 'CardGroup', props: { cols: 4 } },
+      { selector: 'a.procedure-button', name: 'Card', props: { title: '@text', href: '@attr:href' } },
+      // The landing pages' tab strip: one tab per landing page, the current one linking nowhere. The
+      // mobile duplicate of the current tab is the same tab drawn twice. The tab icons are the skin's
+      // decoration and are not carried.
+      { selector: '.tab-wrapper', name: 'CardGroup', props: { cols: 4 }, strip: ['.mobile-content'] },
+      { selector: '.tab-item.current', name: 'Card', props: { title: '@text' } },
+      { selector: '.tab-item', name: 'Card', props: { title: '@text', href: '@attr-or-descendant:href' } },
+      // A tile menu drawn at runtime from a linked table of contents; discovery froze that data and
+      // convert lists the entries it names.
+      { selector: '[data-mc-linked-toc]', name: 'MCLinkedToc', props: { toc: '@attr:data-mc-linked-toc', maxDepth: '@attr:data-mc-max-depth' } },
       // `.MCExpanding` is left whole on purpose. Its hotspot label is authored text and its body is
       // authored content, but the two are siblings of the topic content rather than a head and a
       // body, so there is no summary/content split to make without discarding or re-parenting what
