@@ -1073,14 +1073,27 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), (url, source) => parameterLink(siteLink(url, source))), engine, substitutedComponents);
+        // A link a handler writes is retargeted like any other. Retargeting runs before the engine so
+        // handlers read the routes the rest of the page uses; it runs again after them because a
+        // handler can write links of its own — a MadCap tile menu is drawn from the table of contents
+        // it names, and those are links between pages too. A route already written resolves to itself,
+        // so only the handler's new links move, and both sides of the comparison are read the same way.
+        const sourceLink = (url: string, source?: string) => parameterLink(siteLink(url, source));
+        const sourcePrepared = retargetDocLinks(applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), sourceLink), engine, substitutedComponents), sourceLink);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
+        // The page's links are retargeted twice, so a link that lands outside the migration is recorded
+        // once: the report counts links, not passes over them.
+        const recorded = new Set<string>();
         const recordSiteLink = (url: string, source?: string): string => {
           const outcome = resolveSiteLink(url, source);
-          if (outcome && outcome.kind !== 'route') unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
+          if (outcome && outcome.kind !== 'route' && !recorded.has(url)) {
+            recorded.add(url);
+            unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
+          }
           return outcome?.target ?? url;
         };
-        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(withSnippets, manifest), (url, source) => parameterLink(recordSiteLink(url, source))));
+        const resolvedLink = (url: string, source?: string) => parameterLink(recordSiteLink(url, source));
+        const resolved = retargetDocLinks(engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(withSnippets, manifest), resolvedLink)), resolvedLink);
         const sourceSnapshot = authoredContentSnapshot(sourcePrepared);
         const resolvedSnapshot = authoredContentSnapshot(resolved);
         const pass = fidelityEqual(sourceSnapshot, resolvedSnapshot);
