@@ -38,6 +38,30 @@ const MDX_TEXT_ESCAPES: Array<[RegExp, string]> = [
 
 
 
+/**
+ * Props a renderer reads as strings. The platform compiles a fence's meta as the props of `<pre>`,
+ * so a bare `className` becomes `className={true}`, and its code block calls `className.match`:
+ * the page answers 500. Mintlify's own `mdx className example` label did exactly that.
+ */
+const STRING_READ_PROPS = new Set(['className', 'class', 'style', 'children', 'key', 'ref', 'dangerouslySetInnerHTML', 'meta']);
+/** A run of JSX attributes with plain string values, nothing else: what `<pre META />` can parse. */
+const PLAIN_JSX_ATTRIBUTES = /^(?:\s*[A-Za-z_][\w.-]*(?:="[^"<>{}&]*")?)*\s*$/;
+
+/**
+ * The meta a fence is written with. Meta that parses as plain attributes and names no prop the
+ * renderer reads as a string is written as the source stated it. Anything else - meta that is not
+ * JSX, holds an expression, or names such a prop - would fail to compile or crash the page, so it is
+ * carried whole in one quoted `meta` prop, which the reader unwraps back to the same text.
+ */
+export function fenceMeta(meta: string): string {
+  const names = PLAIN_JSX_ATTRIBUTES.test(meta) ? [...meta.matchAll(/(?:^|\s)([A-Za-z_][\w.-]*)(?==|\s|$)/g)].map((m) => m[1]) : undefined;
+  if (names && !names.some((name) => STRING_READ_PROPS.has(name))) return meta;
+  // Encoded twice: once for the JSX attribute the platform parses, and once more for the Markdown
+  // info string, which decodes character references before that parse ever sees them.
+  const jsx = meta.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;');
+  return `meta="${jsx.replace(/&/g, '&amp;')}"`;
+}
+
 export function escapeText(s: string): string {
   let out = s;
   for (const [re, rep] of MDX_TEXT_ESCAPES) out = out.replace(re, rep);
@@ -49,7 +73,10 @@ export function propValue(v: string | number | boolean | null): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === 'number') return `{${v}}`;
   if (typeof v === 'boolean') return v ? '{true}' : '{false}';
-  return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '&quot;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;').replace(/[\r\n]/g, ' ')}"`;
+  // `<` and `>` as character references too: the platform's preprocessor reads a `<` inside a quoted
+  // value as a tag opening and then mangles the next expression on the line (`required={true}`
+  // became `required=&#123;true}`), and the page failed to compile. MDX decodes them to the same text.
+  return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '&quot;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\r\n]/g, ' ')}"`;
 }
 
 function markdownUrl(url: string, kind: 'link' | 'resource'): string | undefined {
@@ -187,7 +214,7 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
         const lang = (b.lang ?? '').replace(/[^A-Za-z0-9_+.#-]/g, '');
         const title = b.title?.replace(/["\r\n`~]/g, ' ').trim();
         const meta = b.meta?.replace(/[\r\n`~]/g, ' ').trim();
-        out.push(`${fence}${lang}${title ? ` title="${title}"` : ''}${meta ? ` ${meta}` : ''}\n${b.value}\n${fence}`);
+        out.push(`${fence}${lang}${title ? ` title="${title}"` : ''}${meta ? ` ${fenceMeta(meta)}` : ''}\n${b.value}\n${fence}`);
         break;
       }
       case 'blockquote': out.push(blocksToMdx(b.children, opts).split('\n').map((l) => `> ${l}`).join('\n')); break;

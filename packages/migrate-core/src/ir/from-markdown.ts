@@ -42,6 +42,11 @@ export interface MarkdownAdapterOptions {
 }
 
 /** Removes the platform's theming directives from a fence info string, returning undefined when nothing authored remains. */
+/** The character references fenceMeta writes, read back to the characters. */
+function decodeMetaReferences(value: string): string {
+  return value.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#123;/g, '{').replace(/&#125;/g, '}').replace(/&amp;/g, '&');
+}
+
 export function stripPlatformCodeMeta(meta: string | undefined, patterns: string[] | undefined): string | undefined {
   if (!meta || !patterns?.length) return meta;
   let out = meta;
@@ -1049,7 +1054,10 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
           const api = gitbookOpenApiBlocks(String(node.value ?? ''), { file: scope, markdown: (text, key) => markdownToIr(text, { platform: opts.platform, file: `${scope}:${key}`, pageId: opts.pageId, codeMetaStrip: opts.codeMetaStrip }).children });
           if (api) return api;
         }
-        const sourceMeta = node.meta ?? undefined;
+        // Target MDX carries meta the platform could not take as props inside one quoted `meta`
+        // prop (see fenceMeta); reading this tool's own output unwraps it back to the text it held.
+        const wrapped = opts.platform === 'dai' ? /^meta="([^"]*)"$/.exec((node.meta ?? '').trim()) : null;
+        const sourceMeta = wrapped ? decodeMetaReferences(wrapped[1]) : node.meta ?? undefined;
         const meta = stripPlatformCodeMeta(sourceMeta, opts.codeMetaStrip);
         return [{ ...base, type: 'code', lang: node.lang ?? undefined, meta, ...(sourceMeta !== undefined && sourceMeta !== meta ? { sourceMeta } : {}), value: node.value ?? '' }];
       }
