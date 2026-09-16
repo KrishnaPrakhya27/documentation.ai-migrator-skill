@@ -9,7 +9,8 @@ import {
   dropExcludedAssets,
   type AssetManifest,
 } from '../src/assets/manifest.js';
-import { assertAssetsHosted } from '../src/assets/stage.js';
+import { assertAssetsHosted, runAssetsStage } from '../src/assets/stage.js';
+import { readManifest } from '../src/assets/manifest.js';
 import { readScopeDecisions, ensureScopeDecisionsFile } from '../src/evidence/scope.js';
 import type { DocIR } from '../src/ir/types.js';
 
@@ -112,6 +113,21 @@ describe('approved asset exclusions', () => {
       ] as any,
     } as DocIR;
     expect(JSON.stringify(dropExcludedAssets(doc, m).children)).not.toContain('light-dark-toggle.gif');
+  });
+
+  it('persists the decision, so convert and verify — which read plan/assets.json — see the asset as decided', async () => {
+    const ws = workspace();
+    const doc = {
+      pageId: 'p', platform: 'gitbook', source: 'https://gitbook.com/docs/changelog/2023-product-updates',
+      frontmatter: { title: 'T' }, children: [{ id: 'i', type: 'image', url: BIG, alt: 'toggle' }],
+    } as unknown as DocIR;
+    // no fetcher: the asset cannot be hosted, which exact mode refuses unless a person decided it
+    await expect(runAssetsStage({ workspace: ws, docs: [doc], fidelityMode: 'exact', provider: { workspace: ws, provider: 'none' } })).rejects.toThrow(/1 of them has none/);
+    const result = await runAssetsStage({ workspace: ws, docs: [doc], fidelityMode: 'exact', provider: { workspace: ws, provider: 'none' }, excluded: DECISION });
+    expect(result.unhosted).toEqual([]);
+    const onDisk = readManifest(ws);
+    expect(excludedAssets(onDisk).map((entry) => entry.sourceUrls[0])).toEqual([BIG]);
+    expect(unhostedAssets(onDisk)).toEqual([]);
   });
 
   it('reads the decisions from plan/scope-decisions.yaml and validates them', () => {

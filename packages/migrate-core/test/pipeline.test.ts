@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -720,6 +721,27 @@ describe('gate semantics', () => {
   const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
   const gateInput = (workspace: string, overrides: Partial<GateInput> = {}): GateInput => ({ workspace, outputDir: join(workspace, 'output'), sourceDocs: [], treePages: [], quarantinedPages: new Set(), excludedPages: new Set(), unreviewed: 0, pinnedContractVersion: '0.1.0', fidelityMode: 'exact', ...overrides });
   const gate = (gates: ReturnType<typeof runGates>, id: string) => gates.find((g) => g.id === id)!;
+
+  it('proves a captured OpenAPI spec where convert writes it and the platform reads it: api-reference/', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'dai-openapi-gate-')); ensureWorkspace(ws);
+    const url = 'https://petstore3.swagger.io/api/v3/openapi.json';
+    const file = `${createHash('sha256').update(url).digest('hex')}.json`;
+    const source = '{"openapi":"3.0.3","info":{"title":"Pets","version":"1"},"paths":{}}';
+    const compiled = source;
+    const digest = (text: string) => createHash('sha256').update(text).digest('hex');
+    mkdirSync(join(ws, 'source-cache', 'openapi'), { recursive: true });
+    writeFileSync(join(ws, 'source-cache', 'openapi', `${digest(url)}.source`), source);
+    writeFileSync(join(ws, 'inventory', 'openapi.json'), JSON.stringify({ version: 1, roots: [url], operations: [], documents: [{ source: url, sourceHash: digest(source), outputHash: digest(compiled), file, references: [] }] }));
+    const pinned = digest(readFileSync(join(ws, 'inventory', 'openapi.json'), 'utf8'));
+    const specGate = () => gate(runGates(gateInput(ws, { pinnedOpenapi: pinned })), 'openapi-preserved');
+    // the spec written only under the old `openapi/` folder is not where Documentation.AI reads it
+    mkdirSync(join(ws, 'output', 'openapi'), { recursive: true });
+    writeFileSync(join(ws, 'output', 'openapi', file), compiled);
+    expect(specGate()).toMatchObject({ status: 'fail', samples: [`${url}: output spec missing or changed`] });
+    mkdirSync(join(ws, 'output', 'api-reference'), { recursive: true });
+    writeFileSync(join(ws, 'output', 'api-reference', file), compiled);
+    expect(specGate()).toMatchObject({ status: 'pass' });
+  });
 
   it('validates page-relative and component links from parsed output rather than only Markdown-link text', () => {
     const ws = mkdtempSync(join(tmpdir(), 'dai-link-gates-')); ensureWorkspace(ws);

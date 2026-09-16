@@ -6,7 +6,7 @@
  */
 import type { DocIR } from '../ir/types.js';
 import type { Fetcher } from '../scrape/fetcher.js';
-import { applyAssetExclusions, collectAssets, describeAssetEntry, unhostedAssets, type AssetEntry, type AssetManifest } from './manifest.js';
+import { applyAssetExclusions, collectAssets, describeAssetEntry, unhostedAssets, writeManifest, type AssetEntry, type AssetManifest } from './manifest.js';
 import { ingestAssets, type AssetProviderOptions } from './providers.js';
 
 export type FidelityMode = 'exact' | 'permissive';
@@ -56,7 +56,13 @@ export async function runAssetsStage(options: AssetsStageOptions): Promise<Asset
   const manifest = await ingestAssets(collected, options.provider);
   // Applied before the gate: an approved exclusion is what lets an unhostable asset through, and
   // applying it after the check would make the approval decorative.
-  if (options.excluded?.length) applyAssetExclusions(manifest, options.excluded);
+  if (options.excluded?.length) {
+    applyAssetExclusions(manifest, options.excluded);
+    // Persisted, not only applied: convert drops an excluded asset's references and verify counts it
+    // as decided by reading plan/assets.json. Applied in memory alone, the stage passed while the
+    // page kept pointing at the source host and the gate still reported the asset as failed.
+    writeManifest(options.workspace, manifest);
+  }
   if (options.fidelityMode === 'exact') assertAssetsHosted(manifest, 'assets');
   return { manifest, unhosted: unhostedAssets(manifest) };
 }

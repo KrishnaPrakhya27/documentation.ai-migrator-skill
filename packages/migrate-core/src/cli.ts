@@ -1148,14 +1148,16 @@ async function main() {
       }
       const declaredByUrl = [...new Map(operations.filter((operation) => !operation.document).map((operation) => [operation.spec, operation.specUrl ?? operation.spec])).entries()];
       writeJson(join(workspace, 'report', 'openapi-declared.json'), declaredByUrl.map(([file, url]) => ({ file: `api-reference/${file}`, url })));
-      const unresolvedSpecs = declaredByUrl.filter(([file]) => !existsSync(join(outDir, 'api-reference', file)));
-      if (unresolvedSpecs.length) console.log(`· ${unresolvedSpecs.length} OpenAPI spec(s) that pages reference by URL are not in the output; supply them with acquire --openapi <url> so those endpoint pages render: ${unresolvedSpecs.slice(0, 3).map(([, url]) => url).join(', ')}`);
       writeJson(join(workspace, 'report', 'unmigrated-links.json'), unmigratedLinks);
+      // The captured specs are written first, so the check below names only a spec nothing supplied:
+      // checking before writing reported every captured spec as missing.
       if (s.hashes.openapi) {
         const specs = join(workspace, 'inventory', 'openapi.json');
         if (fileHash(specs) !== s.hashes.openapi) fail('OpenAPI manifest changed after acquisition');
         writeSpecOutput(workspace, readJson<SpecManifest>(specs), outDir);
       }
+      const unresolvedSpecs = declaredByUrl.filter(([file]) => !existsSync(join(outDir, 'api-reference', file)));
+      if (unresolvedSpecs.length) console.log(`· ${unresolvedSpecs.length} OpenAPI spec(s) that pages reference by URL are not in the output; supply them with acquire --openapi <url> so those endpoint pages render: ${unresolvedSpecs.slice(0, 3).map(([, url]) => url).join(', ')}`);
       s.hashes.componentPlan = fileHash(join(workspace, 'plan', 'component-plan.yaml'));
       s.hashes.urlPlan = fileHash(join(workspace, 'plan', 'urls.yaml'));
       s.hashes.assetPlan = fileHash(join(workspace, 'plan', 'assets.yaml'));

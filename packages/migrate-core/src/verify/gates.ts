@@ -31,7 +31,7 @@ import type { ScrapeProfile } from '../scrape/profiles.js';
 import { requireSourceManifest, sourceUniverseProblems } from '../evidence/verify.js';
 import { requireAcquisition } from '../evidence/acquisition.js';
 import { inapplicableProofs } from '../evidence/applicability.js';
-import type { SpecManifest } from '../openapi/graph.js';
+import { specOutputPath, type SpecManifest } from '../openapi/graph.js';
 
 export type GateStatus = 'pass' | 'fail' | 'not-run' | 'inapplicable';
 export interface GateResult { id: string; status: GateStatus; detail: string; count?: number; samples?: string[] }
@@ -484,7 +484,8 @@ export function runGates(input: GateInput): GateResult[] {
       for (const spec of specs.documents) {
         if (spec.file !== `${sha256(spec.source)}.json`) { specProblems.push('OpenAPI manifest has an invalid file path'); continue; }
         const source = join(input.workspace, 'source-cache', 'openapi', `${sha256(spec.source)}.source`);
-        const output = join(input.outputDir, 'openapi', spec.file);
+        // Where writeSpecOutput puts it, and where Documentation.AI reads a page's `openapi:` spec from.
+        const output = join(input.outputDir, specOutputPath(spec.file));
         if (!existsSync(source) || sha256(readFileSync(source)) !== spec.sourceHash) specProblems.push(`${spec.source}: frozen spec changed`);
         if (!existsSync(output) || sha256(readFileSync(output)) !== spec.outputHash) specProblems.push(`${spec.source}: output spec missing or changed`);
       }
