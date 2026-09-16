@@ -123,12 +123,18 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     const reason = page.reason ?? 'no reason recorded';
     byReason.set(reason, [...(byReason.get(reason) ?? []), page]);
   }
+  // A page someone already agreed to leave out, with their name on it, is not a question for the
+  // customer again; one the plan dropped with no recorded decision still is.
+  const agreed = new Set(readScopeDecisions(workspace).excluded.map((entry) => entry.pageId));
   for (const [reason, pages] of [...byReason].sort((a, b) => b[1].length - a[1].length)) {
+    const decided = pages.every((page) => agreed.has(page.id));
     shortfalls.push({
       heading: `${pages.length} page${pages.length === 1 ? '' : 's'} not migrated — ${SKIP_REASON_LANGUAGE[reason] ?? reason}`,
-      explanation: 'These exist in your source but were not carried over for the reason above. If any belong in the new site, they can be added.',
+      explanation: decided
+        ? 'Left out as agreed during the scope review. If any of them should be on the new site, they can still be added.'
+        : 'These exist in your source but were not carried over for the reason above. If any belong in the new site, they can be added.',
       ...capped(pages.map(pageLabel)),
-      needsYou: true,
+      needsYou: !decided,
     });
   }
 

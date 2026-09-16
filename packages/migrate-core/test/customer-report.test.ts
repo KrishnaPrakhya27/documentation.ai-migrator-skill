@@ -206,3 +206,15 @@ describe('a report the customer can read without alarm', () => {
     expect(unlisted.needsYou).toBe(false);
   });
 });
+
+describe('pages already agreed to be left out', () => {
+  it('are reported as agreed, not as a new question', () => {
+    const dir = workspace((w) => writeFileSync(join(w, 'plan', 'scope-decisions.yaml'),
+      'excluded:\n  - pageId: gone\n    sourceId: https://docs.example.com/gone\n    reason: separate help system\n    approvedBy: someone\n    approvedAt: 2026-09-16T00:00:00.000Z\nsubstituted: []\nhelpSystems: []\n'));
+    const report = build(dir, { pages: [page('a'), page('gone', { migrate: false, reason: 'help system out of scope' })] }, allPassing());
+    const skipped = report.shortfalls.find((shortfall) => shortfall.heading.includes('not migrated'))!;
+    expect(skipped.heading).toBe('1 page not migrated — part of a separate help system, to be migrated on its own');
+    expect(skipped.needsYou).toBe(false);
+    expect(skipped.explanation).toContain('as agreed');
+  });
+});
