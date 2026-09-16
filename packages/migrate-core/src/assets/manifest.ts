@@ -353,28 +353,36 @@ export function rewriteAssetRefs(doc: DocIR, m: AssetManifest): DocIR {
   };
 }
 
+/** The manifest entry for a page's reference to an asset a person decided not to carry, if it is one. */
+export function excludedAssetEntry(m: AssetManifest, url: string, source?: string): AssetEntry | undefined {
+  const resolved = resolveAssetUrl(url, source);
+  const key = m.byUrl[resolved] ?? m.byUrl[url];
+  const entry = key ? m.entries[key] : Object.values(m.entries).find((e) => e.sourceUrls.includes(resolved) || e.sourceUrls.includes(url));
+  return entry?.excluded ? entry : undefined;
+}
+
 /**
  * Removes every reference to an excluded asset. Exact output states no media it does not host and
  * points at no source host, so the reference goes rather than degrading into a dead or external
  * URL. A figure loses its image and therefore the figure; a paragraph keeps the words around it.
  */
-export function dropExcludedAssets(doc: DocIR, m: AssetManifest): DocIR {
-  const isExcluded = (url: string): boolean => {
-    const resolved = resolveAssetUrl(url, doc.source);
-    const key = m.byUrl[resolved] ?? m.byUrl[url];
-    const entry = key ? m.entries[key] : Object.values(m.entries).find((e) => e.sourceUrls.includes(resolved) || e.sourceUrls.includes(url));
-    return !!entry?.excluded;
+export function dropExcludedAssets(doc: DocIR, m: AssetManifest, onDrop?: (node: { id: string }, entry: AssetEntry) => void): DocIR {
+  const excludedEntry = (url: string): AssetEntry | undefined => excludedAssetEntry(m, url, doc.source);
+  const dropped = (node: { id: string }, url: string): boolean => {
+    const entry = excludedEntry(url);
+    if (entry) onDrop?.(node, entry);
+    return !!entry;
   };
   const inlines = (nodes: Inline[]): Inline[] => nodes.flatMap((node): Inline[] => {
-    if (node.type === 'image' && isExcluded(node.url)) return [];
+    if (node.type === 'image' && dropped(node, node.url)) return [];
     return ['children' in node && Array.isArray((node as { children?: Inline[] }).children)
       ? ({ ...node, children: inlines((node as unknown as { children: Inline[] }).children) } as Inline)
       : node];
   });
   const strip = (blocks: Block[]): Block[] => blocks.flatMap((block): Block[] => {
     switch (block.type) {
-      case 'image': return isExcluded(block.url) ? [] : [block];
-      case 'figure': return isExcluded(block.image.url) ? [] : [block];
+      case 'image': return dropped(block, block.url) ? [] : [block];
+      case 'figure': return dropped(block, block.image.url) ? [] : [block];
       case 'paragraph': case 'heading': return [{ ...block, children: inlines(block.children) }];
       case 'list': return [{ ...block, children: block.children.map((item) => ({ ...item, children: strip(item.children) })) }];
       case 'blockquote': case 'footnoteDefinition': case 'dai': case 'component':

@@ -1119,7 +1119,7 @@ async function main() {
           if (outcome && outcome.kind !== 'route') unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
           return outcome?.target ?? url;
         };
-        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(dropExcludedAssets(withSnippets, manifest), manifest), (url, source) => parameterLink(recordSiteLink(url, source))));
+        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(dropExcludedAssets(withSnippets, manifest, (node, entry) => ledger.excluded(doc.pageId, node.id, `asset not carried by approved decision: ${entry.excluded!.reason}`, `decision:${entry.excluded!.approvedBy}`)), manifest), (url, source) => parameterLink(recordSiteLink(url, source))));
         const sourceSnapshot = authoredContentSnapshot(sourcePrepared);
         const resolvedSnapshot = authoredContentSnapshot(resolved);
         const pass = fidelityEqual(sourceSnapshot, resolvedSnapshot);

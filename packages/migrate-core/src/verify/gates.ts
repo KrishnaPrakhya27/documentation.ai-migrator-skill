@@ -15,7 +15,7 @@ import { redirectProblems } from '../urls/redirect-graph.js';
 import type { SiteLinks } from '../urls/site-links.js';
 import { sha256 } from '../session/ids.js';
 import { isSafeUrl } from '../components/sanitize.js';
-import { readManifest, type AssetManifest } from '../assets/manifest.js';
+import { readManifest, type AssetManifest, excludedAssetEntry } from '../assets/manifest.js';
 import { markdownToIr } from '../ir/from-markdown.js';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
@@ -553,7 +553,9 @@ export function runGates(input: GateInput): GateResult[] {
   const sourceBlocks = new Map<string, Block>();
   /** Nodes inside a chrome element: a rule that drops the element drops them with it. */
   const chromeContent = new Set<string>();
-  for (const { doc } of input.sourceDocs) walkBlocks(doc.children, (n) => {
+  // Read once: sourceDocs may be a single-pass iterable.
+  const pageSource = new Map<string, string | undefined>();
+  for (const { doc } of input.sourceDocs) walkBlocks((pageSource.set(doc.pageId, doc.source), doc.children), (n) => {
     ids.push({ pageId: doc.pageId, nodeId: n.id }); sourceBlocks.set(`${doc.pageId}:${n.id}`, n);
     if (n.type === 'component' && isHtmlChromeNode(n)) walkBlocks(n.children, (inner) => { chromeContent.add(`${doc.pageId}:${inner.id}`); });
   });
@@ -566,7 +568,16 @@ export function runGates(input: GateInput): GateResult[] {
   const exact = (input.fidelityMode ?? 'exact') === 'exact';
   // A rule may drop script and style elements, which carry nothing the author wrote; any other exclusion, whoever made it, removes authored content.
   const exclusions = effectiveExclusions(dispositions, ids);
-  const authoredExclusions = exclusions.filter((d) => !(d.reviewer !== undefined && RULE_REVIEWER.test(d.reviewer) && (isHtmlChromeNode(sourceBlocks.get(`${d.pageId}:${d.sourceNodeId}`)) || chromeContent.has(`${d.pageId}:${d.sourceNodeId}`))));
+  // An image whose asset a person decided not to carry (plan/scope-decisions.yaml `assets`) is the
+  // one authored exclusion exact mode accepts, and it is read from the evidence, not the reviewer
+  // string: the node must be an image or figure and the manifest must mark its asset as excluded.
+  const decidedManifest = readManifest(input.workspace);
+  const decidedAsset = (d: { pageId: string; sourceNodeId: string }): boolean => {
+    const node = sourceBlocks.get(`${d.pageId}:${d.sourceNodeId}`);
+    const url = node?.type === 'image' ? node.url : node?.type === 'figure' ? node.image.url : undefined;
+    return url !== undefined && !!excludedAssetEntry(decidedManifest, url, pageSource.get(d.pageId));
+  };
+  const authoredExclusions = exclusions.filter((d) => !(d.reviewer !== undefined && RULE_REVIEWER.test(d.reviewer) && (isHtmlChromeNode(sourceBlocks.get(`${d.pageId}:${d.sourceNodeId}`)) || chromeContent.has(`${d.pageId}:${d.sourceNodeId}`))) && !decidedAsset(d));
   gates.push({
     id: 'no-authored-exclusions',
     status: !exact ? 'not-run' : authoredExclusions.length ? 'fail' : 'pass',

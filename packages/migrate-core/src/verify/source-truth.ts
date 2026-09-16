@@ -23,7 +23,7 @@ import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { authoredContentSnapshot, firstFidelityDifference } from './fidelity.js';
 import { inlineText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
 import { retargetDocLinks, siteLinkTarget, type SiteLinks } from '../urls/site-links.js';
-import { rewriteAssetRefs, type AssetManifest } from '../assets/manifest.js';
+import { rewriteAssetRefs, type AssetManifest, dropExcludedAssets } from '../assets/manifest.js';
 
 /** One page as the source served it, paired with the file the migration wrote for it. */
 export interface RawSourcePage {
@@ -151,7 +151,10 @@ export function sourceContentExact(page: RawSourcePage, platform: string, profil
   // source is put through the same manifest the conversion used, so the comparison is between what
   // the two sides *say* and not between where the bytes are served from; an asset the manifest does
   // not know keeps its source URL and still fails.
-  const hosted = assets ? rewriteAssetRefs({ ...source, source: page.url ?? source.source }, assets) : source;
+  // An asset a person decided not to carry was removed from the output with its reference; the
+  // source is read through that same decision, so the approved loss is not a difference while
+  // any other missing image still is.
+  const hosted = assets ? rewriteAssetRefs(dropExcludedAssets({ ...source, source: page.url ?? source.source }, assets), assets) : source;
   // The mapping rules the operator approved at gate 2 declare which authored material does not
   // survive: a wrapper's own props, a chrome subtree, a named prop the contract cannot express.
   // The source is read through those same declarations, so a reviewed loss is not reported as a

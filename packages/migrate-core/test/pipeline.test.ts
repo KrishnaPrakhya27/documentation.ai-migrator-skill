@@ -722,6 +722,24 @@ describe('gate semantics', () => {
   const gateInput = (workspace: string, overrides: Partial<GateInput> = {}): GateInput => ({ workspace, outputDir: join(workspace, 'output'), sourceDocs: [], treePages: [], quarantinedPages: new Set(), excludedPages: new Set(), unreviewed: 0, pinnedContractVersion: '0.1.0', fidelityMode: 'exact', ...overrides });
   const gate = (gates: ReturnType<typeof runGates>, id: string) => gates.find((g) => g.id === id)!;
 
+  it('accepts as an exclusion only an image whose asset a person decided not to carry', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'dai-decided-asset-')); ensureWorkspace(ws);
+    const decided = 'https://files.example/o/huge.gif';
+    const other = 'https://files.example/o/other.png';
+    const doc: DocIR = { pageId: 'p', platform: 'gitbook', source: 'https://docs.example/changelog', frontmatter: { title: 'T' }, children: [
+      { id: 'a', type: 'image', url: decided, alt: '' },
+      { id: 'b', type: 'image', url: other, alt: '' },
+    ] as any };
+    const entry = (url: string, excluded?: object) => ({ hash: url, sourceUrls: [url], references: [], status: 'failed' as const, altMissing: 0, ...(excluded ? { excluded } : {}) });
+    writeFileSync(join(ws, 'plan', 'assets.json'), JSON.stringify({ provider: 's3', byUrl: { [decided]: decided, [other]: other }, entries: { [decided]: entry(decided, { reason: 'too large', approvedBy: 'A Person' }), [other]: entry(other) } }));
+    const ledger = new Ledger(ws);
+    ledger.excluded('p', 'a', 'asset not carried by approved decision: too large', 'decision:A Person');
+    expect(gate(runGates(gateInput(ws, { sourceDocs: [{ doc }] })), 'no-authored-exclusions')).toMatchObject({ status: 'pass', count: 0 });
+    // the same reviewer string on an image nobody decided about is still an authored exclusion
+    ledger.excluded('p', 'b', 'dropped', 'decision:A Person');
+    expect(gate(runGates(gateInput(ws, { sourceDocs: [{ doc }] })), 'no-authored-exclusions')).toMatchObject({ status: 'fail', count: 1 });
+  });
+
   it('proves a captured OpenAPI spec where convert writes it and the platform reads it: api-reference/', () => {
     const ws = mkdtempSync(join(tmpdir(), 'dai-openapi-gate-')); ensureWorkspace(ws);
     const url = 'https://petstore3.swagger.io/api/v3/openapi.json';
