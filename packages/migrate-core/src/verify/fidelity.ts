@@ -191,7 +191,11 @@ function titleFold(props: FidelityValue, children: Block[]): { props: FidelityVa
   // state the same words to a reader, so both fold, and the words still have to match.
   const isBoldLine = first?.type === 'paragraph' && first.children.length === 1 && first.children[0]?.type === 'strong';
   if (first?.type !== 'heading' && !isBoldLine) return { props, children };
-  const words = cleanText(inlineShape(first.children).map((node) => ((node as { value?: string }).value ?? '')).join(' '));
+  // A bold line's words sit inside the `strong`, not beside it, so they are read through the
+  // inline tree rather than off the top-level nodes — which yielded an empty title, and so no fold.
+  const words = isBoldLine
+    ? cleanText(inlineText(first.children))
+    : cleanText(inlineShape(first.children).map((node) => ((node as { value?: string }).value ?? '')).join(' '));
   if (!words) return { props, children };
   return { props: ordered({ ...stated, title: words }), children: rest };
 }
