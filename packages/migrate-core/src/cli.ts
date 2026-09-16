@@ -706,7 +706,14 @@ async function main() {
       if (s.hashes.acquisition) {
         if (v.refresh) fail('acquisition is pinned; use a new workspace for refreshed source bytes');
         requireAcquisition(workspace, sourceManifest, s.hashes.acquisition, tree.pages);
-        ok('completed acquisition matches its session pin; no requests needed'); break;
+        // A spec a page references by URL is only known once the pages are read, which is after they
+        // were frozen. Supplying it then captures it (its own pin, separate from the pages'); the
+        // frozen pages are not touched, and a spec already captured is read back from its pin.
+        if (v.openapi?.length) {
+          s.hashes.openapi = (await captureOpenapiFor(workspace, s, tree)).hash;
+          writeSession(workspace, s);
+        }
+        ok('completed acquisition matches its session pin; no page requests needed'); break;
       }
       const profile = getProfile(v.profile ?? tree.platform);
       s.hashes.openapi = (await captureOpenapiFor(workspace, s, tree)).hash;

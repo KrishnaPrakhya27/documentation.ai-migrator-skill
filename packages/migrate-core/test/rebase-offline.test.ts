@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,6 +90,27 @@ describe('rebasing a frozen workspace onto a fixed migrator', () => {
     // the capture itself is evidence and must survive the rebuild byte for byte
     expect(fileHash(sourceManifestPath(workspace))).toBe(manifestHash);
     expect(readSession(workspace).hashes.sourceManifest).toBe(manifestHash);
+  }, 60_000);
+
+  it('captures an OpenAPI spec supplied after the pages were frozen, without re-acquiring them', () => {
+    const { workspace, manifestHash } = frozenWorkspace();
+    const acquisition = readSession(workspace).hashes.acquisition;
+    // A spec a page references by URL is found only once the pages are read, which is after they
+    // were frozen; supplying it then must capture it, not report the pinned pages and stop.
+    const specDir = mkdtempSync(join(tmpdir(), 'dai-spec-'));
+    const spec = join(specDir, 'openapi.json');
+    writeFileSync(spec, JSON.stringify({ openapi: '3.0.3', info: { title: 'Pets', version: '1' }, paths: { '/pets': { get: { operationId: 'listPets', responses: { '200': { description: 'ok' } } } } } }));
+    const out = cli(workspace, 'acquire', '--openapi', spec);
+    expect(out).toContain('OpenAPI documents captured');
+    const after = readSession(workspace);
+    expect(after.hashes.openapi).toBeTruthy();
+    expect(existsSync(join(workspace, 'inventory', 'openapi.json'))).toBe(true);
+    // the frozen pages are untouched: same manifest, same acquisition pin
+    expect(after.hashes.sourceManifest).toBe(manifestHash);
+    expect(after.hashes.acquisition).toBe(acquisition);
+    // and a second run reads the pin rather than fetching again
+    expect(cli(workspace, 'acquire', '--openapi', spec)).toContain('matches its session pin');
+    expect(readSession(workspace).hashes.openapi).toBe(after.hashes.openapi);
   }, 60_000);
 
   it('keeps the scope the operator reviewed', () => {
