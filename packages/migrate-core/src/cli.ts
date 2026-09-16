@@ -1364,7 +1364,13 @@ async function main() {
         iframeHosts: existsSync(join(workspace, 'plan', 'assets.yaml')) ? (parseYaml(readFileSync(join(workspace, 'plan', 'assets.yaml'), 'utf8')) as { iframeHosts?: string[] }).iframeHosts : undefined,
       });
       const sourceEvidence = buildSourceEvidence(workspace, tree);
-      if (sourceEvidence) sourceEvidence.declaredLosses = (d) => applyDeclaredLosses(d, verifyEngine);
+      // The components a named person recorded a substitution for are read as what replaced them,
+      // exactly as convert read them. Without this the source side still holds the placeholder - a
+      // MadCap tile menu's empty <ul> - and the list the migration drew from the site's own frozen
+      // table of contents is reported as text no source states.
+      const substitutedComponents = new Set(readScopeDecisions(workspace).substituted.map((entry) => entry.component));
+      const sourceSide = (d: DocIR): DocIR => applyDeclaredLosses(d, verifyEngine, substitutedComponents);
+      if (sourceEvidence) sourceEvidence.declaredLosses = sourceSide;
       const gates = runGates({
         workspace, outputDir: join(workspace, 'output'), sourceEvidence, pinnedSourceManifest: s.hashes.sourceManifest, pinnedAcquisition: s.hashes.acquisition, pinnedOpenapi: s.hashes.openapi,
         // Gate 3 approves the report this run produces, so a local verify asks for gates 1 and 2;
@@ -1408,7 +1414,8 @@ async function main() {
             const raw = rawByPageId.get(page.id);
             const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
             const snapshot = readSnapshotPage(workspace, page.id);
-            return { ...page, doc: fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink)) };
+            const doc = fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink));
+            return { ...page, doc: doc && sourceSide(doc) };
           }),
           {
             routes: writtenPagePaths(workspace, tree),

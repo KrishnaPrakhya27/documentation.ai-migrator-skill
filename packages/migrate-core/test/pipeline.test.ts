@@ -1162,3 +1162,38 @@ describe('a section whose pages all sit in subfolders is still a section', () =>
     expect((top[0].pages as Array<{ group?: string }>).map((entry) => entry.group)).toEqual(['Profile', 'Events']);
   });
 });
+
+describe('the rendered-content gate reads the whole source, not only its top level', () => {
+  const run = async (doc: DocIR, html: string) => {
+    const result = await runBrowserContentGate('https://preview.example', [{ id: 'p', newPath: 'guide', migrate: true, doc } as never], {
+      render: async () => html,
+      routes: new Set(['guide']),
+    });
+    return result.routes[0]?.problems ?? [];
+  };
+
+  it('counts an image the source put inside a link', async () => {
+    // a MadCap tile: an image and its words wrapped in one link
+    const doc = markdownToIr('---\ntitle: Features\n---\n\n[![](https://cdn.example/tile.png)Loyalty](/Features/Loyalty)\n', { platform: 'madcap', file: 'https://learn.example.com/Features.htm', pageId: 'p' });
+    const problems = await run(doc, '<html><body><article><p><a href="/Features/Loyalty"><img src="https://cdn.example/tile.png" alt=""/>Loyalty</a></p></article></body></html>');
+    expect(problems.filter((problem) => problem.startsWith('image count differs'))).toEqual([]);
+  });
+
+  it('accepts a link the source wrote relative to the page it sits on', async () => {
+    const doc = markdownToIr('---\ntitle: Delete group\n---\n\nSee [Create group](../../../../Admin_Shadow/Admin/Create/Create%20Group.htm).\n', { platform: 'madcap', file: 'https://learn.example.com/Procedures/Admin/Manage/archive/Delete%20Group.htm', pageId: 'p' });
+    const problems = await run(doc, '<html><body><article><p>See <a href="https://learn.example.com/Admin_Shadow/Admin/Create/Create%20Group.htm">Create group</a>.</p></article></body></html>');
+    expect(problems.filter((problem) => problem.startsWith('external link'))).toEqual([]);
+  });
+
+  it('still reports an external link the source never states', async () => {
+    const doc = markdownToIr('---\ntitle: Delete group\n---\n\nSee [Create group](../Create.htm).\n', { platform: 'madcap', file: 'https://learn.example.com/Procedures/Delete.htm', pageId: 'p' });
+    const problems = await run(doc, '<html><body><article><p>See <a href="https://elsewhere.example/Create.htm">Create group</a>.</p></article></body></html>');
+    expect(problems.some((problem) => problem.startsWith('external link https://elsewhere.example/Create.htm'))).toBe(true);
+  });
+
+  it('reads the words inside an inline HTML element the reader sees', async () => {
+    const doc = markdownToIr('---\ntitle: Upload\n---\n\nIf ticked <u>prior to ingest</u>, mapping takes place.\n', { platform: 'madcap', file: 'https://learn.example.com/u.htm', pageId: 'p' });
+    const problems = await run(doc, '<html><body><article><h1>Upload</h1><p>If ticked <u>prior to ingest</u>, mapping takes place.</p></article></body></html>');
+    expect(problems).toEqual([]);
+  });
+});
