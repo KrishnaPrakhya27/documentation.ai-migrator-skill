@@ -45,7 +45,7 @@ import { titleHeading } from './ir/page-title.js';
 import { documentLinks } from './verify/source-truth.js';
 import { progressReporter } from './cli/progress.js';
 import { canonicalHostsPath, loadSnapshot, readJson, readSnapshotPage, resetDir, snapshotPageCount, snapshotPages, sourceFiles, writeJson } from './cli/io.js';
-import { buildSourceEvidence, expectedSidebar, frozenNavigationData, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
+import { buildSourceEvidence, expectedSidebar, frozenNavigationData, helpCenterHubRoutes, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
 import { captureOpenapi, type OpenapiCapture } from './cli/openapi-capture.js';
 import { attachHelpCenterHub, defaultHubPath, helpCenterHubMdx } from './nav/help-center.js';
 import { mergeOperationDocuments, openapiAnchors, parameterLinkRewriter } from './ir/mintlify-openapi.js';
@@ -1407,6 +1407,7 @@ async function main() {
         pinnedPlans: { componentPlan: s.hashes.componentPlan, urlPlan: s.hashes.urlPlan, assetPlan: s.hashes.assetPlan, blockExclusions: s.hashes.blockExclusions, scopeDecisions: s.hashes.scopeDecisions },
         sourceDocs: { *[Symbol.iterator]() { for (const doc of docs) yield { doc, outputFile: byId.get(doc.pageId)?.newPath ? join(workspace, 'output', `${byId.get(doc.pageId)!.newPath}.mdx`) : undefined }; } },
         treePages: tree.pages, quarantinedPages: quarantined, excludedPages: new Set(), unreviewed,
+        operatorPages: helpCenterHubRoutes(workspace, tree),
         previousCanonicalHash: s.hashes.previousConvertOutput, convertOutputHash: s.hashes.convertOutput, previewUrl, pinnedContractVersion: s.versions.contentContract, previewContractVersion,
         fidelityMode: s.fidelityMode ?? 'exact', sourceKind: s.source.kind, navigationSource: tree.navigationSource,
         pinnedMigrator: s.migrator, currentMigrator: captureMigratorProvenance({ repoRoot: PLUGIN_ROOT, packageVersion: CORE_VERSION }),

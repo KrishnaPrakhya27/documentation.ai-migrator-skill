@@ -30,7 +30,10 @@ const MDX_TEXT_ESCAPES: Array<[RegExp, string]> = [
   [/^(\s*)(~{3,})/gm, '$1\\$2'],
   // a backslash escapes punctuation only, so an ordered-list marker is escaped at its period ("\1." renders the backslash)
   [/^(\s*)(\d+)\.(?=\s)/gm, '$1$2\\.'],
-  [/(\*|_)(?=\S)/g, '\\$1'],
+  // every one of them, not only one that leads a word: a bold run whose whole text is `*` wrote
+  // `*****`, which reads back as five literal asterisks. A backslash before punctuation renders as
+  // the punctuation alone, so escaping one that needed nothing costs the reader nothing.
+  [/(\*|_)/g, '\\$1'],
 ];
 
 

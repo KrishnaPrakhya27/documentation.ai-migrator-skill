@@ -436,6 +436,12 @@ export interface GateInput {
   sourceDocs: Iterable<{ doc: DocIR; outputFile?: string }>;
   treePages: Array<{ id: string; source?: string; migrate: boolean; newPath?: string }>;
   quarantinedPages: Set<string>;
+  /**
+   * Routes written by a decision recorded on the tree rather than by a source page: the hub a
+   * help-centre container opens on. The source never had them, which is exactly why each carries an
+   * approver, so the source universe accounts for them as the operator's rather than as orphans.
+   */
+  operatorPages?: ReadonlySet<string>;
   excludedPages: Set<string>;
   unreviewed: number;
   /** Hash of the last convert and of the convert before it over identical inputs; both are convert-time hashes. */
@@ -514,7 +520,7 @@ export function runGates(input: GateInput): GateResult[] {
       const manifest = requireSourceManifest(input.workspace, input.pinnedSourceManifest);
       requireAcquisition(input.workspace, manifest, input.pinnedAcquisition, input.treePages);
       gates.push({ id: 'source-manifest-pinned', status: 'pass', detail: 'source manifest and frozen files match the discovery pin' });
-      const problems = sourceUniverseProblems({ workspace: input.workspace, manifest, treePages: input.treePages, written: new Set(outByPath.keys()), quarantined: input.quarantinedPages });
+      const problems = sourceUniverseProblems({ workspace: input.workspace, manifest, treePages: input.treePages, written: new Set([...outByPath.keys()].filter((route) => !input.operatorPages?.has(route))), quarantined: input.quarantinedPages });
       gates.push({ id: 'source-universe-accounted', status: problems.length ? 'fail' : 'pass', detail: problems.length ? `${problems.length} source universe problems` : `${manifest.pages.length} source identities accounted independently of the plan`, count: problems.length, samples: problems.slice(0, 8) });
     } catch (error) {
       const detail = (error as Error).message;

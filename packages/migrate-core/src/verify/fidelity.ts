@@ -1,6 +1,7 @@
 /** Lossless, ID-independent representations used by exact migration gates. */
 import type { Block, DocIR, Inline } from '../ir/types.js';
 import { inlineText, blocksText } from '../ir/types.js';
+import { markdownToIr } from '../ir/from-markdown.js';
 
 export type FidelityValue = null | boolean | number | string | FidelityValue[] | { [key: string]: FidelityValue };
 
@@ -232,11 +233,25 @@ function framedImageShape(block: { name: string; props: Record<string, string | 
   const caption = typeof block.props.caption === 'string' ? cleanText(block.props.caption) : '';
   const images = blocksShape(content, false);
   if (!caption) return FRAME_COMPONENTS.has(block.name) ? images : undefined;
-  // One image and a caption is a figure. Several - the light and dark spellings of one picture, or a
-  // sequence the caption describes together - cannot be one figure, so the conversion writes the
-  // pictures and then the caption as the italic line under them, which is where the reader reads it.
-  if (content.length === 1) return [{ type: 'figure', image: images[0], caption: [{ type: 'text', value: caption }] }];
-  return FRAME_COMPONENTS.has(block.name) ? [...images, { type: 'paragraph', children: [{ type: 'emphasis', children: [{ type: 'text', value: caption }] }] }] : undefined;
+  // The conversion writes the pictures and then the caption as the italic line under them, which is
+  // where the reader reads it, whether the frame held one picture or the light and dark spellings of
+  // one. The caption is Markdown - it may name a link - and is read as the Markdown it is.
+  return FRAME_COMPONENTS.has(block.name) ? [...images, captionLine(caption)] : undefined;
+}
+
+/**
+ * A caption prop is Markdown, and the conversion writes it as Markdown: a caption naming a link
+ * becomes a link. Reading it as plain text made the two sides disagree on the very words they share.
+ */
+function captionInline(caption: string): Inline[] {
+  const doc = markdownToIr(caption, { platform: 'dai', file: 'caption', pageId: 'caption' });
+  const first = doc.children[0];
+  return first && first.type === 'paragraph' ? first.children : [{ id: 'caption', type: 'text', value: caption } as Inline];
+}
+
+/** A caption as the conversion writes it: the italic line under the picture, Markdown and all. */
+function captionLine(caption: string): FidelityValue {
+  return { type: 'paragraph', children: [{ type: 'emphasis', children: inlineShape(captionInline(caption)) }] };
 }
 
 /**
@@ -514,9 +529,12 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
         if (exactComponents) return [blocksShape([block.image], true)[0], ...(block.caption?.length ? [{ type: 'paragraph', children: [{ type: 'emphasis', children: inlineShape(block.caption) }] } as FidelityValue] : [])];
         // Without a caption a figure says exactly what its image says, so it reads as the image -
         // the same equivalence framedImageShape already applies to a component wrapping one image.
+        // With one it reads as the picture and the italic line under it, which is what the file
+        // holds: a figure is a node this IR has and target MDX does not, so a comparison that kept
+        // it here could never agree with the same page read back from disk.
         const caption = inlineShape(block.caption ?? []);
         const image = blocksShape([block.image], false)[0];
-        return caption.length ? [{ type: 'figure', image, caption }] : [image];
+        return caption.length ? [image, { type: 'paragraph', children: [{ type: 'emphasis', children: caption }] }] : [image];
       }
       case 'component': case 'dai': {
         // An empty `<a id="...">` is an anchor shim the migrator wrote so a renamed heading keeps the
