@@ -47,7 +47,13 @@ export function propValue(v: string | number | boolean | null): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === 'number') return `{${v}}`;
   if (typeof v === 'boolean') return v ? '{true}' : '{false}';
-  return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '&quot;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;').replace(/[\r\n]/g, ' ')}"`;
+  const text = v.replace(/\\/g, '\\\\').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;').replace(/[\r\n]/g, ' ');
+  // The deployment rejects a quote written as a character reference inside an attribute quoted
+  // with the same mark (&quot; in "…", &#39; in '…'), so a value is quoted with the mark it does
+  // not contain. One holding both is written as a string expression, which needs neither.
+  if (!v.includes('"')) return `"${text}"`;
+  if (!v.includes("'")) return `'${text}'`;
+  return `{${JSON.stringify(v.replace(/[\r\n]/g, ' ')).replace(/\{/g, '\\u007b').replace(/\}/g, '\\u007d')}}`;
 }
 
 function markdownUrl(url: string, kind: 'link' | 'resource'): string | undefined {

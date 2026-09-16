@@ -520,6 +520,9 @@ function literalExpression(value: string): string | number | boolean | null | un
   if (v === 'true') return true;
   if (v === 'false') return false;
   if (v === 'null') return null;
+  // A double-quoted string may carry JSON escapes (the writer spells a value holding both quote
+  // marks that way); it is read as the string it denotes. Anything JSON cannot parse keeps its text.
+  if (/^"[\s\S]*"$/.test(v)) { try { return JSON.parse(v) as string; } catch { /* not JSON: read as written */ } }
   const quoted = v.match(/^(?:"([\s\S]*)"|'([\s\S]*)')$/);
   if (quoted) return quoted[1] ?? quoted[2] ?? '';
   // An array or object of literals is data the component was given, not code. It is recorded as its

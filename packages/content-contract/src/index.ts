@@ -72,7 +72,7 @@ export interface ValidationIssue {
     | 'esm'
     | 'frontmatter-missing'
     | 'frontmatter-title-missing'
-    | 'executable' | 'deployment-code-fence';
+    | 'executable' | 'deployment-code-fence' | 'deployment-attribute-quote';
   message: string;
   line?: number;
 }
@@ -143,6 +143,20 @@ export function deploymentFenceIssue(mdx: string): { message: string; line: numb
   return undefined;
 }
 
+/**
+ * The deployment's attribute check (mdxValidation.service.ts `checkHtmlEntitiesInJsxAttributes`): a
+ * quote written as a character reference inside an attribute quoted with that same mark is refused,
+ * because the deployment decodes it before parsing and the attribute then ends early.
+ */
+export function deploymentAttributeQuoteIssue(mdx: string): { message: string; line: number } | undefined {
+  const lines = mdx.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (/="[^"]*(?:&#x22;|&#34;|&quot;)[^"]*"/.test(lines[i])) return { line: i + 1, message: 'a double quote written as a character reference inside a double-quoted attribute; the deployment rejects this page' };
+    if (/='[^']*(?:&#x27;|&#39;|&apos;)[^']*'/.test(lines[i])) return { line: i + 1, message: 'a single quote written as a character reference inside a single-quoted attribute; the deployment rejects this page' };
+  }
+  return undefined;
+}
+
 export function validateMdx(mdx: string, contract = loadContract()): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const { frontmatter, body, bodyStartLine } = splitFrontmatter(mdx);
@@ -150,6 +164,8 @@ export function validateMdx(mdx: string, contract = loadContract()): ValidationI
   else if (!/^title:\s*\S/m.test(frontmatter)) issues.push({ severity: 'error', code: 'frontmatter-title-missing', message: 'frontmatter.title is required' });
   const fence = deploymentFenceIssue(mdx);
   if (fence) issues.push({ severity: 'error', code: 'deployment-code-fence', message: fence.message, line: fence.line });
+  const quote = deploymentAttributeQuoteIssue(mdx);
+  if (quote) issues.push({ severity: 'error', code: 'deployment-attribute-quote', message: quote.message, line: quote.line });
 
   const scan = foldMultiline(stripCode(body));
   const emittable = new Set(contract.emittable);
@@ -191,6 +207,7 @@ export function validateMdx(mdx: string, contract = loadContract()): ValidationI
       if (/^[0-9]+$/.test(inner)) continue; // numeric props like cols={3}
       if (/^(?:true|false)$/.test(inner)) continue; // boolean props like controls={true}; the platform parses them as JSON literals
       if (/^\/\*[\s\S]*\*\/$/.test(inner)) continue; // MDX comment
+      if (/^"(?:[^"\\{}]|\\.)*"$/.test(inner)) continue; // one string literal: static data, the spelling of an attribute value that holds both quote marks
       issues.push({ severity: 'error', code: 'expression', message: `expression {${inner.slice(0, 40)}} is not allowed`, line: ln });
     }
   });
