@@ -17,7 +17,7 @@ import type { Block, ComponentNode, DaiComponentNode, DocIR, Frontmatter, ImageN
 import { readPixelDimension } from './dimensions.js';
 import { htmlToIr } from './from-html.js';
 import { mapBlocks, inlineText } from './types.js';
-import { gitbookHtmlBlockToIr, isGitbookHtmlBlock, isGitbookHtmlInline, isGitbookHtmlTag, TRANSPARENT_HTML } from './gitbook-html.js';
+import { gitbookHtmlBlockToIr, isGitbookHtmlBlock, isGitbookHtmlInline, isGitbookHtmlTag, TRANSPARENT_HTML, isGitbookInternalFileRef } from './gitbook-html.js';
 import { gitbookOpenApiBlocks } from './gitbook-openapi.js';
 import { mintlifyOperationSection, operationFrontmatter } from './mintlify-openapi.js';
 import { srcsetUrls } from '../assets/html-media.js';
@@ -948,7 +948,10 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
     if (!img) return undefined;
     const sources = kids
       .filter((child) => (child.type === 'mdxJsxTextElement' || child.type === 'mdxJsxFlowElement') && String(child.name).toLowerCase() === 'source')
-      .flatMap((child) => { const value = (child.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && a.name === 'srcset')?.value; return typeof value === 'string' ? srcsetUrls(value) : []; });
+      .flatMap((child) => { const value = (child.attributes ?? []).find((a: any) => a.type === 'mdxJsxAttribute' && a.name === 'srcset')?.value; return typeof value === 'string' ? srcsetUrls(value) : []; })
+      // GitBook states a dark-mode variant by internal id, which it publishes at no address; the
+      // <img> beside it is the picture the page shows, so the candidate is dropped, not hosted.
+      .filter((url) => !(opts.platform === 'gitbook' && isGitbookInternalFileRef(url)));
     const image = imageFromMdx(img, path);
     return sources.length ? { ...image, sources: [...new Set([...(image.sources ?? []), ...sources])] } : image;
   };

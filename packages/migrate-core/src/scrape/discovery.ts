@@ -773,7 +773,13 @@ export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform
     }
     if (merged?.length) return { nodes: merged, source: 'platform-metadata' };
   }
-  const sections = extractSectionTabs(home.html, seed, origin, profile);
+  // A page states only the section switcher its own section renders: a translated section names
+  // itself and its siblings in that locale, never another locale's. Reading the home page alone
+  // therefore recovers only the sections beside the home page's own — on this site two of five,
+  // which merged three translated sections into the English one. The site's sections are the union
+  // of what its pages state, first label kept, in discovery order — the order the live crawl merged
+  // them in, so re-deriving from the frozen bytes yields the navigation discovery recorded.
+  const sections = mergeSectionTabs(pages, seed, origin, profile, home);
   if (sections) {
     // A sidebar that expands only the branch holding the page being read states a different part of
     // one tree on every page, so a section's navigation is the union of what its pages state — read
@@ -837,6 +843,23 @@ export function extractSectionTabs(html: string, baseUrl: string, origin: string
   // One section is not a section structure for the site; a caller asking where a single page belongs
   // still needs the one root that page declares.
   return out.length >= (opts.requireSeveral === false ? 1 : 2) ? out : undefined;
+}
+
+/**
+ * Every section the site's pages state, deduplicated by URL with the first label kept, home page
+ * first. A section switcher is rendered per section, so no single page states them all.
+ */
+function mergeSectionTabs(pages: readonly FrozenPage[], seed: string, origin: string, profile: ScrapeProfile, home: FrozenPage): SiteSection[] | undefined {
+  const byUrl = new Map<string, SiteSection>();
+  const add = (stated: SiteSection[] | undefined) => {
+    for (const section of stated ?? []) if (!byUrl.has(section.url)) byUrl.set(section.url, section);
+  };
+  add(extractSectionTabs(home.html!, seed, origin, profile));
+  for (const page of pages) {
+    if (!page.html) continue;
+    add(extractSectionTabs(page.html, page.url, origin, profile));
+  }
+  return byUrl.size >= 2 ? [...byUrl.values()] : undefined;
 }
 
 /** The section a page belongs to: the section whose path is its longest matching prefix. */

@@ -1,6 +1,7 @@
 /** Lossless, ID-independent representations used by exact migration gates. */
 import type { Block, DocIR, Inline } from '../ir/types.js';
 import { inlineText } from '../ir/types.js';
+import { EMBED_FALLBACK_TITLE, STEP_FALLBACK_TITLE, embedPlayerUrl } from '../components/rules-engine.js';
 
 export type FidelityValue = null | boolean | number | string | FidelityValue[] | { [key: string]: FidelityValue };
 
@@ -129,7 +130,7 @@ function sameAddress(url: string): string {
  * same words. Losing one is a styling change, never a content change. ParamField's `type` is the one content-bearing `type`; its rule copies it and the
  * serialised-output gate proves it survives, so the comparator need not.
  */
-const VISUAL_PROPS = new Set(['arrow', 'class', 'className', 'color', 'columns', 'cols', 'defaultOpen', 'horizontal', 'icon', 'iconType', 'kind', 'style', 'theme', 'titleType', 'type']);
+const VISUAL_PROPS = new Set(['arrow', 'class', 'className', 'color', 'columns', 'cols', 'defaultOpen', 'expanded', 'horizontal', 'icon', 'iconType', 'kind', 'open', 'style', 'theme', 'titleType', 'type']);
 /** Source spellings of a target prop. An alias stands in only while the canonical prop is absent, so the two can never collide. */
 const PROP_ALIASES: Record<string, string> = { summary: 'title', label: 'title', date: 'title', img: 'image' };
 /** HTML data-* attributes are machine metadata (Mintlify's data-path is the asset's repository path), never rendered content. */
@@ -182,12 +183,39 @@ function contentProps(props: Record<string, string | number | boolean | null>): 
  * folding it would have read that heading as the update's label.
  */
 function titleFold(props: FidelityValue, children: Block[]): { props: FidelityValue; children: Block[] } {
-  const stated = props as Record<string, FidelityValue>;
+  // A title equal to the one the migration supplies when the source states none says nothing the
+  // component said: it is the contract's required field, filled by us. Dropping it here lets the
+  // fold compare what the component actually states — and an authored title still counts.
+  const all = props as Record<string, FidelityValue>;
+  const stated = Object.fromEntries(Object.entries(all).filter(([key, value]) => !(key === 'title' && value === STEP_FALLBACK_TITLE))) as Record<string, FidelityValue>;
   const [first, ...rest] = children;
-  if (Object.keys(stated).length || first?.type !== 'heading') return { props, children };
-  const words = cleanText(inlineShape(first.children).map((node) => ((node as { value?: string }).value ?? '')).join(' '));
-  if (!words) return { props, children };
+  if (Object.keys(stated).length) return { props: ordered(stated), children };
+  // A step's title is its first line, written either as a heading or — GitBook's usual spelling,
+  // since its editor offers a step no title field — as a paragraph that is entirely bold. Both
+  // state the same words to a reader, so both fold, and the words still have to match.
+  const isBoldLine = first?.type === 'paragraph' && first.children.length === 1 && first.children[0]?.type === 'strong';
+  if (first?.type !== 'heading' && !isBoldLine) return { props: ordered(stated), children };
+  // A bold line's words sit inside the `strong`, not beside it, so they are read through the
+  // inline tree rather than off the top-level nodes — which yielded an empty title, and so no fold.
+  const words = isBoldLine
+    ? cleanText(inlineText(first.children))
+    : cleanText(inlineShape(first.children).map((node) => ((node as { value?: string }).value ?? '')).join(' '));
+  if (!words) return { props: ordered(stated), children };
   return { props: ordered({ ...stated, title: words }), children: rest };
+}
+
+/**
+ * A block whose whole content is one address, under whichever key the platform and the contract each
+ * call it: GitBook's `<file src="…">` is Documentation.AI's `<Card href="…">`. The address is what
+ * the author stated and is still compared; the key is the mapping's own word for "where this goes",
+ * so both sides are read under one name. An address the conversion changed still fails.
+ */
+function addressKeyShape(props: FidelityValue, children: Block[]): FidelityValue[] | undefined {
+  const stated = Object.entries(props as Record<string, FidelityValue>);
+  if (children.length || stated.length !== 1) return undefined;
+  const [[key, value]] = stated;
+  if (!URL_PROPS.includes(key) || typeof value !== 'string' || !value) return undefined;
+  return [{ type: 'component', props: ordered({ href: value }), children: [] }];
 }
 
 /** A bare reference to a URL: the target's own address is all the author wrote. */
@@ -203,13 +231,17 @@ const URL_PROPS = ['src', 'url', 'href'];
  * A component that says anything else (an Iframe's title, a caption) is left alone.
  */
 function bareUrlShape(props: FidelityValue, children: Block[]): FidelityValue[] | undefined {
-  const stated = Object.entries(props as Record<string, FidelityValue>);
+  // A title equal to the one the migration supplies when the source states none is not a thing the
+  // component says: it is the contract's required field, filled by us. An authored title is content
+  // and still counts, which keeps this from excusing a title the conversion changed or invented.
+  const stated = Object.entries(props as Record<string, FidelityValue>).filter(([key, value]) => !(key === 'title' && value === EMBED_FALLBACK_TITLE));
   if (children.length || stated.length !== 1) return undefined;
   const [[key, value]] = stated;
   if (!URL_PROPS.includes(key) || typeof value !== 'string' || !/^https?:\/\//i.test(value)) return undefined;
   // An embed shows its address and nothing else, which is what a link to it shows too; both read as
-  // that address, the same way the reader's own autolink of it does.
-  return [{ type: 'paragraph', children: [{ type: 'text', value }] }];
+  // that address, the same way the reader's own autolink of it does. A video is read by the address
+  // that plays it, so the share URL the author wrote and the player URL the embed needs are one.
+  return [{ type: 'paragraph', children: [{ type: 'text', value: embedPlayerUrl(value) }] }];
 }
 
 /** A frame (or any captioned wrapper) around exactly one image, as the author sees it: a figure with a caption, or the bare image. */
@@ -253,7 +285,11 @@ function anchorHeadingShape(block: { name: string; props: Record<string, string 
  * prop to prose would invent text for components whose description the reader never sees.
  */
 function promptShape(block: { name: string; props: Record<string, string | number | boolean | null>; children: Block[] }): FidelityValue[] | undefined {
-  if (block.name !== 'Prompt') return undefined;
+  // The source states the platform's spelling of the name (`prompt`) and the conversion the
+  // contract's (`Prompt`); this reads the same component on both sides, which is the whole point of
+  // canonicalising it. Matching only the contract's spelling meant it never fired on the source and
+  // every prompt page quarantined over a shape the comparison was built to reconcile.
+  if (block.name?.toLowerCase() !== 'prompt') return undefined;
   const description = typeof block.props.description === 'string' ? block.props.description.trim() : '';
   const parts: string[] = [];
   for (const child of block.children) {
@@ -420,6 +456,15 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
         // paragraph is the wrapper, not the content, so a lone image reads as the image either way.
         // A paragraph with an image *and* text keeps its shape, because that text is content.
         if (children.length === 1 && (children[0] as { type?: string }).type === 'image') return [children[0]];
+        // A paragraph that is nothing but a video's address is what the source shows as a player:
+        // GitBook embeds a bare YouTube URL, and the conversion writes the frame that plays it. Both
+        // read as that one video, so both are canonicalised to the address that plays it — an
+        // address the conversion changed to a different video still fails.
+        const lone = children.length === 1 ? (children[0] as { type?: string; value?: string }) : undefined;
+        if (lone?.type === 'text' && typeof lone.value === 'string' && /^https?:\/\/\S+$/.test(lone.value.trim())) {
+          const played = embedPlayerUrl(lone.value.trim());
+          if (played !== lone.value.trim()) return [{ type: 'paragraph', children: [{ type: 'text', value: played }] }];
+        }
         return children.length ? [{ type: 'paragraph', children }] : [];
       }
       case 'heading': return [{ type: 'heading', depth: block.depth, children: inlineShape(block.children) }];
@@ -476,7 +521,14 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
         if (isAnchorShim(block)) return [];
         // The same blank space, read back from the file as a bare `br` element.
         if (block.name === 'br' && !block.children.length) return [];
-        if (exactComponents) return [{ type: 'component', name: block.name, props: ordered(block.props), children: blocksShape(block.children, true) }];
+        if (exactComponents) {
+          // A nested component is compared exactly, but a title folded from the component's own
+          // first line is the same reconciliation at any depth: a GitBook Step lives inside a
+          // Stepper, so skipping the fold here left every one of them differing by that title.
+          const exact = titleFold(contentProps(block.props), block.children);
+          const keep = Object.keys(block.props).length === Object.keys(exact.props as Record<string, unknown>).length ? ordered(block.props) : exact.props;
+          return [{ type: 'component', name: block.name, props: keep, children: blocksShape(exact.children, true) }];
+        }
         const framed = framedImageShape(block);
         if (framed) return framed;
         const anchored = anchorHeadingShape(block);
@@ -489,6 +541,8 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
         }
         const bare = bareUrlShape(contentProps(block.props), block.children);
         if (bare) return bare;
+        const address = addressKeyShape(contentProps(block.props), block.children);
+        if (address) return address;
         const folded = titleFold(contentProps(block.props), block.children);
         return [{ type: 'component', props: folded.props, children: blocksShape(folded.children, false) }];
       }

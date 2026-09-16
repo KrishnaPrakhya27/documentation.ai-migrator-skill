@@ -88,6 +88,31 @@ type Handler = (node: ComponentNode, rule: MappingRule, ctx: EngineOptions) => H
 /** A restructure handler with the source props it reads, so every other authored prop is reported as dropped. */
 interface RestructureHandler { reads: string[]; run: Handler }
 
+/**
+ * The title an Iframe is given when the source states none. The contract requires a title and the
+ * source of a bare embed states no words at all, so this is the migration's, not the author's —
+ * which is why the fidelity comparison reads a title equal to it as no title.
+ */
+export const EMBED_FALLBACK_TITLE = 'Embedded content';
+
+/**
+ * The title a Step is given when the source states none. GitBook numbers its steps and offers no
+ * title field, so a step whose first line is ordinary prose states no title at all; the contract
+ * requires one, and this is what fills it. Like the frame's fallback it is the migration's word,
+ * not the author's, so the fidelity comparison reads it as no title.
+ */
+export const STEP_FALLBACK_TITLE = 'Step';
+
+/**
+ * The player address of a video the source links by its watch or share URL. `youtu.be/<id>`,
+ * `youtube.com/watch?v=<id>` and `youtube.com/embed/<id>` are one video; the embed is the spelling
+ * that plays in a frame, and the one both sides of the fidelity comparison canonicalise to.
+ */
+export function embedPlayerUrl(src: string): string {
+  const yt = src.match(/youtube\.com\/watch\?v=([\w-]+)/) ?? src.match(/youtu\.be\/([\w-]+)/) ?? src.match(/youtube\.com\/embed\/([\w-]+)/);
+  return yt ? `https://www.youtube.com/embed/${yt[1]}` : src;
+}
+
 type PropReference = { kind: 'count' } | { kind: 'copy'; prop: string } | { kind: 'map'; prop: string };
 
 /** "$count", "$prop" (copy) or "$map(prop)" (copy through the contract value map); anything else is a literal. */
@@ -251,11 +276,10 @@ const HANDLERS: Record<string, RestructureHandler> = {
     const src = String(node.props.src ?? node.props.url ?? '');
     let host = '';
     try { host = new URL(src).hostname; } catch { /* not a URL */ }
-    const yt = src.match(/youtube\.com\/watch\?v=([\w-]+)/) ?? src.match(/youtu\.be\/([\w-]+)/);
-    const finalSrc = yt ? `https://www.youtube.com/embed/${yt[1]}` : src;
+    const finalSrc = embedPlayerUrl(src);
     const allowed = (ctx.iframeHosts ?? ['www.youtube.com', 'youtube.com', 'youtu.be', 'player.vimeo.com', 'www.loom.com']).some((h) => host === h || host.endsWith('.' + h));
     if (!allowed) return quarantined(node, `embed host "${host || 'unknown'}" not allowlisted`);
-    return { blocks: [{ id: node.id, type: 'dai', name: 'Iframe', props: { src: finalSrc, title: String(node.props.title ?? 'Embedded content') }, children: [], rule: rule.id }] };
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Iframe', props: { src: finalSrc, title: String(node.props.title ?? EMBED_FALLBACK_TITLE) }, children: [], rule: rule.id }] };
   } },
   /** Tooltip/abbr compose (T4): text with <abbr title> */
   'tooltip-to-abbr': { reads: ['tip', 'title', 'content', 'text'], run: (node) => {
@@ -407,8 +431,15 @@ const HANDLERS: Record<string, RestructureHandler> = {
   /** GitBook step: it has no title of its own, so its leading heading becomes the title the Step contract requires. */
   'step-title-from-heading': { reads: [], run: (node, rule) => {
     const [first, ...rest] = node.children;
+    // GitBook's editor gives a step no title field, so an author writes one as the step's first
+    // line: a heading, or — far more often — a paragraph that is entirely bold. Both state the
+    // step's title; reading only the heading left the other spelling titleless and invented the
+    // English word "Step" for it, on Japanese and Chinese pages alike.
+    const boldTitle = first?.type === 'paragraph' && first.children.length === 1 && first.children[0]?.type === 'strong'
+      ? inlineText(first.children).trim() : '';
+    if (boldTitle) return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title: boldTitle }, children: rest, rule: rule.id }], lossy: [`leading bold paragraph "${boldTitle}" became the Step title`] };
     const title = first?.type === 'heading' ? inlineText(first.children).trim() : '';
-    if (!title || first?.type !== 'heading') return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title: 'Step' }, children: node.children, rule: rule.id }], lossy: ['no leading heading; Step title defaulted to "Step"'] };
+    if (!title || first?.type !== 'heading') return { blocks: [{ id: node.id, type: 'dai', name: 'Step', props: { title: STEP_FALLBACK_TITLE }, children: node.children, rule: rule.id }], lossy: ['the step states no title; the contract\'s required title is filled with "Step"'] };
     // the title renders as a heading element, at the source level where the contract has one (h2, h3)
     const titleType = first.depth <= 2 ? 'h2' : 'h3';
     const lossy = [`leading heading "${title}" became the Step title`, ...(first.depth > 3 ? [`heading level ${first.depth} rendered as h3`] : [])];
