@@ -143,9 +143,14 @@ export function liveSourceManifest(context: CaptureContext, discovery: Discovery
   const aliases = new Map<string, string>();
   for (const page of discovery.pages) for (const alias of page.aliases ?? []) aliases.set(alias, page.url);
   const pages = new Map<string, SourceManifestPage>();
+  // A same-origin URL outside the site's base path is a page of whatever else the host publishes —
+  // the marketing site beside the docs. Discovery refused it as not this site; the manifest must
+  // not then list it as a published page of the source, or certification asks for a decision on
+  // 272 pages that were never candidates.
+  const refused = new Set(discovery.refusedOutsideBase ?? []);
   const add = (candidate: string, evidence: PageEvidence): void => {
     const normalized = normaliseDiscoveryUrl(candidate, context.location, origin, hosts);
-    if (!normalized) return;
+    if (!normalized || refused.has(normalized)) return;
     const url = aliases.get(normalized) ?? normalized;
     const existing = pages.get(url);
     if (existing) { if (!existing.evidence.includes(evidence)) existing.evidence.push(evidence); return; }

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freezeDirectory, frozenRootPath, writeSourceManifest, sourceManifestPath, type SourceManifest } from '../src/evidence/manifest.js';
+import { freezeDirectory, frozenRootPath, writeSourceManifest, narrowSourceManifest, readSourceManifest, sourceManifestHash, sourceManifestPath, type SourceManifest } from '../src/evidence/manifest.js';
 import { nativeSourceManifest, liveSourceManifest } from '../src/evidence/capture.js';
 import { requireSourceManifest, sourceUniverseProblems } from '../src/evidence/verify.js';
 import { ensureScopeDecisionsFile, readScopeDecisions, excludeHelpSystems, recordScopeExclusions, answeredHelpSystemIssues } from '../src/evidence/scope.js';
@@ -76,6 +76,37 @@ describe('frozen source evidence', () => {
     const manifest = liveSourceManifest({ ...context, location: 'https://example.test' }, discovery);
     expect(manifest.pages.map((page) => page.location)).toEqual(['https://example.test/missing']);
     expect(sourceUniverseProblems({ workspace: temp(), manifest, treePages: [], written: new Set(), quarantined: new Set() })).toEqual([expect.stringContaining('neither migrated nor excluded')]);
+  });
+});
+
+describe('pages beside the docs on the same host', () => {
+  const empty: DiscoveryResult = { pages: [], failures: [], truncated: false, canonicalHosts: [], sitemaps: { sources: [], entries: [], truncated: false } } as unknown as DiscoveryResult;
+  const discovery = (): DiscoveryResult => ({
+    ...empty,
+    sitemaps: { sources: ['https://example.test/sitemap.xml'], entries: [{ url: 'https://example.test/docs/a', alternates: [] }, { url: 'https://example.test/pricing', alternates: [] }], truncated: false },
+    pages: [{ url: 'https://example.test/docs/a', title: 'A', reason: 'sitemap' }],
+    refusedOutsideBase: ['https://example.test/pricing'],
+  } as unknown as DiscoveryResult);
+
+  it('are not published pages of the source once discovery refused them', () => {
+    const manifest = liveSourceManifest({ ...context, location: 'https://example.test/docs' }, discovery());
+    expect(manifest.pages.map((page) => page.location)).toEqual(['https://example.test/docs/a']);
+  });
+
+  it('may leave a frozen manifest on an offline re-derivation, and nothing else may change', () => {
+    const workspace = temp(); ensureWorkspace(workspace);
+    const before = liveSourceManifest({ ...context, location: 'https://example.test/docs' }, { ...discovery(), refusedOutsideBase: [] } as DiscoveryResult);
+    expect(before.pages).toHaveLength(2);
+    writeSourceManifest(workspace, before);
+    const after = liveSourceManifest({ ...context, location: 'https://example.test/docs' }, discovery());
+    expect(() => writeSourceManifest(workspace, after)).toThrow(/already frozen/);
+    const narrowed = narrowSourceManifest(workspace, after, new Set(['https://example.test/pricing']));
+    expect(narrowed.dropped).toEqual(['https://example.test/pricing']);
+    expect(readSourceManifest(workspace)!.pages.map((page) => page.location)).toEqual(['https://example.test/docs/a']);
+    expect(sourceManifestHash(workspace)).toBe(narrowed.hash);
+    // a page discovery did not refuse cannot be dropped this way, and nothing can be added
+    expect(() => narrowSourceManifest(workspace, { ...after, pages: [] }, new Set())).toThrow(/did not refuse/);
+    expect(() => narrowSourceManifest(workspace, { ...after, pages: [...after.pages, { ...after.pages[0], pageId: 'new', sourceId: 'https://example.test/docs/b', location: 'https://example.test/docs/b' }] }, new Set())).toThrow(/never held/);
   });
 });
 

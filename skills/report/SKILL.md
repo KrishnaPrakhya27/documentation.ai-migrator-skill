@@ -14,7 +14,7 @@ Never ship raw markdown or model output to a customer. The customer report below
 
 ## The customer report
 
-`report/customer-report.pdf` is the only artefact written for the customer, and it answers two questions: what arrived, and what did not.
+`report/customer-report.pdf` is the only artefact written for the customer, and it answers two questions: what arrived, and what did not. It is written for someone who has never seen a migration: the front pages carry one verdict sentence, four numbers, a numbered list of the decisions the customer needs to make (one plain sentence each, with up to three example page names and no addresses), a "good to know" list of things that changed without needing them, and a five-line "checks at a glance". Every full list — page addresses, link targets, the run's own words for a check that did not pass — sits in an appendix at the back, for the people who act on it. Links pointing at pages outside the migration are counted by the page they point at, not one line per link.
 
 The second is the point. A migration that omits pages and reports only its successes is worse than one that names them, because the customer finds out from a reader. So the report itemises, each with the reason the run recorded at the time:
 
@@ -25,7 +25,7 @@ The second is the point. A migration that omits pages and reports only its succe
 - every link still pointing at the old site, because its target is outside the agreed scope;
 - every check that failed or did not run — a permissive run states that it proves nothing about fidelity rather than showing those checks as passed.
 
-A help-centre hub the migration wrote (`nav --help-center`) is listed as a page the migration wrote, with its approver: it holds no words of ours. Items needing a customer decision are marked. A list longer than 25 entries states how many it is not showing and points at `customer-report.json`, which holds the full set; nothing is truncated silently.
+A help-centre hub the migration wrote (`nav --help-center`) is listed as a page the migration wrote, with its approver: it holds no words of ours. Items needing a customer decision come first. An appendix list longer than 200 entries states how many it is not showing and points at `customer-report.json`, which holds the full set; nothing is truncated silently.
 
 Gate ids never appear. Each is rendered in the customer's terms (`code-blocks-exact` → "Code samples are character-for-character identical") by `report/gate-language.ts`; a gate with no entry there falls back to its raw id, so add one when adding a gate.
 

@@ -128,6 +128,35 @@ export function writeSourceManifest(workspace: string, manifest: SourceManifest)
   return sha256(body);
 }
 
+/**
+ * Rewrites a frozen manifest only to remove pages that were never this site's: every page kept is
+ * unchanged, and every page dropped is one discovery refused as outside the site's base path. A
+ * correction of a classification the build got wrong, not a new capture — anything else is refused
+ * exactly as `writeSourceManifest` refuses it. Returns the new hash and what was dropped.
+ */
+export function narrowSourceManifest(workspace: string, manifest: SourceManifest, refused: ReadonlySet<string>): { hash: string; dropped: string[] } {
+  validateSourceManifest(manifest);
+  const existing = readSourceManifest(workspace);
+  if (!existing) throw new Error('no frozen source manifest to narrow');
+  const kept = new Map(manifest.pages.map((page) => [page.pageId, page]));
+  const dropped: string[] = [];
+  for (const page of existing.pages) {
+    const now = kept.get(page.pageId);
+    if (now) {
+      if (JSON.stringify(now) !== JSON.stringify(page)) throw new Error(`${page.sourceId}: the re-derivation changes a page the frozen source universe holds; capture it afresh in a new workspace`);
+      continue;
+    }
+    if (!refused.has(page.location)) throw new Error(`${page.sourceId}: the re-derivation drops a page discovery did not refuse; capture it afresh in a new workspace`);
+    dropped.push(page.location);
+  }
+  for (const page of manifest.pages) if (!existing.pages.some((was) => was.pageId === page.pageId)) throw new Error(`${page.sourceId}: the re-derivation adds a page the frozen source universe never held; capture it afresh in a new workspace`);
+  const body = `${JSON.stringify(manifest, null, 2)}\n`;
+  const path = sourceManifestPath(workspace);
+  writeFileSync(`${path}.tmp`, body, { mode: 0o600 });
+  renameSync(`${path}.tmp`, path);
+  return { hash: sha256(body), dropped };
+}
+
 export function readSourceManifest(workspace: string): SourceManifest | undefined {
   const path = sourceManifestPath(workspace);
   if (!existsSync(path)) return undefined;

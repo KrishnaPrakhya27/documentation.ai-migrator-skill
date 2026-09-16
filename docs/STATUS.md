@@ -150,3 +150,11 @@ A landing page's tile menus (`<ul data-mc-linked-toc="Data/Tocs/x.js">`) are emp
 ## 2026-09-16 — a group's landing page is the group's page, on every source
 
 A container whose first page is its landing page (named as the container is, or at the container's own route or its directory's index, with other pages still beneath) is written with that page as its `path` instead of a same-named first child. Flare topics with subtopics and GitBook parent pages already did this from the source's own statement; the rule now covers sources that only imply it (Mintlify groups, generic repositories). On the re-derived copies: 17 SessionM containers, 11 Mintlify containers, 0 GitBook (its parent pages were already the group's). A container's only page is never lifted, and a site's root page under its first group is not that group's landing page.
+
+## 2026-09-16 — customer report rewritten for a non-technical reader
+
+The report's front pages were a wall of page addresses, one line per broken link, and thirty-seven check rows. They now carry one verdict sentence, four numbers, the decisions the customer must make as numbered plain sentences with a few example page names, a "good to know" list, and a five-line checks summary. Every full list moved to an appendix at the back. Skip reasons are said in the reader's words; links to unmigrated pages are counted by target page, named as a reader would name them. On the SessionM copy the front matter went from 245 lines of text to 75.
+
+## 2026-09-16 — the frozen source universe stops at the site's base path
+
+Discovery refuses a same-origin URL outside the site's base path (`www.mintlify.com/pricing` beside `/docs`) as another site on this host, but the live source manifest still listed every sitemap entry as a published page of the source, so `source-universe-accounted` asked for a decision on 272 marketing pages that were never candidates (permissive runs never showed it; the first exact run did). The manifest now leaves out what discovery refused. Because a frozen manifest is never rewritten, an offline re-derivation may make exactly this one correction — drop pages discovery refused, change nothing else — and refuses anything more, so an existing workspace fixes itself with `rebase --reason … && discover --offline` and no re-crawl.

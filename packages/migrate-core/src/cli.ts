@@ -36,7 +36,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse as parseYaml, stringify as toYaml } from 'yaml';
 import { Cookie, CookieJar } from 'tough-cookie';
 import { loadContract } from '@dai/content-contract';
-import { freezeDirectory, frozenRootPath, sourceManifestPath, writeSourceManifest, type SourceManifest, type FreezeResult } from './evidence/manifest.js';
+import { freezeDirectory, frozenRootPath, narrowSourceManifest, sourceManifestPath, writeSourceManifest, type SourceManifest, type FreezeResult } from './evidence/manifest.js';
 import { nativeSourceManifest, liveSourceManifest } from './evidence/capture.js';
 import { requireSourceManifest } from './evidence/verify.js';
 import { nativeNavigationWitness } from './evidence/native-navigation.js';
@@ -547,7 +547,17 @@ async function main() {
       try { manifestHash = writeSourceManifest(workspace, sourceManifest); }
       catch (error) {
         if (!v.offline) throw error;
-        fail(`offline re-derivation would change the frozen source universe (${(error as Error).message}); capture it afresh in a new workspace`);
+        // One correction is allowed offline: pages discovery refused as another site on this host
+        // (the marketing pages beside the docs) leaving the manifest, where an earlier build had
+        // listed them as published pages of the source. Nothing else about the universe may move.
+        const refused = new Set(readJson<DiscoveryResult>(join(workspace, 'source-cache', 'discovery-result.json')).refusedOutsideBase ?? []);
+        try {
+          const narrowed = narrowSourceManifest(workspace, sourceManifest, refused);
+          manifestHash = narrowed.hash;
+          ok(`${narrowed.dropped.length} page(s) outside the site's base path left the frozen source universe; discovery had refused them as another site on this host and they were never candidates`);
+        } catch (narrowError) {
+          fail(`offline re-derivation would change the frozen source universe (${(narrowError as Error).message}); capture it afresh in a new workspace`);
+        }
       }
       const discoveredSession = readSession(workspace);
       discoveredSession.hashes.sourceManifest = manifestHash;

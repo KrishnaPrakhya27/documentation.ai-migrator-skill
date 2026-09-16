@@ -40,6 +40,11 @@ export interface Shortfall {
   heading: string;
   /** Why, in the customer's terms. */
   explanation: string;
+  /** One plain sentence for the front page: the count, what it is, and what to do. No paths. */
+  summary: string;
+  /** Up to three things it applies to, by name only, so the front page can say "for example". */
+  examples: string[];
+  /** The full list, for the appendix and the data file. */
   items: string[];
   /** Items beyond those listed, so a long list is never silently truncated. */
   more: number;
@@ -72,13 +77,49 @@ const readJsonIfPresent = <T>(path: string, fallback: T): T => {
   try { return JSON.parse(readFileSync(path, 'utf8')) as T; } catch { return fallback; }
 };
 
-/** At most `limit` items, with the remainder counted rather than dropped. */
-function capped(items: string[], limit = 25): { items: string[]; more: number } {
+/** At most `limit` items, with the remainder counted rather than dropped. The appendix holds these; the front page holds only a sentence. */
+function capped(items: string[], limit = 200): { items: string[]; more: number } {
   return { items: items.slice(0, limit), more: Math.max(0, items.length - limit) };
 }
 
 const pageLabel = (page: { title?: string; source?: string; oldPath?: string }): string =>
   `${page.title || 'Untitled'}${page.oldPath || page.source ? ` — ${page.oldPath ?? page.source}` : ''}`;
+
+/** Up to three names, distinct and non-empty, for a front-page "for example". */
+function examplesOf(names: string[]): string[] {
+  return [...new Set(names.map((name) => name.trim()).filter((name) => name && name !== 'Untitled'))].slice(0, 3);
+}
+
+const plural = (count: number, one: string, many = `${one}s`): string => `${count} ${count === 1 ? one : many}`;
+
+/**
+ * The reasons an adapter records for leaving a page out, said for a reader who has never seen the
+ * source platform. An unknown reason is shown as recorded rather than reworded.
+ */
+const SKIP_REASON_LANGUAGE: Record<string, string> = {
+  'help system out of scope': 'belong to a separate help system that was not part of this migration',
+  'states no title: publishes no article': 'have no article on them (no title and no content), such as search and index placeholders',
+  'not authored documentation': 'are not documentation pages (error pages, search pages, folder listings)',
+  'unpublished in the source': 'are unpublished drafts on your current site',
+  'not placed by the table of contents': 'are not listed in your table of contents',
+  'hidden in the source navigation': 'are hidden in your navigation',
+};
+
+/** Where a link points, as a page: the address without its fragment or query, so twenty links to one page count as one target. */
+function linkTarget(url: string): string {
+  return url.replace(/[#?].*$/, '') || url;
+}
+
+/** A link target as a reader would name it: the page's own name, or the site it is on, never `../../x.htm`. */
+function targetName(target: string): string {
+  const path = target.replace(/^https?:\/\/[^/]+/, '');
+  const host = /^https?:\/\//.test(target) ? target.replace(/^https?:\/\/([^/]+).*$/, '$1') : '';
+  let last = path.split('/').filter((segment) => segment && segment !== '..' && segment !== '.').pop() ?? '';
+  try { last = decodeURIComponent(last); } catch { /* shown as written */ }
+  last = last.replace(/\.(?:html?|md|mdx|php|aspx?)$/i, '');
+  if (last && host) return `${last} (on ${host})`;
+  return last || host || target;
+}
 
 /** How the sidebar was established, said plainly; undefined when the run recorded nothing. */
 export function navigationSourceLanguage(source: Tree['navigationSource']): string | undefined {
@@ -116,9 +157,12 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     byReason.set(reason, [...(byReason.get(reason) ?? []), page]);
   }
   for (const [reason, pages] of [...byReason].sort((a, b) => b[1].length - a[1].length)) {
+    const why = SKIP_REASON_LANGUAGE[reason] ?? `were left out (recorded reason: ${reason})`;
     shortfalls.push({
-      heading: `${pages.length} page${pages.length === 1 ? '' : 's'} not migrated — ${reason}`,
+      heading: `${plural(pages.length, 'page')} not migrated — ${reason}`,
       explanation: 'These exist in your source but were not carried over for the reason above. If any belong in the new site, they can be added.',
+      summary: `${plural(pages.length, 'page')} ${why}. Tell us if any of them should be on the new site.`,
+      examples: examplesOf(pages.map((page) => page.title ?? '')),
       ...capped(pages.map(pageLabel)),
       needsYou: true,
     });
@@ -133,8 +177,10 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     const label = (entry: { component: string; reason: string; approvedBy: string; contentLoss?: boolean }) =>
       `<${entry.component}> — ${entry.contentLoss ? 'the reader loses content' : 'the reader loses a convenience'}: ${entry.reason} (approved by ${entry.approvedBy})`;
     shortfalls.push({
-      heading: `${substituted.length} component${substituted.length === 1 ? '' : 's'} replaced by something the migration wrote`,
+      heading: `${plural(substituted.length, 'component')} replaced by something the migration wrote`,
       explanation: 'These could not be carried over as they were, so the migration put something in their place. The replacement text is ours, not yours, and each one points at the original tool for now — they need a home you control before you go live.',
+      summary: `${plural(substituted.length, 'interactive element')} on your old site (a live tool or demo) cannot run on the new one. In its place is a card linking to the original, which only works while your old site stays up. Decide where each should live.`,
+      examples: examplesOf(substituted.map((entry) => entry.component)),
       ...capped(substituted.map(label)),
       needsYou: true,
     });
@@ -145,6 +191,8 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     shortfalls.push({
       heading: `1 page written by the migration: a help-centre hub for “${tree.helpCenter.container}”`,
       explanation: `Your source had no landing page for this section, so one was written at /${tree.helpCenter.hubPath}. It holds no text of ours: it renders the section's own categories as cards, drawn from the navigation. Approved by ${tree.helpCenter.approvedBy}.`,
+      summary: `A landing page was added for “${tree.helpCenter.container}”, because your old site had none. It shows the section's own categories as cards and contains no text of ours.`,
+      examples: [],
       items: [], more: 0, needsYou: false,
     });
   }
@@ -158,8 +206,10 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
       quarantine.exactFidelity ? `${quarantine.exactFidelity} held because the content could not be carried over without changing it` : '',
     ].filter(Boolean);
     shortfalls.push({
-      heading: `${quarantine.total} page${quarantine.total === 1 ? '' : 's'} held back during conversion`,
+      heading: `${plural(quarantine.total, 'page')} held back during conversion`,
       explanation: `${parts.join('; ')}. Exact mode stops rather than publishing an approximation of your content.`,
+      summary: `${plural(quarantine.total, 'page')} ${quarantine.total === 1 ? 'was' : 'were'} held back because ${quarantine.total === 1 ? 'it' : 'they'} could not be carried over exactly as written. We stop rather than publish an approximation; each will be resolved with you before going live.`,
+      examples: [],
       items: [], more: 0, needsYou: true,
     });
   }
@@ -169,8 +219,10 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   const unlisted = readJsonIfPresent<Array<{ title?: string; newPath?: string; source?: string }>>(join(workspace, 'report', 'unlisted-pages.json'), []);
   if (unlisted.length) {
     shortfalls.push({
-      heading: `${unlisted.length} page${unlisted.length === 1 ? '' : 's'} migrated but absent from the sidebar`,
+      heading: `${plural(unlisted.length, 'page')} migrated but absent from the sidebar`,
       explanation: 'Your source publishes these without placing them in its navigation, so they were migrated as pages but not added to the sidebar. Putting them somewhere would invent a structure your site does not have. Tell us where they belong and we will place them.',
+      summary: `${plural(unlisted.length, 'page')} exist on your old site but are not in its menu, so they were migrated as pages without a place in the sidebar. They open by address and in search. Tell us where they belong and we will place them.`,
+      examples: examplesOf(unlisted.map((page) => page.title ?? '')),
       ...capped(unlisted.map((page) => `${page.title || 'Untitled'}${page.newPath ? ` — /${page.newPath}` : ''}`)),
       needsYou: true,
     });
@@ -182,8 +234,10 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     const byReason = new Map<string, number>();
     for (const exclusion of exclusions) byReason.set(`${exclusion.reason} (decided by ${exclusion.reviewer})`, (byReason.get(`${exclusion.reason} (decided by ${exclusion.reviewer})`) ?? 0) + 1);
     shortfalls.push({
-      heading: `${exclusions.length} block${exclusions.length === 1 ? '' : 's'} of content removed from inside pages`,
+      heading: `${plural(exclusions.length, 'block')} of content removed from inside pages`,
       explanation: 'Content removed deliberately during conversion. Each is attributed below to the rule or person that decided it.',
+      summary: `${plural(exclusions.length, 'element')} inside pages ${exclusions.length === 1 ? 'was' : 'were'} removed on purpose (scripts, embedded widgets and similar that cannot run on the new site). Each removal is recorded with who decided it.`,
+      examples: [],
       ...capped([...byReason].map(([reason, count]) => `${count}× ${reason}`)),
       needsYou: false,
     });
@@ -192,9 +246,25 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   // Links that still point at the old site, because their target is outside this migration.
   const unmigrated = readJsonIfPresent<Array<{ route: string; url: string; knownSourcePage: boolean }>>(join(workspace, 'report', 'unmigrated-links.json'), []);
   if (unmigrated.length) {
+    // Twenty links to one page are one decision, so the front page speaks in targets, not links.
+    // resolved against the page that holds the link, so `../../Default.htm` and `../../../Default.htm`
+    // written on two pages are the one page they both reach
+    const resolved = (link: { route: string; url: string }): string => {
+      const target = linkTarget(link.url);
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(target) || target.startsWith('/')) return target;
+      try { return new URL(target, `https://source.invalid/${link.route}`).pathname; } catch { return target; }
+    };
+    const byTarget = new Map<string, number>();
+    for (const link of unmigrated) byTarget.set(resolved(link), (byTarget.get(resolved(link)) ?? 0) + 1);
+    const targets = [...byTarget].sort((a, b) => b[1] - a[1]);
+    // two different pages with one name (a `Default.htm` in each help system) are told apart by address
+    const names = targets.slice(0, 3).map(([target]) => targetName(target));
+    const top = targets.slice(0, 3).map(([target, count], index) => `the page “${names.filter((name) => name === names[index]).length > 1 ? `${names[index]} (${target})` : names[index]}”, ${plural(count, 'link')}`);
     shortfalls.push({
       heading: `${unmigrated.length} link${unmigrated.length === 1 ? ' points' : 's point'} at pages this migration does not include`,
       explanation: 'These links target pages outside the agreed scope. They still work only while your existing site stays online — decide whether to bring those pages across or repoint the links.',
+      summary: `${plural(unmigrated.length, 'link')} in your pages go to ${plural(targets.length, 'page')} that ${targets.length === 1 ? 'was' : 'were'} not migrated. They keep working only while your old site is online. Decide whether to bring those pages across or change the links.`,
+      examples: top,
       ...capped(unmigrated.map((link) => `/${link.route} → ${link.url}${link.knownSourcePage ? '' : ' (not a page your source is known to publish)'}`)),
       needsYou: true,
     });
@@ -204,8 +274,10 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   const lossyDimensions = readJsonIfPresent<unknown[]>(join(workspace, 'report', 'lossy-dimensions.json'), []);
   if (lossyDimensions.length) {
     shortfalls.push({
-      heading: `${lossyDimensions.length} image${lossyDimensions.length === 1 ? '' : 's'} migrated without their stated size`,
+      heading: `${plural(lossyDimensions.length, 'image')} migrated without their stated size`,
       explanation: 'Your source sizes these in percentages or relative units, which Documentation.AI images cannot express. The image is carried over; only the stated dimension is not.',
+      summary: `${plural(lossyDimensions.length, 'image')} ${lossyDimensions.length === 1 ? 'is' : 'are'} shown at the new site's default size rather than the relative size your old site set. The images themselves are all there.`,
+      examples: [],
       items: [], more: 0, needsYou: false,
     });
   }
@@ -215,8 +287,10 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   const shims = anchors.filter((anchor) => anchor.needsShim).length;
   if (shims) {
     shortfalls.push({
-      heading: `${shims} heading${shims === 1 ? '' : 's'} changed address, with a redirect kept in place`,
+      heading: `${plural(shims, 'heading')} changed address, with a redirect kept in place`,
       explanation: 'Documentation.AI generates heading ids differently from your old platform. Existing deep links to these sections keep working because a shim was written for each one — nothing to do, recorded for completeness.',
+      summary: `${plural(shims, 'section heading')} got a new web address on the new platform. Old links to those sections still land in the right place; nothing to do.`,
+      examples: [],
       items: [], more: 0, needsYou: false,
     });
   }
@@ -228,8 +302,10 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   const notRun = unmet.filter((gate) => gate.status === 'not-run');
   if (failed.length) {
     shortfalls.push({
-      heading: `${failed.length} check${failed.length === 1 ? '' : 's'} did not pass`,
+      heading: `${plural(failed.length, 'check')} did not pass`,
       explanation: 'These block release until resolved.',
+      summary: `${plural(failed.length, 'check')} did not pass yet. Our team resolves these before release; they are listed under “Checks” with what each one means.`,
+      examples: examplesOf(failed.map((gate) => gateLanguage(gate.id).title)),
       ...capped(failed.map((gate) => `${gateLanguage(gate.id).title} — ${gate.detail}`)),
       needsYou: false,
     });
@@ -240,6 +316,10 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
       explanation: fidelityMode === 'permissive'
         ? 'This migration ran in exploratory mode, which does not certify content fidelity. These checks report as not run rather than as passed — this run does not prove them either way.'
         : 'These checks did not run. They are reported as not run rather than as passed.',
+      summary: fidelityMode === 'permissive'
+        ? `${plural(notRun.length, 'check')} did not run because this was an exploratory run, which does not certify that content is word-for-word identical. A final run in exact mode proves that.`
+        : `${plural(notRun.length, 'check')} could not run yet (for example, checks that need the live preview). They are reported as not run, never as passed.`,
+      examples: [],
       ...capped(notRun.map((gate) => `${gateLanguage(gate.id).title} — ${gate.detail}`)),
       needsYou: false,
     });

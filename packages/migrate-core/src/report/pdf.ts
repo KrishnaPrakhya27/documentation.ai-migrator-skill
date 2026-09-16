@@ -65,7 +65,14 @@ export async function htmlToPdf(html: string, outputPath: string): Promise<void>
     writeFileSync(outputPath, Buffer.from(data, 'base64'), { mode: 0o600 });
   } finally {
     try { devtools?.close(); } catch { /* the connection is already gone */ }
+    // Wait for the browser to be gone before removing its profile: killed while still writing to
+    // it, the directory refills under the removal and `rmdir` reports it not empty — which once
+    // turned a PDF that had already been written into "PDF rendering failed". The profile is
+    // scratch either way, so a directory that will not go quietly is left for the OS, not raised.
     chrome.kill('SIGKILL');
-    rmSync(profile, { recursive: true, force: true });
+    await new Promise<void>((resolve) => { if (chrome.exitCode !== null || chrome.signalCode !== null) resolve(); else { chrome.once('exit', () => resolve()); setTimeout(resolve, 2000).unref(); } });
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { rmSync(profile, { recursive: true, force: true }); break; } catch { await new Promise((resolve) => setTimeout(resolve, 100)); }
+    }
   }
 }

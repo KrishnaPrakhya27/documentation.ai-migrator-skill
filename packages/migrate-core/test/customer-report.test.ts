@@ -69,12 +69,15 @@ describe('what did not carry over', () => {
   });
 
   it('says how many it is not showing rather than truncating in silence', () => {
-    const many = Array.from({ length: 40 }, (_, index) => page(`p${index}`, { migrate: false, reason: 'out of scope' }));
+    const many = Array.from({ length: 230 }, (_, index) => page(`p${index}`, { migrate: false, reason: 'out of scope' }));
     const report = build(workspace(), { pages: many }, allPassing());
     const shortfall = report.shortfalls[0];
-    expect(shortfall.items).toHaveLength(25);
-    expect(shortfall.more).toBe(15);
-    expect(renderCustomerReportHtml(report)).toContain('and 15 more');
+    expect(shortfall.items).toHaveLength(200);
+    expect(shortfall.more).toBe(30);
+    expect(renderCustomerReportHtml(report)).toContain('and 30 more');
+    // the front page says it in one sentence, with names, and never lists addresses
+    expect(shortfall.summary).toBe('230 pages were left out (recorded reason: out of scope). Tell us if any of them should be on the new site.');
+    expect(shortfall.examples).toEqual(['p0', 'p1', 'p2']);
   });
 
   it('reports links still pointing at the old site as needing a decision', () => {
@@ -115,7 +118,7 @@ describe('what did not carry over', () => {
     const report = build(workspace(), { pages: [page('a')], navigationSource: 'source-config' }, allPassing());
     expect(report.shortfalls).toEqual([]);
     expect(report.release.allowed).toBe(true);
-    expect(renderCustomerReportHtml(report)).toContain('Nothing. Every page, link, image and heading');
+    expect(renderCustomerReportHtml(report)).toContain('No decision is waiting on you');
   });
 });
 
@@ -132,8 +135,10 @@ describe('the page a customer reads', () => {
   });
 
   it('speaks in the customer\'s terms, never in gate ids', () => {
-    const html = renderCustomerReportHtml(full());
+    const gates = allPassing().map((gate) => (gate.id === 'code-blocks-exact' ? { ...gate, status: 'fail' as const, detail: '2 code blocks changed' } : gate));
+    const html = renderCustomerReportHtml(build(workspace(), { pages: [page('a')] }, gates));
     expect(html).toContain('Code samples are character-for-character identical');
+    expect(html).toContain('Checks at a glance');
     // The handles the team uses must not reach the customer's page.
     for (const id of ['source-content-exact', 'html-reconciliation', 'chrome-absent', 'deterministic-rerun']) {
       expect(html).not.toContain(id);
