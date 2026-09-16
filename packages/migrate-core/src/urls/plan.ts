@@ -120,7 +120,7 @@ export function readUrlPlan(workspace: string): UrlPlan | undefined {
 
 export function applyUrlPlan(tree: Tree, plan: UrlPlan): Tree {
   const byId = new Map(plan.pages.map((p) => [p.id, p]));
-  return { ...tree, pages: tree.pages.map((p) => { const u = byId.get(p.id); return u ? { ...p, newPath: u.new, reason: u.reason } : p; }) };
+  return { ...tree, pages: tree.pages.map((p) => { const u = byId.get(p.id); return u ? { ...p, newPath: u.new, reason: p.migrate ? u.reason : p.reason } : p; }) };
 }
 
 export interface RedirectRule { source: string; destination: string; statusCode: number }

@@ -22,6 +22,7 @@ import { describeMigrator } from '../session/provenance.js';
 import { countQuarantine } from '../session/quarantine.js';
 import { readBlockExclusions } from '../ir/exclusions.js';
 import { readScopeDecisions } from '../evidence/scope.js';
+import { readUrlPlan } from '../urls/plan.js';
 import type { Session } from '../session/workspace.js';
 import type { Tree, TreePage } from '../nav/tree.js';
 
@@ -104,6 +105,13 @@ function checksFrom(gates: GateResult[]): CustomerCheck[] {
   });
 }
 
+/** The reasons the run records for leaving a page out, said the way a customer would say them. */
+const SKIP_REASON_LANGUAGE: Record<string, string> = {
+  'help system out of scope': 'part of a separate help system, to be migrated on its own',
+  'publishes no article': 'no content of their own (empty or placeholder pages)',
+  'platform error page': "your old site's own error page",
+};
+
 /** Everything the run did not carry over, each with the reason it recorded at the time. */
 function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fidelityMode: 'exact' | 'permissive'): Shortfall[] {
   const shortfalls: Shortfall[] = [];
@@ -117,7 +125,7 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   }
   for (const [reason, pages] of [...byReason].sort((a, b) => b[1].length - a[1].length)) {
     shortfalls.push({
-      heading: `${pages.length} page${pages.length === 1 ? '' : 's'} not migrated — ${reason}`,
+      heading: `${pages.length} page${pages.length === 1 ? '' : 's'} not migrated — ${SKIP_REASON_LANGUAGE[reason] ?? reason}`,
       explanation: 'These exist in your source but were not carried over for the reason above. If any belong in the new site, they can be added.',
       ...capped(pages.map(pageLabel)),
       needsYou: true,
@@ -132,11 +140,14 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   if (substituted.length) {
     const label = (entry: { component: string; reason: string; approvedBy: string; contentLoss?: boolean }) =>
       `<${entry.component}> — ${entry.contentLoss ? 'the reader loses content' : 'the reader loses a convenience'}: ${entry.reason} (approved by ${entry.approvedBy})`;
+    const lossy = substituted.filter((entry) => entry.contentLoss);
     shortfalls.push({
-      heading: `${substituted.length} component${substituted.length === 1 ? '' : 's'} replaced by something the migration wrote`,
-      explanation: 'These could not be carried over as they were, so the migration put something in their place. The replacement text is ours, not yours, and each one points at the original tool for now — they need a home you control before you go live.',
+      heading: `${substituted.length} component${substituted.length === 1 ? '' : 's'} rebuilt as plain content`,
+      explanation: lossy.length
+        ? 'These relied on the old platform and could not be carried over as they were, so the migration put something in their place. Some content is not the same as before and needs your review.'
+        : 'These relied on your old platform to draw them in the browser, so the migration wrote out what readers saw as ordinary content. Nothing was lost.',
       ...capped(substituted.map(label)),
-      needsYou: true,
+      needsYou: lossy.length > 0,
     });
   }
 
@@ -168,12 +179,20 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   // them would state a structure the source does not have.
   const unlisted = readJsonIfPresent<Array<{ title?: string; newPath?: string; source?: string }>>(join(workspace, 'report', 'unlisted-pages.json'), []);
   if (unlisted.length) {
-    shortfalls.push({
-      heading: `${unlisted.length} page${unlisted.length === 1 ? '' : 's'} migrated but absent from the sidebar`,
-      explanation: 'Your source publishes these without placing them in its navigation, so they were migrated as pages but not added to the sidebar. Putting them somewhere would invent a structure your site does not have. Tell us where they belong and we will place them.',
-      ...capped(unlisted.map((page) => `${page.title || 'Untitled'}${page.newPath ? ` — /${page.newPath}` : ''}`)),
-      needsYou: true,
-    });
+    const labels = unlisted.map((page) => `${page.title || 'Untitled'}${page.newPath ? ` — /${page.newPath}` : ''}`);
+    shortfalls.push(tree.unlistedPlacement
+      ? {
+        heading: `${unlisted.length} page${unlisted.length === 1 ? '' : 's'} your old sidebar did not list, now added to the sidebar`,
+        explanation: 'Your old site published these pages without showing them in its sidebar. They were added to the sidebar under the folders they already sit in, so readers can find them.',
+        ...capped(labels),
+        needsYou: false,
+      }
+      : {
+        heading: `${unlisted.length} page${unlisted.length === 1 ? '' : 's'} migrated but absent from the sidebar`,
+        explanation: 'Your source publishes these without placing them in its navigation, so they were migrated as pages but not added to the sidebar. Putting them somewhere would invent a structure your site does not have. Tell us where they belong and we will place them.',
+        ...capped(labels),
+        needsYou: true,
+      });
   }
 
   // Content dropped from inside a page, each attributed to whoever decided it.
@@ -191,7 +210,16 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
 
   // Links that still point at the old site, because their target is outside this migration.
   const unmigrated = readJsonIfPresent<Array<{ route: string; url: string; knownSourcePage: boolean }>>(join(workspace, 'report', 'unmigrated-links.json'), []);
-  if (unmigrated.length) {
+  const sourceStaysUp = readUrlPlan(workspace)?.unmigratedLinks === 'source';
+  if (unmigrated.length && sourceStaysUp) {
+    const pages = new Set(unmigrated.map((link) => link.route)).size;
+    shortfalls.push({
+      heading: `${pages} ${pages === 1 ? 'page links' : 'pages link'} to content outside this migration`,
+      explanation: 'These links lead to material that is not part of this migration, such as the separate developer help system. As agreed, your existing site stays online, so they keep working and open there.',
+      ...capped(unmigrated.map((link) => `/${link.route} → ${link.url}`)),
+      needsYou: false,
+    });
+  } else if (unmigrated.length) {
     shortfalls.push({
       heading: `${unmigrated.length} link${unmigrated.length === 1 ? ' points' : 's point'} at pages this migration does not include`,
       explanation: 'These links target pages outside the agreed scope. They still work only while your existing site stays online — decide whether to bring those pages across or repoint the links.',

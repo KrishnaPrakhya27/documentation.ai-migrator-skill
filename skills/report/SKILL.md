@@ -16,7 +16,7 @@ Never ship raw markdown or model output to a customer. The customer report below
 
 `report/customer-report.pdf` is the only artefact written for the customer, and it answers two questions: what arrived, and what did not.
 
-The second is the point. A migration that omits pages and reports only its successes is worse than one that names them, because the customer finds out from a reader. So the report itemises, each with the reason the run recorded at the time:
+The second is the point. A migration that omits pages and reports only its successes is worse than one that names them, because the customer finds out from a reader. So the report accounts for each of these, with the reason the run recorded at the time (itemised in `customer-report.json`):
 
 - every page the plan did not migrate, grouped by reason (unpublished, not placed by the table of contents, out of scope);
 - every page held back at conversion (an unresolved snippet, or content exact mode refused to approximate);

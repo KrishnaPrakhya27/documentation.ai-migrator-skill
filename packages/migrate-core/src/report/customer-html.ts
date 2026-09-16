@@ -6,8 +6,9 @@
  *
  * The layout is built for paper. Colour carries no meaning on its own — every outcome is also a
  * word — because these get printed in black and white and forwarded to people who never saw the
- * original. A shortfall section is never collapsed or hidden behind a link: on paper there is
- * nothing to click, so everything that must be read is on the page.
+ * original. Each shortfall is a count and one plain sentence; page addresses and link targets are
+ * not printed — a wall of URLs reads as alarm, not information. The full lists stay in
+ * customer-report.json, and the page says they are available.
  */
 import type { CustomerReport, CustomerCheck, Shortfall } from './customer-data.js';
 import { GATE_GROUP_ORDER, GATE_GROUP_TITLES, type GateGroup } from './gate-language.js';
@@ -36,7 +37,6 @@ function checkRow(check: CustomerCheck): string {
       <td>
         <div class="ct">${escape(check.title)}</div>
         ${needsDetail ? `<div class="cd">${escape(check.detail)}</div>` : ''}
-        ${needsDetail && check.samples.length ? `<ul class="cs">${check.samples.slice(0, 5).map((sample) => `<li>${escape(sample)}</li>`).join('')}</ul>` : ''}
       </td>
     </tr>`;
 }
@@ -59,8 +59,6 @@ function shortfallBlock(shortfall: Shortfall): string {
   return `<section class="sf${shortfall.needsYou ? ' you' : ''}">
       <h3>${escape(shortfall.heading)}${shortfall.needsYou ? '<span class="you-tag">Needs your decision</span>' : ''}</h3>
       <p>${escape(shortfall.explanation)}</p>
-      ${shortfall.items.length ? `<ul class="items">${shortfall.items.map((item) => `<li>${escape(item)}</li>`).join('')}</ul>` : ''}
-      ${shortfall.more ? `<p class="more">…and ${shortfall.more} more, listed in full in the accompanying data file.</p>` : ''}
     </section>`;
 }
 
@@ -178,7 +176,7 @@ export function renderCustomerReportHtml(report: CustomerReport): string {
 <section class="band">
   <h2>What did not carry over</h2>
   ${report.shortfalls.length
-      ? `<p>Everything this migration did not bring across is listed below, with the reason recorded at the time.${needsYou ? ` ${needsYou} item${needsYou === 1 ? '' : 's'} need${needsYou === 1 ? 's' : ''} a decision from you.` : ''}</p>
+      ? `<p>A short summary of what was handled differently, and why.${needsYou ? ` ${needsYou} item${needsYou === 1 ? '' : 's'} need${needsYou === 1 ? 's' : ''} a decision from you.` : ''} The full page-by-page lists are kept alongside this report and are available on request.</p>
          ${report.shortfalls.map(shortfallBlock).join('')}`
       : '<p class="none">Nothing. Every page, link, image and heading in your source was carried over, and every check passed.</p>'}
 </section>
