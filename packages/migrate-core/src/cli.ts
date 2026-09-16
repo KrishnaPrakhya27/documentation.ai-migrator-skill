@@ -26,10 +26,6 @@ function named<T>(source: string, read: () => T): T {
   }
 }
 
-/** A heading's rendered words, badge text included: inline HTML contributes what a reader sees of it, not its tags. */
-function anchorText(nodes: import('./ir/types.js').Inline[]): string {
-  return nodes.map((n) => (n.type === 'inlineHtml' ? n.value.replace(/<[^<>]*>/g, '') : n.type === 'text' || n.type === 'inlineCode' ? n.value : 'children' in n ? anchorText(n.children) : '')).join('');
-}
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -95,7 +91,7 @@ import { DecisionLog } from './log/decisions.js';
 import { redact } from './log/redact.js';
 import { docToMdx } from './ir/to-dai-mdx.js';
 import type { DocIR } from './ir/types.js';
-import { walkBlocks, inlineText, type Block } from './ir/types.js';
+import { walkBlocks, inlineText, renderedText as anchorText, type Block } from './ir/types.js';
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
 import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
 import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';

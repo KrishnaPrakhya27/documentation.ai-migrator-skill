@@ -20,7 +20,7 @@ import { htmlAdapterOptions, type ScrapeProfile } from '../scrape/profiles.js';
 import { titleHeading } from '../ir/page-title.js';
 import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { authoredContentSnapshot, firstFidelityDifference } from './fidelity.js';
-import { inlineText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
+import { inlineText, renderedText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
 import { retargetDocLinks, siteLinkTarget, type SiteLinks } from '../urls/site-links.js';
 import { rewriteAssetRefs, type AssetManifest } from '../assets/manifest.js';
 
@@ -275,8 +275,20 @@ export function htmlReconciliation(page: RawSourcePage, platform: string, profil
   // The heading that states the page title leaves the body to become the frontmatter title, so the
   // output is not expected to repeat it. An H1 is skipped by headingWords already; a generator that
   // reserves H1 for its own masthead states the title in the heading the article opens with.
-  const renderedHeadings = headingWords(renderedDoc, titleHeading(rendered.children)?.id);
+  let renderedHeadings = headingWords(renderedDoc, titleHeading(rendered.children)?.id);
   const outputHeadings = headingWords(output);
+  // An endpoint page renders its authorization, parameter and response sections from the
+  // specification the page names in frontmatter, which `openapi-preserved` certifies against the
+  // captured document. Those headings are the platform's rendering of the spec, not words an author
+  // wrote: the published Markdown does not state them either, and the output states the operation
+  // instead. Only on such a page, and only for headings the Markdown does not state.
+  if (typeof output.frontmatter.openapi === 'string' && output.frontmatter.openapi.trim()) {
+    const markdown = rawSourceIr(page, platform, profile);
+    if (markdown) {
+      const authored = new Set(headingWords(markdown));
+      renderedHeadings = renderedHeadings.filter((word) => authored.has(word));
+    }
+  }
   const missingHeadings = headingsNotInOrder(renderedHeadings, outputHeadings);
   if (missingHeadings.length) {
     problems.push(`headings missing from output or out of order: ${JSON.stringify(missingHeadings)}; rendered ${JSON.stringify(renderedHeadings)}, output ${JSON.stringify(outputHeadings)}`);
@@ -347,10 +359,15 @@ function headingWords(doc: DocIR, skipId?: string): string[] {
   const words: string[] = [];
   walkBlocks(doc.children, (block) => {
     if (skipId !== undefined && block.id === skipId) return;
-    if (block.type === 'heading' && block.depth > 1) words.push(normaliseProse(inlineText(block.children)));
+    // A heading's words as a reader sees them: the badge composed inside one is part of the heading
+    // on the rendered page, so reading it as nothing made every page with a badged heading report
+    // that heading missing from its own output.
+    if (block.type === 'heading' && block.depth > 1) words.push(normaliseProse(renderedText(block.children)));
     else if (block.type === 'component' || block.type === 'dai') {
+      // A title stated in Markdown may hold inline markup - a step titled "Add the URL to your
+      // `docs.json` file" - and the rendered page shows the words inside it, not the backticks.
       const title = block.props.title;
-      if (typeof title === 'string' && title.trim()) words.push(normaliseProse(title));
+      if (typeof title === 'string' && title.trim()) words.push(normaliseProse(title.replace(/`/g, '')));
     }
   });
   return words.filter(Boolean);

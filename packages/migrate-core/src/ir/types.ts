@@ -192,6 +192,16 @@ export function blocksText(blocks: readonly Block[], indent = ''): string | unde
   return text || undefined;
 }
 
+/**
+ * The words a reader sees in a run of inline content, inline HTML included: a badge composed as a
+ * span contributes the label inside it, not its tags. `inlineText` reads inline HTML as nothing,
+ * which is right for a signature and wrong for anything comparing a heading with how it rendered.
+ */
+export function renderedText(nodes: Inline[] | undefined): string {
+  if (!nodes) return '';
+  return nodes.map((n) => (n.type === 'inlineHtml' ? n.value.replace(/<[^<>]*>/g, '') : n.type === 'text' || n.type === 'inlineCode' ? n.value : 'children' in n ? renderedText((n as { children: Inline[] }).children) : '')).join('');
+}
+
 /** Plain text of inline content, for prose matching and signatures. */
 export function inlineText(nodes: Inline[] | undefined): string {
   if (!nodes) return '';
