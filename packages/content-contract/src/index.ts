@@ -72,7 +72,7 @@ export interface ValidationIssue {
     | 'esm'
     | 'frontmatter-missing'
     | 'frontmatter-title-missing'
-    | 'executable';
+    | 'executable' | 'deployment-code-fence';
   message: string;
   line?: number;
 }
@@ -113,11 +113,43 @@ function foldMultiline(scan: string): string {
 }
 
 /** Strictly validate one MDX document against the contract. */
+/**
+ * The deployment's code-fence check, as the platform runs it (documentation-ai-backend
+ * mdxValidation.service.ts `checkNestedCodeBlocks`). It reads lines, not Markdown: any line whose
+ * trimmed text starts with three or more backticks is a fence to it, including a paragraph that opens
+ * with a ```` code span ```` which CommonMark reads as inline code. A page it rejects fails the whole
+ * preview build, so the local validator refuses the same lines rather than a stricter or looser rule.
+ */
+export function deploymentFenceIssue(mdx: string): { message: string; line: number } | undefined {
+  const lines = mdx.split('\n');
+  const stack: { line: number; count: number }[] = [];
+  let start = 0;
+  if (lines[0]?.trim() === '---') {
+    for (let i = 1; i < lines.length; i++) if (lines[i].trim() === '---') { start = i + 1; break; }
+  }
+  for (let i = start; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    const run = /^(`{3,})/.exec(trimmed);
+    if (!run) continue;
+    const count = run[1].length;
+    const closing = trimmed === '`'.repeat(count);
+    const top = stack[stack.length - 1];
+    if (!top) { stack.push({ line: i + 1, count }); continue; }
+    if (count < top.count) continue;
+    if (closing) { stack.pop(); continue; }
+    return { line: i + 1, message: `code fence with ${count} backticks and an info string inside a ${top.count}-backtick code block opened at line ${top.line}; the deployment rejects this page` };
+  }
+  if (stack.length) return { line: stack[0].line, message: `code block of ${stack[0].count} backticks opened here is never closed; the deployment rejects this page` };
+  return undefined;
+}
+
 export function validateMdx(mdx: string, contract = loadContract()): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const { frontmatter, body, bodyStartLine } = splitFrontmatter(mdx);
   if (frontmatter === null) issues.push({ severity: 'error', code: 'frontmatter-missing', message: 'frontmatter block is required for migrated pages' });
   else if (!/^title:\s*\S/m.test(frontmatter)) issues.push({ severity: 'error', code: 'frontmatter-title-missing', message: 'frontmatter.title is required' });
+  const fence = deploymentFenceIssue(mdx);
+  if (fence) issues.push({ severity: 'error', code: 'deployment-code-fence', message: fence.message, line: fence.line });
 
   const scan = foldMultiline(stripCode(body));
   const emittable = new Set(contract.emittable);

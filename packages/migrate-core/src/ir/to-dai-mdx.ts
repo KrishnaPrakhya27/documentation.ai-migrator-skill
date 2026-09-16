@@ -88,6 +88,11 @@ function wrapEmphasis(inner: string, marker: string): string {
   return `${lead}${marker}${core}${marker}${trail}`;
 }
 
+/** Code-span text written inside a `<code>` element: every character Markdown or MDX would read as syntax is a reference. */
+function codeElementText(value: string): string {
+  return value.replace(/[`*_~\[\]<>{}&\\|#!]/g, (ch) => `&#${ch.charCodeAt(0)};`);
+}
+
 export function inlineToMdx(nodes: Inline[], insideLink = false): string {
   return nodes.map((n) => {
     switch (n.type) {
@@ -168,7 +173,15 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
         // A paragraph that opens with `import` or `export` is prose (a GitBook page quoting a line of
         // code in a sentence). MDX would read it as ESM and drop it, so its first letter is written
         // as the character reference it stands for: the same word, read as text.
-        out.push(inlineToMdx(b.children).replace(/^(import|export)(?=\s)/, (word) => `&#${word.charCodeAt(0)};${word.slice(1)}`));
+        // The deployment reads any line that starts with three backticks as a code fence, so a
+        // paragraph opening with a code span delimited by ```` (one that shows a fence, like
+        // "```` ```py ```` starts a Python block") failed the whole preview build. That opening
+        // span is written as the element it renders, with its characters as references: the same
+        // inline code to a Markdown reader, and a line that no longer starts with backticks.
+        const [first, ...rest] = b.children;
+        const opensWithFence = first?.type === 'inlineCode' && /^`{3,}/.test(inlineToMdx([first]));
+        const written = opensWithFence ? `<code>${codeElementText(first.value)}</code>${inlineToMdx(rest)}` : inlineToMdx(b.children);
+        out.push(written.replace(/^(import|export)(?=\s)/, (word) => `&#${word.charCodeAt(0)};${word.slice(1)}`));
         break;
       }
       case 'heading': {
