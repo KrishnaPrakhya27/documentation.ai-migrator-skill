@@ -1005,7 +1005,7 @@ async function main() {
       markStage(workspace, 'assets', 'done');
       ok(`${entries.length} assets (${referenceTally(result.manifest) || 'no references'}) via ${provider}: ${entries.filter((e) => e.status === 'ingested').length} ingested, ${entries.filter((e) => e.status === 'downloaded').length} local, ${entries.filter((e) => e.status === 'kept-external').length} kept external, ${entries.filter((e) => e.status === 'failed').length} failed; ${entries.reduce((n, e) => n + e.altMissing, 0)} references without alt`);
       const excludedEntries = entries.filter((e) => e.excluded);
-      for (const entry of excludedEntries) console.log(`· not carried by decision (${entry.excluded!.approvedBy}): ${entry.sourceUrls[0]} — ${entry.excluded!.reason}`);
+      for (const entry of excludedEntries) console.log(redact(`· not carried by decision (${entry.excluded!.approvedBy}): ${entry.sourceUrls[0]} — ${entry.excluded!.reason}`));
       if (provider === 'local') console.log('· provider local: release remains blocked until dai-api or s3 assigns final URLs');
       break;
     }
