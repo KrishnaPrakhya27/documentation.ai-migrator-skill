@@ -9,6 +9,7 @@ import { fingerprint } from '../src/scrape/fingerprint.js';
 import { legalisePath, headingSlug, slugify } from '../src/urls/slugger.js';
 import { defaultUrlPlan, redirectMaps, anchorMap, applyUrlPlan } from '../src/urls/plan.js';
 import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor } from '../src/urls/site-links.js';
+import { redirectProblems } from '../src/urls/redirect-graph.js';
 import { buildDocumentationNavigation, buildNavigation, pagesWithoutPlacement, placedPageIds, type Tree, type TreePage } from '../src/nav/tree.js';
 import { loadContract, validateMdx, validateNavigation } from '@dai/content-contract';
 import { RulesEngine, applyDeclaredLosses, loadMappings, type MappingTable } from '../src/components/rules-engine.js';
@@ -1177,5 +1178,140 @@ describe('a crawled path has no filename convention in it', () => {
     // in a repository the same spelling IS the index of its directory, and still is
     const repo = { platform: 'gitbook', pages: [page('docs/migration/readme.md', '/docs/migration/readme', 'migration')] } as any;
     expect(siteLinksFor(repo).routes['/docs/migration']).toBe('migration');
+  });
+});
+
+describe('a page that left the migration leaves no redirect behind', () => {
+  const plan = {
+    mode: 'preserve' as const,
+    pages: [
+      { id: 'kept', old: '/Guides/setup.htm', new: 'Guides/setup', reason: 'preserve' },
+      { id: 'gone', old: '/Search.htm', new: 'Search', reason: 'preserve' },
+    ],
+  };
+  it('writes no rule for a page the migration does not write', () => {
+    const r = redirectMaps(plan as never, (id) => id === 'kept');
+    expect(r.exact.map((rule) => rule.source)).toEqual(['/Guides/setup.htm']);
+    expect(redirectProblems(r.exact, new Set(['Guides/setup']))).toEqual([]);
+  });
+  it('still writes every rule when no page set is given', () => {
+    expect(redirectMaps(plan as never).exact).toHaveLength(2);
+  });
+  it('would otherwise point the excluded page at a route nobody wrote', () => {
+    const r = redirectMaps(plan as never);
+    expect(redirectProblems(r.exact, new Set(['Guides/setup'])).map((p) => p.kind)).toContain('missing-target');
+  });
+});
+
+describe('a section landing page opens its section', () => {
+  const page = (id: string, newPath: string, group: string[], title: string, order: number): TreePage =>
+    ({ id, title, source: `https://learn.example.com/${newPath}.htm`, group, order, oldPath: `/${newPath}.htm`, migrate: true, newPath } as TreePage);
+  // the sidebar the source states places one page; everything else is placed by --place-unlisted
+  const seed = page('seed', 'home', [], 'Home', 0);
+  const sourceNavigation = [{ type: 'page' as const, pageId: 'seed', title: 'Home' }];
+  const nav = (list: TreePage[]) => {
+    const built = buildNavigation([seed, ...list], { placeUnlisted: true, sourceNavigation }).navigation as { pages: Array<Record<string, unknown>> };
+    return built.pages.filter((entry) => entry.path !== 'home');
+  };
+  // a MadCap site publishes /Explainers.htm beside /Explainers/, and every section's page carries
+  // the site's name rather than the section's
+  const section = [
+    page('a', 'Explainers/events', ['Explainers'], 'Custom events', 2),
+    page('b', 'Explainers/points', ['Explainers'], 'Points', 3),
+  ];
+
+  it('is the group\u2019s own page, not a sibling of the group', () => {
+    const top = nav([page('lp', 'Explainers', [], 'SessionM Help Center', 1), ...section]);
+    expect(top).toHaveLength(1);
+    expect(top[0]).toMatchObject({ group: 'Explainers', path: 'Explainers' });
+    expect((top[0].pages as Array<{ title: string }>).map((entry) => entry.title)).toEqual(['Custom events', 'Points']);
+  });
+
+  it('opens the section from an index page the same way', () => {
+    const top = nav([page('lp', 'Explainers/index', ['Explainers'], 'SessionM Help Center', 1), ...section]);
+    expect(top).toHaveLength(1);
+    expect(top[0]).toMatchObject({ group: 'Explainers', path: 'Explainers/index' });
+    expect(top[0].pages).toHaveLength(2);
+  });
+
+  it('opens a section of one page too: the section keeps its page, nothing collapses', () => {
+    const top = nav([page('lp', 'Explainers', [], 'SessionM Help Center', 1), section[0]]);
+    expect(top).toHaveLength(1);
+    expect(top[0]).toMatchObject({ group: 'Explainers', path: 'Explainers' });
+    expect(top[0].pages).toHaveLength(1);
+  });
+
+  it('leaves an index page alone when it is all the folder holds: the folder would be empty', () => {
+    const top = nav([page('lp', 'Explainers/index', ['Explainers'], 'SessionM Help Center', 1)]);
+    expect(top.find((entry) => entry.group === 'Explainers')).not.toHaveProperty('path');
+    expect(top.find((entry) => entry.group === 'Explainers')!.pages).toHaveLength(1);
+  });
+
+  it('does not take a page that merely shares a name with the folder', () => {
+    const top = nav([page('x', 'Guides/Explainers', ['Guides'], 'Explainers', 1), ...section]);
+    expect(top.find((entry) => entry.group === 'Explainers')).not.toHaveProperty('path');
+  });
+});
+
+describe('a section whose pages all sit in subfolders is still a section', () => {
+  const page = (id: string, newPath: string, group: string[], title: string, order: number): TreePage =>
+    ({ id, title, source: `https://learn.example.com/${newPath}.htm`, group, order, oldPath: `/${newPath}.htm`, migrate: true, newPath } as TreePage);
+  const seed = page('seed', 'home', [], 'Home', 0);
+  const nav = (list: TreePage[]) => {
+    const built = buildNavigation([seed, ...list], { placeUnlisted: true, sourceNavigation: [{ type: 'page' as const, pageId: 'seed', title: 'Home' }] }).navigation as { pages: Array<Record<string, unknown>> };
+    return built.pages.filter((entry) => entry.path !== 'home');
+  };
+
+  it('opens from its landing page even when no page sits in the folder itself', () => {
+    const top = nav([
+      page('lp', 'Explainers', [], 'SessionM Help Center', 1),
+      page('a', 'Explainers/Profile/overview', ['Explainers', 'Profile'], 'Overview', 2),
+      page('b', 'Explainers/Events/custom', ['Explainers', 'Events'], 'Custom events', 3),
+    ]);
+    expect(top).toHaveLength(1);
+    expect(top[0]).toMatchObject({ group: 'Explainers', path: 'Explainers' });
+    expect((top[0].pages as Array<{ group?: string }>).map((entry) => entry.group)).toEqual(['Profile', 'Events']);
+  });
+});
+
+describe('the rendered-content gate reads the whole source, not only its top level', () => {
+  const run = async (doc: DocIR, html: string) => {
+    const result = await runBrowserContentGate('https://preview.example', [{ id: 'p', newPath: 'guide', migrate: true, doc } as never], {
+      render: async () => html,
+      routes: new Set(['guide']),
+    });
+    return result.routes[0]?.problems ?? [];
+  };
+
+  it('counts an image the source put inside a link', async () => {
+    // a MadCap tile: an image and its words wrapped in one link
+    const doc = markdownToIr('---\ntitle: Features\n---\n\n[![](https://cdn.example/tile.png)Loyalty](/Features/Loyalty)\n', { platform: 'madcap', file: 'https://learn.example.com/Features.htm', pageId: 'p' });
+    const problems = await run(doc, '<html><body><article><p><a href="/Features/Loyalty"><img src="https://cdn.example/tile.png" alt=""/>Loyalty</a></p></article></body></html>');
+    expect(problems.filter((problem) => problem.startsWith('image count differs'))).toEqual([]);
+  });
+
+  it('accepts a link the source wrote relative to the page it sits on', async () => {
+    const doc = markdownToIr('---\ntitle: Delete group\n---\n\nSee [Create group](../../../../Admin_Shadow/Admin/Create/Create%20Group.htm).\n', { platform: 'madcap', file: 'https://learn.example.com/Procedures/Admin/Manage/archive/Delete%20Group.htm', pageId: 'p' });
+    const problems = await run(doc, '<html><body><article><p>See <a href="https://learn.example.com/Admin_Shadow/Admin/Create/Create%20Group.htm">Create group</a>.</p></article></body></html>');
+    expect(problems.filter((problem) => problem.startsWith('external link'))).toEqual([]);
+  });
+
+  it('accepts a source path whose space the browser reads back as %20', async () => {
+    const doc = markdownToIr('---\ntitle: Delete group\n---\n\nSee [Create group](https://learn.example.com/Admin_Shadow/Create%20Group.htm).\n', { platform: 'madcap', file: 'https://learn.example.com/archive/Delete%20Group.htm', pageId: 'p' });
+    // the IR holds the path as the source wrote it, with a literal space
+    const problems = await run(doc, '<html><body><article><h1>Delete group</h1><p>See <a href="https://learn.example.com/Admin_Shadow/Create%20Group.htm">Create group</a>.</p></article></body></html>');
+    expect(problems.filter((problem) => problem.startsWith('external link'))).toEqual([]);
+  });
+
+  it('still reports an external link the source never states', async () => {
+    const doc = markdownToIr('---\ntitle: Delete group\n---\n\nSee [Create group](../Create.htm).\n', { platform: 'madcap', file: 'https://learn.example.com/Procedures/Delete.htm', pageId: 'p' });
+    const problems = await run(doc, '<html><body><article><p>See <a href="https://elsewhere.example/Create.htm">Create group</a>.</p></article></body></html>');
+    expect(problems.some((problem) => problem.startsWith('external link https://elsewhere.example/Create.htm'))).toBe(true);
+  });
+
+  it('reads the words inside an inline HTML element the reader sees', async () => {
+    const doc = markdownToIr('---\ntitle: Upload\n---\n\nIf ticked <u>prior to ingest</u>, mapping takes place.\n', { platform: 'madcap', file: 'https://learn.example.com/u.htm', pageId: 'p' });
+    const problems = await run(doc, '<html><body><article><h1>Upload</h1><p>If ticked <u>prior to ingest</u>, mapping takes place.</p></article></body></html>');
+    expect(problems).toEqual([]);
   });
 });

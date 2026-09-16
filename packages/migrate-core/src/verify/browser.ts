@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { isHtmlChromeNode, type GateResult } from './gates.js';
 import { assertPublicHost } from '../scrape/fetcher.js';
 import { find, findAll, parseHtml, type Dom } from '../ir/from-html.js';
-import { inlineText, walkBlocks, type Block, type DocIR } from '../ir/types.js';
+import { inlineText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
 import { mapConcurrentOrdered } from './concurrency.js';
 
 const execFileAsync = promisify(execFile);
@@ -254,6 +254,26 @@ interface DocumentSegment { text: string; optional: boolean }
  * Text inside a collapsed block may be absent from a static render, so it is optional; a tab set renders
  * every tab label before its panels, so its titles come first; dropped platform chrome is not content.
  */
+/**
+ * Inline text as the reader sees it. `inlineText` drops an inline HTML element, which is right for
+ * a title but not for comparing against a rendered page: the source writes
+ * `stores <u>prior to ingest</u>, auto-mapping`, the reader sees those words, and expecting the
+ * text either side of them to be adjacent reported a page that was perfectly correct.
+ */
+function renderedInlineText(nodes: Inline[] | undefined): string {
+  if (!nodes) return '';
+  return nodes.map((node) => {
+    switch (node.type) {
+      case 'text': case 'inlineCode': return node.value;
+      case 'inlineHtml': return node.value.replace(/<[^>]*>/g, '');
+      case 'break': return '\n';
+      case 'image': return node.alt;
+      case 'footnoteReference': return '';
+      default: return renderedInlineText((node as { children?: Inline[] }).children);
+    }
+  }).join('');
+}
+
 function documentSegments(doc: DocIR, interactive = false): DocumentSegment[] {
   const segments: DocumentSegment[] = [];
   const unrendered = unrenderedBlockIds(doc, interactive);
@@ -263,10 +283,10 @@ function documentSegments(doc: DocIR, interactive = false): DocumentSegment[] {
       if (isHtmlChromeNode(block)) continue;
       const optional = unrendered.has(block.id);
       switch (block.type) {
-        case 'paragraph': case 'heading': push(inlineText(block.children), optional); break;
+        case 'paragraph': case 'heading': push(renderedInlineText(block.children), optional); break;
         // a mermaid fence renders as a diagram, not as its source text
         case 'code': push(block.value, optional || block.lang === 'mermaid'); break;
-        case 'table': for (const row of block.children) for (const cell of row.children) push(inlineText(cell.children), optional); break;
+        case 'table': for (const row of block.children) for (const cell of row.children) push(renderedInlineText(cell.children), optional); break;
         // Image alt text is not rendered text; it is compared attribute to attribute below.
         case 'figure': if (block.caption) push(inlineText(block.caption), optional); break;
         case 'blockquote': visit(block.children); break;
@@ -320,12 +340,37 @@ function sourceOutline(doc: DocIR, interactive = false): string[] {
   return out;
 }
 
+/**
+ * Every inline node in a tree, including the ones nested inside a link, emphasis or other wrapper.
+ * Reading only the direct children missed an image inside a link and a link inside emphasis, and
+ * reported both as content the source never stated.
+ */
+function inlineNodes(nodes: readonly Inline[]): Inline[] {
+  return nodes.flatMap((node) => {
+    const children = (node as { children?: Inline[] }).children;
+    return Array.isArray(children) ? [node, ...inlineNodes(children)] : [node];
+  });
+}
+
 function sourceLinkTargets(doc: DocIR): Set<string> {
   const urls = new Set<string>();
+  // A link the source writes relative to the page it sits on is the same link however it is
+  // written: `../../../../Admin_Shadow/x.htm` on /Procedures/Admin/Manage/archive/y.htm and
+  // https://host/Admin_Shadow/x.htm name one target. The migration writes the absolute form
+  // wherever the operator declared the source site stays up, so both forms are the source's.
+  const add = (url: string): void => {
+    urls.add(url);
+    if (url.startsWith('#')) return;
+    // A URL is compared as a URL, not as text. A space in a source path is %20 once a browser has
+    // read the link, and a link written relative to the page it sits on names the same target as
+    // its absolute form: both are the source's own statement of where it points.
+    try { urls.add(new URL(url, doc.source).toString()); } catch { /* not a URL this page can resolve */ }
+  };
   walkBlocks(doc.children, (block) => {
-    if (block.type === 'paragraph' || block.type === 'heading') { for (const inline of block.children) if (inline.type === 'link') urls.add(inline.url); }
+    if (block.type === 'paragraph' || block.type === 'heading') { for (const inline of inlineNodes(block.children)) if (inline.type === 'link') add(inline.url); }
+    else if (block.type === 'table') { for (const row of block.children) for (const cell of row.children) for (const inline of inlineNodes(cell.children)) if (inline.type === 'link') add(inline.url); }
     // a component links through href, and an embed the target cannot frame renders its src as a link
-    else if (block.type === 'component' || block.type === 'dai') for (const key of ['href', 'src', 'url']) { const value = block.props[key]; if (typeof value === 'string') urls.add(value); }
+    else if (block.type === 'component' || block.type === 'dai') for (const key of ['href', 'src', 'url']) { const value = block.props[key]; if (typeof value === 'string') add(value); }
   });
   return urls;
 }
@@ -337,7 +382,8 @@ function sourceImages(doc: DocIR, interactive = false): Array<{ src: string; alt
     if (unrendered.has(block.id)) return;
     if (block.type === 'image') images.push({ src: block.url, alt: block.alt });
     else if (block.type === 'figure') images.push({ src: block.image.url, alt: block.image.alt });
-    else if (block.type === 'paragraph') { for (const inline of block.children) if (inline.type === 'image') images.push({ src: inline.url, alt: inline.alt }); }
+    else if (block.type === 'paragraph' || block.type === 'heading') { for (const inline of inlineNodes(block.children)) if (inline.type === 'image') images.push({ src: inline.url, alt: inline.alt }); }
+    else if (block.type === 'table') { for (const row of block.children) for (const cell of row.children) for (const inline of inlineNodes(cell.children)) if (inline.type === 'image') images.push({ src: inline.url, alt: inline.alt }); }
     // a card's cover image renders with the card title as its alt text
     else if ((block.type === 'component' || block.type === 'dai') && typeof block.props.image === 'string') images.push({ src: block.props.image, alt: typeof block.props.title === 'string' ? block.props.title : '' });
   });

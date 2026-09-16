@@ -1134,14 +1134,27 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(dropExcludedAssets(inlineSnippetBodies(doc, snippets), manifest), manifest), (url, source) => parameterLink(siteLink(url, source))), engine, substitutedComponents);
+        // A link a handler writes is retargeted like any other. Retargeting runs before the engine so
+        // handlers read the routes the rest of the page uses; it runs again after them because a
+        // handler can write links of its own — a MadCap tile menu is drawn from the table of contents
+        // it names, and those are links between pages too. A route already written resolves to itself,
+        // so only the handler's new links move, and both sides of the comparison are read the same way.
+        const sourceLink = (url: string, source?: string) => parameterLink(siteLink(url, source));
+        const sourcePrepared = retargetDocLinks(applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(dropExcludedAssets(inlineSnippetBodies(doc, snippets), manifest), manifest), sourceLink), engine, substitutedComponents), sourceLink);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
+        // The page's links are retargeted twice, so a link that lands outside the migration is recorded
+        // once: the report counts links, not passes over them.
+        const recorded = new Set<string>();
         const recordSiteLink = (url: string, source?: string): string => {
           const outcome = resolveSiteLink(url, source);
-          if (outcome && outcome.kind !== 'route') unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
+          if (outcome && outcome.kind !== 'route' && !recorded.has(url)) {
+            recorded.add(url);
+            unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
+          }
           return outcome?.target ?? url;
         };
-        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(dropExcludedAssets(withSnippets, manifest, (node, entry) => ledger.excluded(doc.pageId, node.id, `asset not carried by approved decision: ${entry.excluded!.reason}`, `decision:${entry.excluded!.approvedBy}`)), manifest), (url, source) => parameterLink(recordSiteLink(url, source))));
+        const resolvedLink = (url: string, source?: string) => parameterLink(recordSiteLink(url, source));
+        const resolved = retargetDocLinks(engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(dropExcludedAssets(withSnippets, manifest, (node, entry) => ledger.excluded(doc.pageId, node.id, `asset not carried by approved decision: ${entry.excluded!.reason}`, `decision:${entry.excluded!.approvedBy}`)), manifest), resolvedLink)), resolvedLink);
         const sourceSnapshot = authoredContentSnapshot(sourcePrepared);
         const resolvedSnapshot = authoredContentSnapshot(resolved);
         const pass = fidelityEqual(sourceSnapshot, resolvedSnapshot);
@@ -1273,7 +1286,8 @@ async function main() {
       // An earlier run may have carried source branding into this file; it must not survive a re-run.
       writeJson(docJsonPath, { ...withoutSourceBranding(existing), ...(initialRoute ? { initialRoute } : {}), ...site, ...navigation });
       const plan = readUrlPlan(workspace)!;
-      const r = redirectMaps(plan);
+      const migrating = new Set(tree.pages.filter((page) => page.migrate).map((page) => page.id));
+      const r = redirectMaps(plan, (id) => migrating.has(id));
       const platformExact = (meta.redirects?.exact ?? []).filter((x) => !r.exact.some((e) => e.source === x.source));
       const platformWildcard = (meta.redirects?.wildcard ?? []).filter((x) => !r.wildcard.some((e) => e.source === x.source));
       r.exact.push(...platformExact); r.wildcard.push(...platformWildcard);
@@ -1435,11 +1449,13 @@ async function main() {
         iframeHosts: existsSync(join(workspace, 'plan', 'assets.yaml')) ? (parseYaml(readFileSync(join(workspace, 'plan', 'assets.yaml'), 'utf8')) as { iframeHosts?: string[] }).iframeHosts : undefined,
       });
       const sourceEvidence = buildSourceEvidence(workspace, tree);
-      // A substitution a named person approved is read on the source side as what replaced it, exactly
-      // as convert read it; otherwise the one page a live demo sits on is reported as differing from
-      // a source the operator already owned the difference in.
-      const verifySubstituted = new Set<string>(readScopeDecisions(workspace).substituted.map((entry) => entry.component));
-      if (sourceEvidence) sourceEvidence.declaredLosses = (d) => applyDeclaredLosses(d, verifyEngine, verifySubstituted);
+      // The components a named person recorded a substitution for are read as what replaced them,
+      // exactly as convert read them. Without this the source side still holds the placeholder - a
+      // MadCap tile menu's empty <ul>, the one page a live demo sits on - and what the migration wrote
+      // from a decision the operator already owns is reported as text no source states.
+      const substitutedComponents = new Set(readScopeDecisions(workspace).substituted.map((entry) => entry.component));
+      const sourceSide = (d: DocIR): DocIR => applyDeclaredLosses(d, verifyEngine, substitutedComponents);
+      if (sourceEvidence) sourceEvidence.declaredLosses = sourceSide;
       const gates = runGates({
         workspace, outputDir: join(workspace, 'output'), sourceEvidence, pinnedSourceManifest: s.hashes.sourceManifest, pinnedAcquisition: s.hashes.acquisition, pinnedOpenapi: s.hashes.openapi,
         // Gate 3 approves the report this run produces, so a local verify asks for gates 1 and 2;
@@ -1491,7 +1507,8 @@ async function main() {
               const raw = rawByPageId.get(page.id);
               const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
               const snapshot = fromSource ? undefined : readSnapshotPage(workspace, page.id);
-              return fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink));
+              const doc = fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink));
+              return doc && sourceSide(doc);
             },
           })),
           {

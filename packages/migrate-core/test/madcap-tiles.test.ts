@@ -5,11 +5,13 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { htmlToIr } from '../src/ir/from-html.js';
 import { PROFILES, htmlAdapterOptions } from '../src/scrape/profiles.js';
-import { RulesEngine, loadMappings } from '../src/components/rules-engine.js';
+import { RulesEngine, loadMappings, applyDeclaredLosses } from '../src/components/rules-engine.js';
 import { Ledger } from '../src/ledger/dispositions.js';
 import { DecisionLog } from '../src/log/decisions.js';
 import { ensureWorkspace } from '../src/session/workspace.js';
 import { docToMdx } from '../src/ir/to-dai-mdx.js';
+import { retargetDocLinks, siteLinkTarget, type SiteLinks } from '../src/urls/site-links.js';
+import { authoredContentSnapshot, fidelityEqual } from '../src/verify/fidelity.js';
 import type { DocIR } from '../src/ir/types.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -61,5 +63,57 @@ describe('MadCap landing tabs and tile menus', () => {
   });
   it('holds the page when the table of contents was not captured', () => {
     expect(convert(new Map())).toContain('QUARANTINED: linked table of contents');
+  });
+});
+
+describe('a tile menu’s links are links between pages', () => {
+  const toc = 'https://learn.example.com/Data/Tocs/release_notes_toc.js';
+  const data = new Map<string, string>([
+    [toc, "define({numchunks:1,prefix:'release_notes_toc_Chunk',tree:{n:[{i:0,c:0},{i:1,c:0}]}})"],
+    ['https://learn.example.com/Data/Tocs/release_notes_toc_Chunk0.js', "define({'/ReleaseNotes/release-2024-4.htm':{i:[0],t:['July 2024 Release Notes'],b:['']},'/ReleaseNotes/gone.htm':{i:[1],t:['Retired notes'],b:['']}})"],
+  ]);
+  const links: SiteLinks = {
+    routes: { '/ReleaseNotes/release-2024-4.htm': 'ReleaseNotes/release-2024-4' },
+    sourceBases: { 'https://learn.example.com/ReleaseNotes/release-notes.htm': '/ReleaseNotes/release-notes.htm' },
+    sourcePages: ['/ReleaseNotes/release-2024-4.htm'],
+    hosts: ['learn.example.com'],
+    origin: 'https://learn.example.com',
+    unmigrated: 'keep',
+  };
+  const build = () => {
+    const source = 'https://learn.example.com/ReleaseNotes/release-notes.htm';
+    const html = '<html data-mc-path-to-help-system="../"><body><div id="mc-main-content"><ul class="nocontent menu mc-component" data-mc-linked-toc="Data/Tocs/release_notes_toc.js" data-mc-max-depth="1"></ul></div></body></html>';
+    const ir = htmlToIr(html, htmlAdapterOptions(PROFILES.madcap, { platform: 'madcap', file: source }));
+    for (const b of ir.children) if (b.type === 'component' && b.name === 'MCLinkedToc') { b.props.tocUrl = toc; b.props.helpRoot = 'https://learn.example.com/'; }
+    const doc: DocIR = { pageId: 'p', platform: 'madcap', source, frontmatter: { title: 'Release Notes' }, children: ir.children };
+    const w = mkdtempSync(join(tmpdir(), 'dai-toclinks-')); ensureWorkspace(w);
+    const engine = new RulesEngine({ platform: 'madcap', mappings: loadMappings([join(repoRoot, 'skills/migrate-generic/mappings/generic.yaml')]), ledger: new Ledger(w), log: new DecisionLog(w), flareData: data });
+    const target = siteLinkTarget(links);
+    // the convert pipeline: retarget, resolve, retarget again
+    return { engine, doc, resolved: retargetDocLinks(engine.resolveDoc(retargetDocLinks(doc, target)), target) };
+  };
+
+  it('sends a drawn link to the route that page migrated to, not back to the source site', () => {
+    const mdx = docToMdx(build().resolved);
+    expect(mdx).toContain('[July 2024 Release Notes](/ReleaseNotes/release-2024-4)');
+    expect(mdx).not.toContain('https://learn.example.com/ReleaseNotes/release-2024-4.htm');
+  });
+
+  it('leaves a drawn link the migration does not write where the source pointed it', () => {
+    expect(docToMdx(build().resolved)).toContain('[Retired notes](https://learn.example.com/ReleaseNotes/gone.htm)');
+  });
+
+  it('reads the source side of the exactness comparison the same way once the menu is a recorded substitution', () => {
+    const { engine, doc, resolved } = build();
+    const target = siteLinkTarget(links);
+    const prepared = retargetDocLinks(applyDeclaredLosses(retargetDocLinks(doc, target), engine, new Set(['MCLinkedToc'])), target);
+    expect(fidelityEqual(authoredContentSnapshot(prepared), authoredContentSnapshot(resolved))).toBe(true);
+  });
+
+  it('still fails the comparison when no one recorded that substitution', () => {
+    const { engine, doc, resolved } = build();
+    const target = siteLinkTarget(links);
+    const prepared = retargetDocLinks(applyDeclaredLosses(retargetDocLinks(doc, target), engine), target);
+    expect(fidelityEqual(authoredContentSnapshot(prepared), authoredContentSnapshot(resolved))).toBe(false);
   });
 });

@@ -27,6 +27,39 @@ export const VIEWPORTS: Viewport[] = [
  * Runs in the page. A few pixels of overflow are rounding, not a broken layout, and an element
  * inside its own horizontally scrolling container is a table or a code block behaving correctly.
  */
+/**
+ * Layout is measured once the page has stopped moving, not merely once the document is complete.
+ * The target hydrates and then loads its images, so a measurement taken at `readyState` complete
+ * caught a different set of images each run: the same deployment reported 335 problems once and
+ * 197 the next time, which is a number no one can act on. Waits for the fonts and every image the
+ * page has, then for two consecutive animation frames with the same layout width.
+ */
+export const SETTLE = `(async () => {
+  const deadline = Date.now() + 8000;
+  try { await document.fonts.ready; } catch { /* fonts are not required to settle the layout */ }
+  const images = [...document.images].filter((image) => !image.complete);
+  await Promise.all(images.map((image) => new Promise((done) => {
+    const stop = () => { image.removeEventListener('load', stop); image.removeEventListener('error', stop); done(); };
+    image.addEventListener('load', stop); image.addEventListener('error', stop);
+    setTimeout(stop, Math.max(0, deadline - Date.now()));
+  })));
+  // A headless page that is never painted may not run an animation frame at all, so every frame
+  // also has a timer behind it: this waits for the layout to settle, it never waits forever.
+  const frame = () => new Promise((paint) => {
+    let settled = false;
+    const finish = () => { if (settled) return; settled = true; paint(document.documentElement.scrollWidth); };
+    requestAnimationFrame(finish);
+    setTimeout(finish, 50);
+  });
+  let last = await frame();
+  while (Date.now() < deadline) {
+    const next = await frame();
+    if (next === last) return true;
+    last = next;
+  }
+  return true;
+})()`;
+
 const MEASURE = `(() => {
   const tolerance = 4;
   const viewport = document.documentElement.clientWidth;
@@ -90,7 +123,7 @@ export async function runResponsiveGate(
   const jobs = [...viewports].sort((a, b) => a.width - b.width).flatMap((viewport) => ordered.map(({ route, url }) => ({ viewport, route, url })));
   const measured = await mapConcurrentOrdered(jobs, concurrency, async ({ viewport, route, url }) => {
     try {
-      const measurement = JSON.parse(await session.measure<string>(url, MEASURE, { viewport: { width: viewport.width, height: viewport.height } })) as Measurement;
+      const measurement = JSON.parse(await session.measure<string>(url, MEASURE, { viewport: { width: viewport.width, height: viewport.height }, prepare: SETTLE })) as Measurement;
       return { viewport, route, measurement } as const;
     } catch (error) {
       return { viewport, route, error: (error as Error).message } as const;

@@ -16,7 +16,7 @@ Never ship raw markdown or model output to a customer. The customer report below
 
 `report/customer-report.pdf` is the only artefact written for the customer, and it answers two questions: what arrived, and what did not. It is written for someone who has never seen a migration: the front pages carry one verdict sentence, four numbers, a numbered list of the decisions the customer needs to make (one plain sentence each, with up to three example page names and no addresses), a "good to know" list of things that changed without needing them, and a five-line "checks at a glance". Every full list — page addresses, link targets, the run's own words for a check that did not pass — sits in an appendix at the back, for the people who act on it. Links pointing at pages outside the migration are counted by the page they point at, not one line per link.
 
-The second is the point. A migration that omits pages and reports only its successes is worse than one that names them, because the customer finds out from a reader. So the report itemises, each with the reason the run recorded at the time:
+The second is the point. A migration that omits pages and reports only its successes is worse than one that names them, because the customer finds out from a reader. So the report accounts for each of these, with the reason the run recorded at the time (itemised in `customer-report.json`):
 
 - every page the plan did not migrate, grouped by reason (unpublished, not placed by the table of contents, out of scope);
 - every page held back at conversion (an unresolved snippet, or content exact mode refused to approximate);

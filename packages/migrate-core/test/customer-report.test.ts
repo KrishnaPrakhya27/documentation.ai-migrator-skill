@@ -74,10 +74,12 @@ describe('what did not carry over', () => {
     const shortfall = report.shortfalls[0];
     expect(shortfall.items).toHaveLength(200);
     expect(shortfall.more).toBe(30);
-    expect(renderCustomerReportHtml(report)).toContain('and 30 more');
-    // the front page says it in one sentence, with names, and never lists addresses
+    const html = renderCustomerReportHtml(report);
+    expect(html).toContain('and 30 more');
+    // the front page says it in one sentence, with names, and never lists addresses: those are in the appendix
     expect(shortfall.summary).toBe('230 pages were left out (recorded reason: out of scope). Tell us if any of them should be on the new site.');
     expect(shortfall.examples).toEqual(['p0', 'p1', 'p2']);
+    expect(html.split('Appendix')[0]).not.toContain('/p0');
   });
 
   it('reports links still pointing at the old site as needing a decision', () => {
@@ -147,7 +149,7 @@ describe('the page a customer reads', () => {
 
   it('escapes customer content rather than letting it become markup', () => {
     const report = build(workspace(), {
-      pages: [page('x', { migrate: false, title: '<script>alert(1)</script>', reason: 'unpublished in the source' })],
+      pages: [page('x', { migrate: false, reason: '<script>alert(1)</script>' })],
     }, allPassing());
     const html = renderCustomerReportHtml(report);
     expect(html).toContain('&lt;script&gt;');
@@ -179,5 +181,31 @@ describe('the gate vocabulary', () => {
     expect(navigationSourceLanguage('sitemap-hint')).toContain('inferred');
     expect(navigationSourceLanguage('source-config')).not.toContain('inferred');
     expect(navigationSourceLanguage(undefined)).toBeUndefined();
+  });
+});
+
+describe('a report the customer can read without alarm', () => {
+  it('prints no link targets or page addresses, only counts and plain sentences', () => {
+    const dir = workspace((w) => {
+      writeFileSync(join(w, 'report', 'unmigrated-links.json'), JSON.stringify([
+        { route: 'guides/install', url: 'https://docs.example.com/legacy/setup', knownSourcePage: true },
+        { route: 'guides/install', url: 'https://docs.example.com/legacy/other', knownSourcePage: true },
+      ]));
+      writeFileSync(join(w, 'plan', 'urls.yaml'), 'mode: preserve\nscope: full\nunmigratedLinks: source\npages: []\n');
+    });
+    const report = build(dir, { pages: [page('a')] }, allPassing());
+    const links = report.shortfalls.find((shortfall) => shortfall.heading.includes('link'))!;
+    // counted by the page that holds them, and not a decision once the old site is agreed to stay up
+    expect(links.heading).toBe('1 page links to content outside this migration');
+    expect(links.needsYou).toBe(false);
+    expect(renderCustomerReportHtml(report).split('Appendix')[0]).not.toContain('docs.example.com/legacy');
+  });
+
+  it('says pages the old sidebar never listed were added to the sidebar when they were', () => {
+    const dir = workspace((w) => writeFileSync(join(w, 'report', 'unlisted-pages.json'), JSON.stringify([{ title: 'Orphan', newPath: 'misc/orphan' }])));
+    const report = build(dir, { pages: [page('a')], unlistedPlacement: { approvedBy: 'someone', approvedAt: '2026-09-16' } as never }, allPassing());
+    const unlisted = report.shortfalls.find((shortfall) => shortfall.heading.includes('sidebar'))!;
+    expect(unlisted.heading).toContain('now added to the sidebar');
+    expect(unlisted.needsYou).toBe(false);
   });
 });

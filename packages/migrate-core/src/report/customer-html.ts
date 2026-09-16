@@ -6,8 +6,9 @@
  *
  * The layout is built for paper. Colour carries no meaning on its own — every outcome is also a
  * word — because these get printed in black and white and forwarded to people who never saw the
- * original. A shortfall section is never collapsed or hidden behind a link: on paper there is
- * nothing to click, so everything that must be read is on the page.
+ * original. Each shortfall is a count and one plain sentence; page addresses and link targets are
+ * not printed — a wall of URLs reads as alarm, not information. The full lists stay in
+ * customer-report.json, and the page says they are available.
  */
 import type { CustomerReport, CustomerCheck, Shortfall } from './customer-data.js';
 import { GATE_GROUP_ORDER, GATE_GROUP_TITLES } from './gate-language.js';
@@ -36,7 +37,6 @@ function checkRow(check: CustomerCheck): string {
       <td>
         <div class="ct">${escape(check.title)}</div>
         ${needsDetail ? `<div class="cd">${escape(check.detail)}</div>` : ''}
-        ${needsDetail && check.samples.length ? `<ul class="cs">${check.samples.slice(0, 5).map((sample) => `<li>${escape(sample)}</li>`).join('')}</ul>` : ''}
       </td>
     </tr>`;
 }
