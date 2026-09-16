@@ -26,7 +26,15 @@ export interface InlineHtmlNode extends BaseNode { type: 'inlineHtml'; value: st
 export interface FootnoteReferenceNode extends BaseNode { type: 'footnoteReference'; identifier: string }
 /** `unreadableWidth`/`unreadableHeight` hold a dimension the source states that the target's integer-pixel contract cannot carry (`100%`, `2rem`), so the loss stays visible instead of being guessed at or dropped. */
 /** `sources` holds the srcset candidates the source offered; the target renders one URL, so they are hosted and reported rather than dropped with the old platform. */
-export interface ImageNode extends BaseNode { type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number; unreadableWidth?: string; unreadableHeight?: string; sources?: string[] }
+export interface ImageNode extends BaseNode {
+  type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number; unreadableWidth?: string; unreadableHeight?: string; sources?: string[];
+  /**
+   * The theme the source shows this image in, as the visibility classes it stated: a light and a dark
+   * copy of one picture are each hidden in the other theme. Only `block`, `hidden`, `dark:block` and
+   * `dark:hidden` are kept; without them both copies show in both themes.
+   */
+  themeClass?: string;
+}
 
 export type Inline = TextNode | InlineCodeNode | StrongNode | EmphasisNode | DeleteNode | LinkNode | BreakNode | KbdNode | InlineHtmlNode | ImageNode | FootnoteReferenceNode;
 

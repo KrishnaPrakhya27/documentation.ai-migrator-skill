@@ -45,3 +45,20 @@ describe('MDX the platform can compile and render', () => {
     expect(field?.props.type).toBe('ReactElement<StepProps>[]');
   });
 });
+
+describe('a light and a dark copy of one picture', () => {
+  it('keeps only the theme-visibility classes, in a fixed order, and reads them back', () => {
+    const { written, back } = roundTrip('<img src="https://x.test/light.svg" alt="Hero" className="block dark:hidden pointer-events-none w-full" />\n\n<img src="https://x.test/dark.svg" alt="Hero" className="dark:block hidden w-full" />\n');
+    expect(written).toContain('className="block dark:hidden"');
+    expect(written).toContain('className="hidden dark:block"');
+    expect(written).not.toContain('pointer-events-none');
+    const images: string[] = [];
+    const walk = (nodes: any[]) => nodes.forEach((node) => { if (node.type === 'image') images.push(node.themeClass); if (node.children) walk(node.children); });
+    walk(back.children);
+    expect(images).toEqual(['block dark:hidden', 'hidden dark:block']);
+  });
+
+  it('writes no className for an image styled only for layout', () => {
+    expect(roundTrip('<img src="https://x.test/a.png" alt="A" className="rounded-xl w-full" />\n').written).not.toContain('className');
+  });
+});

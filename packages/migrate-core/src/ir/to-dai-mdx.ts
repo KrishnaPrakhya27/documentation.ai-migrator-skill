@@ -111,7 +111,7 @@ function markdownUrl(url: string, kind: 'link' | 'resource'): string | undefined
 
 function imageToMdx(image: ImageNode): string {
   const safe = markdownUrl(image.url, 'resource');
-  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null }, true) : escapeText(image.alt);
+  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null, className: image.themeClass ?? null }, true) : escapeText(image.alt);
 }
 
 export function openTag(name: string, props: Record<string, string | number | boolean | null>, selfClose = false): string {

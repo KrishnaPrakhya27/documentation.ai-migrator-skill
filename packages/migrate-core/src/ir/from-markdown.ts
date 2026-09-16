@@ -60,6 +60,18 @@ const ANCHOR_OPEN = '\uE000';
 const ANCHOR_CLOSE = '\uE001';
 const SNIPPET_IMPORT = /^\s*import\s+([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+\.(?:mdx?|jsx))["'];?\s*$/;
 
+/**
+ * The theme-visibility classes of an image, in a fixed order, and nothing else it was styled with.
+ * A source that pairs a light and a dark copy of one picture hides each in the other theme; these are
+ * the only classes carried, because they decide which picture a reader sees at all.
+ */
+export function themeClassOf(value: unknown): { themeClass?: string } {
+  if (typeof value !== 'string') return {};
+  const tokens = new Set(value.split(/\s+/).filter((token) => /^(?:dark:)?(?:hidden|block)$/.test(token)));
+  const ordered = ['block', 'hidden', 'dark:block', 'dark:hidden'].filter((token) => tokens.has(token));
+  return ordered.length ? { themeClass: ordered.join(' ') } : {};
+}
+
 /** Documentation.AI writes images as <Image />, source MDX as <img />; both are images, never components. */
 function isImageElement(node: { name?: string | null }): boolean {
   return node.name === 'Image' || String(node.name).toLowerCase() === 'img';
@@ -626,6 +638,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       id: idOf(node, path), src: srcOf(node), type: 'image',
       url: typeof attrs.src === 'string' ? attrs.src : '', alt: typeof attrs.alt === 'string' ? attrs.alt : '',
       title: typeof attrs.title === 'string' ? attrs.title : undefined,
+      ...themeClassOf(attrs.className ?? attrs.class),
       width: width.value, height: height.value,
       ...(width.unreadable !== undefined ? { unreadableWidth: width.unreadable } : {}),
       ...(height.unreadable !== undefined ? { unreadableHeight: height.unreadable } : {}),
