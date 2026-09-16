@@ -93,6 +93,23 @@ describe('what did not carry over', () => {
     expect(links.needsYou).toBe(true);
   });
 
+  it('leaves the appendix, example names, link lists and addresses out of the summary report', () => {
+    const dir = workspace((w) => writeFileSync(join(w, 'report', 'unmigrated-links.json'), JSON.stringify([
+      { route: 'guides/install', url: 'https://docs.example.com/legacy/setup', target: 'https://docs.example.com/legacy/setup', knownSourcePage: true },
+    ])));
+    const report = build(dir, { pages: [page('a'), page('gone', { migrate: false, reason: 'unpublished in the source' })] }, allPassing());
+    const full = renderCustomerReportHtml(report);
+    const summary = renderCustomerReportHtml(report, { summary: true });
+    expect(full).toContain('Appendix');
+    expect(full).toContain('docs.example.com/legacy/setup');
+    expect(summary).not.toContain('Appendix');
+    expect(summary).not.toContain('docs.example.com/legacy');
+    expect(summary).not.toContain('For example');
+    expect(summary).not.toMatch(/links? (?:points?|go) (?:at|to) pages?/);
+    // the content statements stay: a page that did not move is still said to have not moved
+    expect(summary).toContain(report.shortfalls.find((shortfall) => shortfall.heading.includes('not migrated'))!.summary.slice(0, 40).replace(/'/g, '&#x27;').replace(/"/g, '&quot;'));
+  });
+
   it('carries a failed check through with the gate\'s own words', () => {
     const gates = allPassing().map((gate) => gate.id === 'internal-links'
       ? { ...gate, status: 'fail' as const, detail: '3 links resolve to no written page', samples: ['/a → /missing'] }
@@ -207,5 +224,18 @@ describe('a report the customer can read without alarm', () => {
     const unlisted = report.shortfalls.find((shortfall) => shortfall.heading.includes('sidebar'))!;
     expect(unlisted.heading).toContain('now added to the sidebar');
     expect(unlisted.needsYou).toBe(false);
+  });
+});
+
+describe('pages already agreed to be left out', () => {
+  it('are reported as agreed, not as a new question', () => {
+    const dir = workspace((w) => writeFileSync(join(w, 'plan', 'scope-decisions.yaml'),
+      'excluded:\n  - pageId: gone\n    sourceId: https://docs.example.com/gone\n    reason: separate help system\n    approvedBy: someone\n    approvedAt: 2026-09-16T00:00:00.000Z\nsubstituted: []\nhelpSystems: []\n'));
+    const report = build(dir, { pages: [page('a'), page('gone', { migrate: false, reason: 'help system out of scope' })] }, allPassing());
+    const skipped = report.shortfalls.find((shortfall) => shortfall.heading.includes('not migrated'))!;
+    expect(skipped.heading).toBe('1 page not migrated — help system out of scope');
+    expect(skipped.summary).toContain('as agreed');
+    expect(skipped.needsYou).toBe(false);
+    expect(skipped.explanation).toContain('as agreed');
   });
 });

@@ -173,16 +173,25 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     const reason = page.reason ?? 'no reason recorded';
     byReason.set(reason, [...(byReason.get(reason) ?? []), page]);
   }
+  // A page someone already agreed to leave out, with their name on it, is not a question for the
+  // customer again; one the plan dropped with no recorded decision still is.
+  const agreed = new Set(readScopeDecisions(workspace).excluded.map((entry) => entry.pageId));
   for (const [reason, pages] of [...byReason].sort((a, b) => b[1].length - a[1].length)) {
     const why = SKIP_REASON_LANGUAGE[reason] ?? `were left out (recorded reason: ${reason})`;
+    const decided = pages.every((page) => agreed.has(page.id));
     shortfalls.push({
       heading: `${plural(pages.length, 'page')} not migrated — ${reason}`,
-      explanation: 'These exist in your source but were not carried over for the reason above. If any belong in the new site, they can be added.',
-      summary: `${plural(pages.length, 'page')} ${why}. Tell us if any of them should be on the new site.`,
-      readerSummary: `${plural(pages.length, 'item')} from your old site ${pages.length === 1 ? 'was' : 'were'} not moved because ${pages.length === 1 ? 'it is' : 'they are'} not a documentation page. Tell us if any should be on the new site.`,
+      explanation: decided
+        ? 'Left out as agreed during the scope review. If any of them should be on the new site, they can still be added.'
+        : 'These exist in your source but were not carried over for the reason above. If any belong in the new site, they can be added.',
+      summary: decided
+        ? `${plural(pages.length, 'page')} ${why}, as agreed at the scope review. They can still be added if you want them.`
+        : `${plural(pages.length, 'page')} ${why}. Tell us if any of them should be on the new site.`,
+      // A reason the run recorded in its own words is not for the reader's version; one said plainly is.
+      ...(SKIP_REASON_LANGUAGE[reason] ? {} : { readerSummary: `${plural(pages.length, 'page')} from your old site ${pages.length === 1 ? 'was' : 'were'} not moved${decided ? ', as agreed at the scope review' : ''}. ${decided ? 'They can still be added if you want them.' : 'Tell us if any should be on the new site.'}` }),
       examples: examplesOf(pages.map((page) => page.title ?? '')),
       ...capped(pages.map(pageLabel)),
-      needsYou: true,
+      needsYou: !decided,
     });
   }
 
@@ -285,7 +294,7 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   if (placement && allUnlisted.length > unlisted.length) {
     const placed = allUnlisted.length - unlisted.length;
     shortfalls.push({
-      heading: `${plural(placed, 'page')} placed in the sidebar under the section ${placed === 1 ? 'it belongs' : 'they belong'} to`,
+      heading: `${plural(placed, 'page')} your old sidebar did not list, now added to the sidebar under the section ${placed === 1 ? 'it belongs' : 'they belong'} to`,
       explanation: `Your old site publishes these without listing them in its menu. They were placed under the sections their own addresses sit in, so readers can find them. Approved by ${placement.approvedBy}.`,
       summary: `${plural(placed, 'page')} that your old site did not list in its menu ${placed === 1 ? 'was' : 'were'} placed in the sidebar under the section ${placed === 1 ? 'it belongs' : 'they belong'} to, so readers can find them.`,
       examples: [],
@@ -294,25 +303,16 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
   }
   if (unlisted.length) {
     const labels = unlisted.map((page) => `${page.title || 'Untitled'}${page.newPath ? ` — /${page.newPath}` : ''}`);
-    // Placed by an approved decision (nav --place-unlisted) they are in the sidebar, and that is not
-    // a decision still waiting on the customer.
-    shortfalls.push(tree.unlistedPlacement
-      ? {
-        heading: `${plural(unlisted.length, 'page')} your old sidebar did not list, now added to the sidebar`,
-        explanation: 'Your old site published these pages without showing them in its sidebar. They were added to the sidebar under the folders they already sit in, so readers can find them.',
-        summary: `${plural(unlisted.length, 'page')} exist on your old site but are not in its menu. They were added to the new sidebar under the folders they already sit in, so readers can find them.`,
-        examples: examplesOf(unlisted.map((page) => page.title ?? '')),
-        ...capped(labels),
-        needsYou: false,
-      }
-      : {
-        heading: `${plural(unlisted.length, 'page')} migrated but absent from the sidebar`,
-        explanation: 'Your source publishes these without placing them in its navigation, so they were migrated as pages but not added to the sidebar. Your old site still opened them at their address; the new site serves the pages its navigation lists, so until these are given a place they will not open. Their content is migrated and waiting. Putting them somewhere ourselves would invent a structure your site does not have — tell us where they belong and we will place them.',
-        summary: `${plural(unlisted.length, 'page')} exist on your old site but are not in its menu, so they were migrated as pages without a place in the sidebar. Until they are placed, readers cannot open them. Tell us where they belong and we will place them.`,
-        examples: examplesOf(unlisted.map((page) => page.title ?? '')),
-        ...capped(labels),
-        needsYou: true,
-      });
+    // After a placement decision (nav --place-unlisted) these are the pages in no folder at all, so
+    // there was no folder of the source's to put them in; without one, every unlisted page is here.
+    shortfalls.push({
+      heading: `${plural(unlisted.length, 'page')} migrated but absent from the sidebar`,
+      explanation: `Your source publishes these without placing them in its navigation${placement ? ', and in no folder that could stand in for a place' : ''}, so they were migrated as pages but not added to the sidebar. Your old site still opened them at their address; the new site serves the pages its navigation lists, so until these are given a place they will not open. Their content is migrated and waiting. Putting them somewhere ourselves would invent a structure your site does not have — tell us where they belong and we will place them.`,
+      summary: `${plural(unlisted.length, 'page')} exist on your old site but are not in its menu, so they were migrated as pages without a place in the sidebar. Until they are placed, readers cannot open them. Tell us where they belong and we will place them.`,
+      examples: examplesOf(unlisted.map((page) => page.title ?? '')),
+      ...capped(labels),
+      needsYou: true,
+    });
   }
 
   // Content dropped from inside a page, each attributed to whoever decided it.

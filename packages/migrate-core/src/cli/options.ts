@@ -35,7 +35,8 @@ Commands (run in order; the workflow has exactly four standard human gates):
   write        [--repo <dir>] [--remote <url>] [--push] [--allow-lossy] [--no-wait] [--preview-timeout min] [--revision "<why>"] → refs/heads/migration/<session>; with --push waits for the preview deployment and records its URL
                --revision takes a new migration id for a build that supersedes the last push, recording why;
                a branch already pushed is evidence and is never rewritten
-               --allow-lossy (permissive sessions only) pushes an exploratory branch with unproven exactness gates waived; failed gates still block
+               --allow-lossy (permissive sessions) records the unproven exactness gates as waived in report/lossy-push.json
+               a failing gate never withholds the push, in any mode: it is recorded in report/pushed-with-findings.json and blocks release
   verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
   release                                                            validates all four approvals and writes an immutable release certificate
   report       [--no-pdf] [--summary]                               → report/summary.md, report/platform-gaps.json,
