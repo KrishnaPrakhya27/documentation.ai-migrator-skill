@@ -26,7 +26,15 @@ export interface InlineHtmlNode extends BaseNode { type: 'inlineHtml'; value: st
 export interface FootnoteReferenceNode extends BaseNode { type: 'footnoteReference'; identifier: string }
 /** `unreadableWidth`/`unreadableHeight` hold a dimension the source states that the target's integer-pixel contract cannot carry (`100%`, `2rem`), so the loss stays visible instead of being guessed at or dropped. */
 /** `sources` holds the srcset candidates the source offered; the target renders one URL, so they are hosted and reported rather than dropped with the old platform. */
-export interface ImageNode extends BaseNode { type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number; unreadableWidth?: string; unreadableHeight?: string; sources?: string[] }
+export interface ImageNode extends BaseNode {
+  type: 'image'; url: string; alt: string; title?: string; width?: number; height?: number; unreadableWidth?: string; unreadableHeight?: string; sources?: string[];
+  /**
+   * The theme the source shows this image in, as the visibility classes it stated: a light and a dark
+   * copy of one picture are each hidden in the other theme. Only `block`, `hidden`, `dark:block` and
+   * `dark:hidden` are kept; without them both copies show in both themes.
+   */
+  themeClass?: string;
+}
 
 export type Inline = TextNode | InlineCodeNode | StrongNode | EmphasisNode | DeleteNode | LinkNode | BreakNode | KbdNode | InlineHtmlNode | ImageNode | FootnoteReferenceNode;
 
@@ -169,6 +177,41 @@ export function mapBlocks(blocks: Block[], fns: { inline?: (node: Inline) => Inl
   });
 }
 
+/**
+ * Plain text of a run of blocks, as a reader would copy it: list markers and nesting indentation
+ * included, cells separated, blank line between blocks. A conversion that flattens blocks into one
+ * text value uses this, and so must anything comparing against that value, or the two disagree on
+ * content neither of them lost.
+ */
+export function blocksText(blocks: readonly Block[], indent = ''): string | undefined {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === 'paragraph' || block.type === 'heading') parts.push(indent + inlineText(block.children));
+    else if (block.type === 'code') parts.push(block.value.split('\n').map((line) => indent + line).join('\n'));
+    else if (block.type === 'list') {
+      parts.push(block.children.map((item, index) => {
+        const marker = block.ordered ? `${(block.start ?? 1) + index}. ` : '- ';
+        const body = blocksText(item.children, indent + ' '.repeat(marker.length)) ?? '';
+        return indent + marker + body.trimStart();
+      }).join('\n'));
+    } else if (block.type === 'blockquote') parts.push((blocksText(block.children, indent) ?? '').split('\n').map((line) => `> ${line}`).join('\n'));
+    else if (block.type === 'table') parts.push(block.children.map((row) => indent + row.children.map((cell) => inlineText(cell.children)).join(' | ')).join('\n'));
+    else if ('children' in block && Array.isArray(block.children)) { const inner = blocksText(block.children as Block[], indent); if (inner) parts.push(inner); }
+  }
+  const text = parts.join('\n\n').trim();
+  return text || undefined;
+}
+
+/**
+ * The words a reader sees in a run of inline content, inline HTML included: a badge composed as a
+ * span contributes the label inside it, not its tags. `inlineText` reads inline HTML as nothing,
+ * which is right for a signature and wrong for anything comparing a heading with how it rendered.
+ */
+export function renderedText(nodes: Inline[] | undefined): string {
+  if (!nodes) return '';
+  return nodes.map((n) => (n.type === 'inlineHtml' ? n.value.replace(/<[^<>]*>/g, '') : n.type === 'text' || n.type === 'inlineCode' ? n.value : n.type === 'image' ? n.alt : 'children' in n ? renderedText((n as { children: Inline[] }).children) : '')).join('');
+}
+
 /** Plain text of inline content, for prose matching and signatures. */
 export function inlineText(nodes: Inline[] | undefined): string {
   if (!nodes) return '';
@@ -185,26 +228,3 @@ export function inlineText(nodes: Inline[] | undefined): string {
   }).join('');
 }
 
-/**
- * The text of a block tree, as a reader would copy it: paragraphs and headings by their words,
- * lists with their markers and nesting, quotes with theirs, code as written. A prompt that holds a
- * numbered list is the whole list, not its first paragraph.
- */
-export function blocksPlainText(blocks: readonly Block[], indent = ''): string | undefined {
-  const parts: string[] = [];
-  for (const block of blocks) {
-    if (block.type === 'paragraph' || block.type === 'heading') parts.push(indent + inlineText(block.children));
-    else if (block.type === 'code') parts.push(block.value.split('\n').map((line) => indent + line).join('\n'));
-    else if (block.type === 'list') {
-      parts.push(block.children.map((item, index) => {
-        const marker = block.ordered ? `${(block.start ?? 1) + index}. ` : '- ';
-        const body = blocksPlainText(item.children, indent + ' '.repeat(marker.length)) ?? '';
-        return indent + marker + body.trimStart();
-      }).join('\n'));
-    } else if (block.type === 'blockquote') parts.push((blocksPlainText(block.children, indent) ?? '').split('\n').map((line) => `> ${line}`).join('\n'));
-    else if (block.type === 'table') parts.push(block.children.map((row) => indent + row.children.map((cell) => inlineText(cell.children)).join(' | ')).join('\n'));
-    else if ('children' in block && Array.isArray(block.children)) { const inner = blocksPlainText(block.children as Block[], indent); if (inner) parts.push(inner); }
-  }
-  const text = parts.join('\n\n').trim();
-  return text || undefined;
-}

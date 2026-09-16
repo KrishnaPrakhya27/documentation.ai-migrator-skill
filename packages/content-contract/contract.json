@@ -673,6 +673,19 @@
         "style": {
           "type": "string",
           "required": false
+        },
+        "className": {
+          "type": "string",
+          "required": false,
+          "enum": [
+            "block",
+            "hidden",
+            "dark:block",
+            "dark:hidden",
+            "block dark:hidden",
+            "hidden dark:block"
+          ],
+          "description": "Theme visibility of one copy of a light/dark image pair. Renderer-verified; the web editor may not preserve it."
         }
       },
       "notes": []

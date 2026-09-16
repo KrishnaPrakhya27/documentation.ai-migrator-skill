@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { frozenRootPath, sourceManifestPath, type SourceManifest } from '../evidence/manifest.js';
 import { nativeNavigationWitness } from '../evidence/native-navigation.js';
+import { attachHelpCenterHub } from '../nav/help-center.js';
 import { buildDocumentationNavigation, type SourceNavigationNode, type Tree } from '../nav/tree.js';
 import { getProfile } from '../scrape/profiles.js';
 import { CanonicalHosts } from '../scrape/fetcher.js';
@@ -50,6 +51,21 @@ export function siteLinksForWorkspace(workspace: string, tree: Tree): SiteLinks 
   const sitemap = existsSync(sitemapPath) ? readJson<{ entries?: Array<{ url: string }> }>(sitemapPath).entries ?? [] : [];
   const sourcePages = [...(manifest?.pages ?? []).map((page) => page.location), ...(llms?.entries ?? []).map((entry) => entry.path), ...sitemap.map((entry) => entry.url)];
   return siteLinksFor(tree, { unmigrated: readUrlPlan(workspace)?.unmigratedLinks ?? 'keep', sourcePages, hosts });
+}
+
+/**
+ * Routes the help-centre decision writes: a hub page per container carrying that label. The source
+ * never published them, which is why the decision records who approved it; they are the operator's
+ * pages, not pages of the source, and the source universe accounts for them as such.
+ */
+export function helpCenterHubRoutes(workspace: string, tree: Tree): ReadonlySet<string> {
+  if (!tree.helpCenter) return new Set();
+  try {
+    const preview = buildDocumentationNavigation({ ...tree, helpCenter: undefined }, writtenPagePaths(workspace, tree), readPlatformMeta(workspace));
+    return new Set(attachHelpCenterHub(preview.navigation, tree.helpCenter).hubs.map((hub) => hub.hubPath));
+  } catch {
+    return new Set();
+  }
 }
 
 export function writtenPagePaths(workspace: string, tree: Tree): Set<string> {

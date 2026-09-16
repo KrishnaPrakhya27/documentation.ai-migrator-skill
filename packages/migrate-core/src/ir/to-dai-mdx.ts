@@ -9,7 +9,7 @@ import { isSafeUrl } from '../components/sanitize.js';
 
 export interface SerializeOptions {
   /** heading node id → old anchor id to emit as a shim before the heading. */
-  anchorShims?: Map<string, string>;
+  anchorShims?: Map<string, string[]>;
   /** An anchor the page's title heading published, written at the head of the body because that heading became the title. */
   leadingAnchor?: string;
   /** Text to emit for quarantined blocks. */
@@ -31,10 +31,62 @@ const MDX_TEXT_ESCAPES: Array<[RegExp, string]> = [
   [/^(\s*)(~{3,})/gm, '$1\\$2'],
   // a backslash escapes punctuation only, so an ordered-list marker is escaped at its period ("\1." renders the backslash)
   [/^(\s*)(\d+)\.(?=\s)/gm, '$1$2\\.'],
-  [/(\*|_)(?=\S)/g, '\\$1'],
+  // every one of them, not only one that leads a word: a bold run whose whole text is `*` wrote
+  // `*****`, which reads back as five literal asterisks. A backslash before punctuation renders as
+  // the punctuation alone, so escaping one that needed nothing costs the reader nothing.
+  [/(\*|_)/g, '\\$1'],
 ];
 
 
+
+/**
+ * Props a renderer reads as strings. The platform compiles a fence's meta as the props of `<pre>`,
+ * so a bare `className` becomes `className={true}`, and its code block calls `className.match`:
+ * the page answers 500. Mintlify's own `mdx className example` label did exactly that.
+ */
+const STRING_READ_PROPS = new Set(['className', 'class', 'style', 'children', 'key', 'ref', 'dangerouslySetInnerHTML', 'meta']);
+/**
+ * The attribute names of meta that is a run of JSX attributes with plain string values, or
+ * undefined when it is anything else. A linear scan: the regular expression this replaced nested
+ * one quantifier inside another and backtracked exponentially, so a long word followed by a
+ * character it could not take hung conversion outright.
+ */
+function plainAttributeNames(meta: string): string[] | undefined {
+  const names: string[] = [];
+  let i = 0;
+  const n = meta.length;
+  while (i < n) {
+    while (i < n && /\s/.test(meta[i])) i++;
+    if (i >= n) break;
+    if (!/[A-Za-z_]/.test(meta[i])) return undefined;
+    const start = i;
+    while (i < n && /[\w.-]/.test(meta[i])) i++;
+    names.push(meta.slice(start, i));
+    if (meta[i] === '=') {
+      if (meta[i + 1] !== '"') return undefined;
+      const close = meta.indexOf('"', i + 2);
+      if (close < 0 || /[<>{}&]/.test(meta.slice(i + 2, close))) return undefined;
+      i = close + 1;
+    }
+    if (i < n && !/\s/.test(meta[i])) return undefined;
+  }
+  return names;
+}
+
+/**
+ * The meta a fence is written with. Meta that parses as plain attributes and names no prop the
+ * renderer reads as a string is written as the source stated it. Anything else - meta that is not
+ * JSX, holds an expression, or names such a prop - would fail to compile or crash the page, so it is
+ * carried whole in one quoted `meta` prop, which the reader unwraps back to the same text.
+ */
+export function fenceMeta(meta: string): string {
+  const names = plainAttributeNames(meta);
+  if (names && !names.some((name) => STRING_READ_PROPS.has(name))) return meta;
+  // Encoded twice: once for the JSX attribute the platform parses, and once more for the Markdown
+  // info string, which decodes character references before that parse ever sees them.
+  const jsx = meta.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;');
+  return `meta="${jsx.replace(/&/g, '&amp;')}"`;
+}
 
 export function escapeText(s: string): string {
   let out = s;
@@ -47,13 +99,16 @@ export function propValue(v: string | number | boolean | null): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === 'number') return `{${v}}`;
   if (typeof v === 'boolean') return v ? '{true}' : '{false}';
-  const text = v.replace(/\\/g, '\\\\').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;').replace(/[\r\n]/g, ' ');
+  // `<` and `>` as character references too: the platform's preprocessor reads a `<` inside a quoted
+  // value as a tag opening and then mangles the next expression on the line (`required={true}`
+  // became `required=&#123;true}`), and the page failed to compile. MDX decodes them to the same text.
+  const text = v.replace(/\\/g, '\\\\').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\r\n]/g, ' ');
   // The deployment rejects a quote written as a character reference inside an attribute quoted
   // with the same mark (&quot; in "…", &#39; in '…'), so a value is quoted with the mark it does
   // not contain. One holding both is written as a string expression, which needs neither.
   if (!v.includes('"')) return `"${text}"`;
   if (!v.includes("'")) return `'${text}'`;
-  return `{${JSON.stringify(v.replace(/[\r\n]/g, ' ')).replace(/\{/g, '\\u007b').replace(/\}/g, '\\u007d')}}`;
+  return `{${JSON.stringify(v.replace(/[\r\n]/g, ' ')).replace(/\{/g, '\\u007b').replace(/\}/g, '\\u007d').replace(/</g, '\\u003c').replace(/>/g, '\\u003e')}}`;
 }
 
 function markdownUrl(url: string, kind: 'link' | 'resource'): string | undefined {
@@ -61,9 +116,14 @@ function markdownUrl(url: string, kind: 'link' | 'resource'): string | undefined
   return url.trim().replace(/\\/g, '%5C').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/</g, '%3C').replace(/>/g, '%3E');
 }
 
+/** A caption of words alone rides on the platform Image's caption prop; one with markup cannot. */
+function plainCaption(caption: Inline[]): boolean {
+  return caption.every((node) => node.type === 'text');
+}
+
 function imageToMdx(image: ImageNode, caption?: string): string {
   const safe = markdownUrl(image.url, 'resource');
-  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null, caption: caption ?? null }, true) : escapeText(image.alt);
+  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null, className: image.themeClass ?? null, caption: caption ?? null }, true) : escapeText(image.alt);
 }
 
 export function openTag(name: string, props: Record<string, string | number | boolean | null>, selfClose = false): string {
@@ -106,7 +166,11 @@ export function inlineToMdx(nodes: Inline[], insideLink = false): string {
       case 'inlineCode': {
         const longestRun = Math.max(0, ...Array.from(n.value.matchAll(/`+/g), (m) => m[0].length));
         const fence = '`'.repeat(longestRun + 1);
-        const pad = /^[ `]|[ `]$/.test(n.value) ? ' ' : '';
+        // A reader strips one space from each end of a code span only when it does not consist
+        // entirely of spaces. Padding one that does turned a span holding a single space into one
+        // holding three - which is what the source's own page about escaping characters writes.
+        const allSpaces = n.value.length > 0 && n.value.trim() === '';
+        const pad = !allSpaces && /^[ `]|[ `]$/.test(n.value) ? ' ' : '';
         return `${fence}${pad}${n.value}${pad}${fence}`;
       }
       case 'strong': return wrapEmphasis(inlineToMdx(n.children, insideLink), '**');
@@ -155,7 +219,11 @@ function tableToMdx(t: TableNode): string {
   const cols = Math.max(...rows.map((r) => r.children.length));
   const pad = (r: { children: Inline[] }[]) => [...r, ...Array.from({ length: cols - r.length }, () => ({ children: [] as Inline[] }))];
   const line = (r: { children: Inline[] }[]) => `| ${pad(r).map(cell).join(' | ')} |`;
-  const sep = `| ${Array.from({ length: cols }, (_, i) => (t.align?.[i] === 'center' ? ':---:' : t.align?.[i] === 'right' ? '---:' : '---')).join(' | ')} |`;
+  // `:---` is a column the author aligned left, which is not the same statement as `---`, a column
+  // they left alone: both render left, and only one of them says so. Writing the default for both
+  // loses what the source stated and reads back as a different table.
+  const marker = (align: string | null | undefined): string => (align === 'center' ? ':---:' : align === 'right' ? '---:' : align === 'left' ? ':---' : '---');
+  const sep = `| ${Array.from({ length: cols }, (_, i) => marker(t.align?.[i])).join(' | ')} |`;
   return [line(header.children), sep, ...body.map((r) => line(r.children))].join('\n');
 }
 
@@ -191,8 +259,8 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
         break;
       }
       case 'heading': {
-        const shim = opts.anchorShims?.get(b.id);
-        if (shim) out.push(`<a id="${shim}"></a>`);
+        // A heading the source published under more than one address keeps every one of them.
+        for (const shim of opts.anchorShims?.get(b.id) ?? []) out.push(`<a id="${shim}"></a>`);
         // Trailing space is not part of a heading, and writing it changes the id a renderer gives it.
         out.push(`${'#'.repeat(b.depth)} ${inlineToMdx(b.children).trim()}`);
         break;
@@ -206,7 +274,7 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
         // A fence's first word is its language: a title on a fence with no language would be read
         // as the language. `text` is what the platform renders an unlabelled block as anyway.
         const lang = stated || (title || meta ? 'text' : '');
-        out.push(`${fence}${lang}${title ? ` title="${title}"` : ''}${meta ? ` ${meta}` : ''}\n${b.value}\n${fence}`);
+        out.push(`${fence}${lang}${title ? ` title="${title}"` : ''}${meta ? ` ${fenceMeta(meta)}` : ''}\n${b.value}\n${fence}`);
         break;
       }
       case 'blockquote': out.push(blocksToMdx(b.children, opts).split('\n').map((l) => `> ${l}`).join('\n')); break;
@@ -222,11 +290,14 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
       case 'image': out.push(imageToMdx(b)); break;
       case 'figure': {
         // The platform's Image carries a caption; a caption of plain words rides on it and reads
-        // back as the figure it was. One with a link or emphasis keeps its markup as the line under
-        // the image, since a prop cannot hold it.
-        // The platform's Image caption is words: a caption's formatting or link cannot ride on it,
-        // and the conversion records that loss. The words always do, so the file reads back as the
-        // figure it was written from.
+        // back as the figure it was. One with a link or emphasis keeps its markup as the italic line
+        // under the image, since a prop cannot hold it: the two blocks a reader of the file gets,
+        // and what the comparator reads a captioned figure as.
+        if (b.caption?.length && !plainCaption(b.caption)) {
+          out.push(imageToMdx(b.image));
+          out.push(`*${inlineToMdx(b.caption)}*`);
+          break;
+        }
         const caption = b.caption?.length ? inlineText(b.caption).trim() : '';
         out.push(imageToMdx(b.image, caption || undefined));
         break;
@@ -234,14 +305,14 @@ export function blocksToMdx(blocks: Block[], opts: SerializeOptions = {}): strin
       case 'html': out.push(b.value); break;
       case 'rawHtml': out.push(b.value); break;
       case 'dai': {
-        // An anchor the source published on this component, or on the heading its title was folded
-        // from, kept where something still links to it. A Step's goes inside the step: its parent
+        // Every anchor the source published on this component, or on the heading its title was folded
+        // from, kept where something still links to it. A Step's go inside the step: its parent
         // Steps holds steps and nothing else.
-        const componentShim = opts.anchorShims?.get(b.id) ?? (b.anchorFrom ? opts.anchorShims?.get(b.anchorFrom) : undefined);
-        const shimLine = componentShim ? `<a id="${componentShim}"></a>` : '';
-        if (shimLine && b.name !== 'Step') out.push(shimLine);
+        const componentShims = [...new Set([...(opts.anchorShims?.get(b.id) ?? []), ...(b.anchorFrom ? opts.anchorShims?.get(b.anchorFrom) ?? [] : [])])];
+        const shimLines = componentShims.map((componentShim) => `<a id="${componentShim}"></a>`);
+        if (shimLines.length && b.name !== 'Step') out.push(...shimLines);
         const body = blocksToMdx(b.children, opts);
-        const inner = shimLine && b.name === 'Step' ? `${shimLine}\n\n${body}`.trim() : body;
+        const inner = shimLines.length && b.name === 'Step' ? `${shimLines.join('\n\n')}\n\n${body}`.trim() : body;
         if (!inner.trim()) out.push(openTag(b.name, b.props, true));
         else out.push(`${openTag(b.name, b.props)}\n${indent(inner)}\n</${b.name}>`);
         break;

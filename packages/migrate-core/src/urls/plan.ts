@@ -176,9 +176,9 @@ export function redirectMaps(plan: UrlPlan): { exact: RedirectRule[]; wildcard: 
 export interface AnchorEntry { pageId: string; headingText: string; oldId?: string; newId: string; needsShim: boolean; inboundLinks: number }
 
 /** Compare source heading ids with the renderer's slugs; shim where an inbound link targets a differing id. */
-export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string; aliases?: string[]; component?: boolean }>; titleAnchor?: string }>, inbound: Map<string, number>): { entries: AnchorEntry[]; shims: Map<string, Map<string, string>>; leading: Map<string, string> } {
+export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string; aliases?: string[]; component?: boolean }>; titleAnchor?: string }>, inbound: Map<string, number>): { entries: AnchorEntry[]; shims: Map<string, Map<string, string[]>>; leading: Map<string, string> } {
   const entries: AnchorEntry[] = [];
-  const shims = new Map<string, Map<string, string>>();
+  const shims = new Map<string, Map<string, string[]>>();
   /** pageId → the anchor its title heading published, for pages something still links to by it. */
   const leading = new Map<string, string>();
   for (const p of pages) {
@@ -189,13 +189,17 @@ export function anchorMap(pages: Array<{ pageId: string; headings: Array<{ id: s
     for (const h of p.headings) {
       // A component's anchor is not a heading: the renderer gives it no id of its own to compare with.
       const newId = h.component ? '' : headingSlug(h.text, slugger);
-      // The source may have linked one heading under more than one spelling; the one a link uses is the one shimmed.
+      // The source may have published one heading under more than one address - a translated page
+      // carries the original's anchor beside its own - and a link may use any of them. Every
+      // spelling something points at is kept, not just the first: keeping only one left the pages
+      // that link by the other spelling landing nowhere.
       const candidates = [h.sourceId, ...(h.aliases ?? [])].filter((id): id is string => !!id);
-      const linked = candidates.find((id) => (inbound.get(`${p.pageId}#${id}`) ?? inbound.get(`#${id}`) ?? 0) > 0);
-      const links = linked ? (inbound.get(`${p.pageId}#${linked}`) ?? inbound.get(`#${linked}`) ?? 0) : 0;
-      const needsShim = !!linked && linked !== newId && links > 0;
-      entries.push({ pageId: p.pageId, headingText: h.text, oldId: linked ?? h.sourceId, newId, needsShim, inboundLinks: links });
-      if (needsShim) { if (!shims.has(p.pageId)) shims.set(p.pageId, new Map()); shims.get(p.pageId)!.set(h.id, linked!); }
+      const linksTo = (id: string): number => inbound.get(`${p.pageId}#${id}`) ?? inbound.get(`#${id}`) ?? 0;
+      const linked = candidates.filter((id) => linksTo(id) > 0);
+      const shimmed = [...new Set(linked.filter((id) => id !== newId))];
+      const links = linked.reduce((total, id) => total + linksTo(id), 0);
+      entries.push({ pageId: p.pageId, headingText: h.text, oldId: linked[0] ?? h.sourceId, newId, needsShim: shimmed.length > 0, inboundLinks: links });
+      if (shimmed.length) { if (!shims.has(p.pageId)) shims.set(p.pageId, new Map()); shims.get(p.pageId)!.set(h.id, shimmed); }
     }
   }
   return { entries, shims, leading };

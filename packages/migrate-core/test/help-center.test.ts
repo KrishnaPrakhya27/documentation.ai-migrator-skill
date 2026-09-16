@@ -16,8 +16,8 @@ const NAV = { tabs: [
 
 describe('a container declared a help centre', () => {
   it('opens on the hub, and is addressed by its node path', () => {
-    const { navigation, nodePath } = attachHelpCenterHub(NAV, { container: 'Help center', hubPath: 'help-center/index' });
-    expect(nodePath).toBe('tabs:Help center');
+    const { navigation, hubs } = attachHelpCenterHub(NAV, { container: 'Help center', hubPath: 'help-center/index' });
+    expect(hubs).toEqual([{ nodePath: 'tabs:Help center', hubPath: 'help-center/index' }]);
     expect((navigation.tabs as Array<Record<string, unknown>>)[1]).toMatchObject({ tab: 'Help center', path: 'help-center/index' });
     // nothing else moved
     expect((navigation.tabs as Array<Record<string, unknown>>)[0]).toEqual(NAV.tabs[0]);
@@ -25,7 +25,21 @@ describe('a container declared a help centre', () => {
 
   it('is found under a language, with the path that names it there', () => {
     const nested = { languages: [{ language: 'en', ...NAV }] };
-    expect(attachHelpCenterHub(nested, { container: 'Help center', hubPath: 'h/index' }).nodePath).toBe('languages:en/tabs:Help center');
+    expect(attachHelpCenterHub(nested, { container: 'Help center', hubPath: 'h/index' }).hubs).toEqual([{ nodePath: 'languages:en/tabs:Help center', hubPath: 'h/index' }]);
+  });
+
+  it('opens the same section in every language it is published in, each at the head of its own pages', () => {
+    const perLanguage = { languages: [
+      { language: 'en', tabs: [{ tab: 'Help center', pages: [{ title: 'Refunds', path: 'docs/help-center/refunds' }] }] },
+      { language: 'fr', tabs: [{ tab: 'Help center', pages: [{ title: 'Remboursements', path: 'docs/fr/help-center/remboursements' }] }] },
+    ] };
+    const { navigation, hubs } = attachHelpCenterHub(perLanguage, { container: 'Help center' });
+    expect(hubs).toEqual([
+      { nodePath: 'languages:en/tabs:Help center', hubPath: 'docs/help-center/index' },
+      { nodePath: 'languages:fr/tabs:Help center', hubPath: 'docs/fr/help-center/index' },
+    ]);
+    const paths = (navigation.languages as Array<Record<string, unknown>>).map((language) => (language.tabs as Array<Record<string, unknown>>)[0].path);
+    expect(paths).toEqual(['docs/help-center/index', 'docs/fr/help-center/index']);
   });
 
   it('refuses a container the navigation does not hold, naming the ones it does', () => {

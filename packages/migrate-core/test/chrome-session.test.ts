@@ -159,4 +159,24 @@ describe.skipIf(!chrome)('a real browser, driven over the DevTools protocol', ()
   it('refuses a preview URL that is not HTTP', async () => {
     await expect(openChromeSession('file:///etc/passwd')).rejects.toThrow(/HTTP or HTTPS/);
   });
+  it('keeps renders on disk when given a directory, rendering each page once and holding none in memory', async () => {
+    const { mkdtempSync, readdirSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const directory = join(mkdtempSync(join(tmpdir(), 'dai-renders-')), 'renders');
+    try {
+      const calls: string[] = [];
+      const render = cachedRenderer(async (url) => { calls.push(url); return `<html>${url}</html>`; }, { directory });
+      const [a, b] = await Promise.all([render('https://p.test/a'), render('https://p.test/a')]);
+      expect([a, b, await render('https://p.test/a')]).toEqual(['<html>https://p.test/a</html>', '<html>https://p.test/a</html>', '<html>https://p.test/a</html>']);
+      await render('https://p.test/b');
+      expect(calls).toEqual(['https://p.test/a', 'https://p.test/b']);
+      expect(readdirSync(directory)).toHaveLength(2);
+      // a failed render is not remembered
+      let attempt = 0;
+      const flaky = cachedRenderer(async () => { attempt++; if (attempt === 1) throw new Error('flaky'); return 'second'; }, { directory });
+      await expect(flaky('https://p.test/c')).rejects.toThrow('flaky');
+      expect(await flaky('https://p.test/c')).toBe('second');
+    } finally { rmSync(join(directory, '..'), { recursive: true, force: true }); }
+  });
 });

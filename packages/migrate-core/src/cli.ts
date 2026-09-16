@@ -26,10 +26,6 @@ function named<T>(source: string, read: () => T): T {
   }
 }
 
-/** A heading's rendered words, badge text included: inline HTML contributes what a reader sees of it, not its tags. */
-function anchorText(nodes: import('./ir/types.js').Inline[]): string {
-  return nodes.map((n) => (n.type === 'inlineHtml' ? n.value.replace(/<[^<>]*>/g, '') : n.type === 'text' || n.type === 'inlineCode' ? n.value : 'children' in n ? anchorText(n.children) : '')).join('');
-}
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -49,7 +45,7 @@ import { titleHeading } from './ir/page-title.js';
 import { documentLinks } from './verify/source-truth.js';
 import { progressReporter } from './cli/progress.js';
 import { canonicalHostsPath, loadSnapshot, readJson, readSnapshotPage, resetDir, snapshotPageCount, snapshotPages, sourceFiles, writeJson } from './cli/io.js';
-import { buildSourceEvidence, expectedSidebar, frozenNavigationData, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
+import { buildSourceEvidence, expectedSidebar, frozenNavigationData, helpCenterHubRoutes, siteLinksForWorkspace, writtenPagePaths } from './cli/evidence.js';
 import { captureOpenapi, type OpenapiCapture } from './cli/openapi-capture.js';
 import { attachHelpCenterHub, defaultHubPath, helpCenterHubMdx } from './nav/help-center.js';
 import { mergeOperationDocuments, openapiAnchors, parameterLinkRewriter } from './ir/mintlify-openapi.js';
@@ -95,7 +91,7 @@ import { DecisionLog } from './log/decisions.js';
 import { redact } from './log/redact.js';
 import { docToMdx } from './ir/to-dai-mdx.js';
 import type { DocIR } from './ir/types.js';
-import { walkBlocks, inlineText, type Block } from './ir/types.js';
+import { walkBlocks, inlineText, renderedText as anchorText, type Block } from './ir/types.js';
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
 import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
 import { readManifest, referenceTally, rewriteAssetRefs, dropExcludedAssets, d360MediaResolver } from './assets/manifest.js';
@@ -887,6 +883,15 @@ async function main() {
         const heads: Array<{ id: string; text: string; sourceId?: string; aliases?: string[]; component?: boolean }> = [];
         // Mintlify numbers a repeated heading -2, -3 within a page; the count is per page.
         const mintlifySeen = new Map<string, number>();
+        // A heading the platform published an anchor for by wrapping it in an id'd div. On a
+        // translated page that id is the English one, so a link written against the original still
+        // lands while the heading itself reads in its own language; both spellings are kept.
+        const publishedAnchor = new Map<string, string>();
+        walkBlocks(doc.children, (n) => {
+          if (n.type !== 'component' || typeof n.props.id !== 'string' || !n.props.id) return;
+          const first = n.children.find((child) => !(child.type === 'paragraph' && !inlineText(child.children).trim()));
+          if (first?.type === 'heading') publishedAnchor.set(first.id, n.props.id);
+        });
         walkBlocks(doc.children, (n, depth) => {
           if (n.type === 'component') comps.push({ pageId: doc.pageId, node: n, depth, source: doc.source });
           if (n.type === 'heading') {
@@ -902,7 +907,9 @@ async function main() {
               const seen = (mintlifySeen.get(base) ?? 0) + 1; mintlifySeen.set(base, seen);
               mintlify = seen > 1 ? `${base}-${seen}` : base;
             }
-            heads.push({ id: n.id, text, sourceId: n.sourceId ?? gitbook[0] ?? mintlify, ...(gitbook.length > 1 ? { aliases: gitbook.slice(1) } : {}) });
+            const published = publishedAnchor.get(n.id);
+            const aliases = [...gitbook.slice(1), ...(published && mintlify && published !== mintlify ? [mintlify] : [])];
+            heads.push({ id: n.id, text, sourceId: n.sourceId ?? published ?? gitbook[0] ?? mintlify, ...(aliases.length ? { aliases } : {}) });
           }
           // GitBook gives an expandable block the id its summary slugs to (`<details id="admin">`),
           // and pages deep-link to it. The target's Expandable renders no id, so the anchor is
@@ -916,7 +923,19 @@ async function main() {
           // back as a shim where a link still uses it.
           if (n.type === 'component' && tree.platform === 'mintlify' && (n.name === 'ParamField' || n.name === 'ResponseField')) {
             const name = ['name', 'path', 'query', 'body', 'header'].map((key) => n.props[key]).find((value) => typeof value === 'string');
-            if (typeof name === 'string') heads.push({ id: n.id, text: '', sourceId: `param-${name}`, component: true });
+            // A field named with a dot is anchored with the dot slugged away (`thumbnails.background`
+            // is linked as `#param-thumbnails-background`), and pages link to it both ways.
+            if (typeof name === 'string') {
+              const slugged = `param-${mintlifyHeadingId(name)}`;
+              heads.push({ id: n.id, text: '', sourceId: `param-${name}`, component: true, ...(slugged !== `param-${name}` ? { aliases: [slugged] } : {}) });
+            }
+          }
+          // Mintlify anchors a disclosure and a tab by their title, and pages link to those anchors
+          // the same way they link to a heading. The target renders no id for either, so the anchor
+          // is recorded on the component and written back as a shim where a link still uses it.
+          if (n.type === 'component' && tree.platform === 'mintlify' && (n.name === 'Accordion' || n.name === 'Tab')) {
+            const title = typeof n.props.title === 'string' ? n.props.title : undefined;
+            if (title) heads.push({ id: n.id, text: '', sourceId: mintlifyHeadingId(title), component: true });
           }
         });
         // Every link the document holds, not only those directly in a paragraph: a page's own
@@ -930,6 +949,9 @@ async function main() {
       const clusters = clusterComponents(comps);
       writeJson(join(workspace, 'inventory', 'components.json'), clusters);
       writeJson(join(workspace, 'inventory', 'anchors.json'), anchors);
+      // The operation each endpoint page names, as its published Markdown states it. The navigation
+      // carries it to the platform, which renders the reference from the spec at deployment.
+      writeJson(join(workspace, 'inventory', 'page-openapi.json'), Object.fromEntries(docs.flatMap((doc) => (typeof doc.frontmatter.openapi === 'string' && doc.frontmatter.openapi.trim() ? [[doc.pageId, doc.frontmatter.openapi.trim()]] : [])).sort(([a], [b]) => a.localeCompare(b))));
       writeJson(join(workspace, 'inventory', 'links.json'), links);
       const snapHash = sha256(readdirSync(snapDir).sort().map((f) => fileHash(join(snapDir, f))).join('\n'));
       s.hashes.snapshot = snapHash; writeSession(workspace, s);
@@ -1214,24 +1236,35 @@ async function main() {
         const container = String(v['help-center']).trim();
         if (!by) fail('--help-center needs --by "<who>": a hub page the source never had is a decision that records its approver');
         if (!tree.navigation?.length) fail('--help-center needs the navigation the source states; this tree records none');
-        const hubPath = (v['hub-path'] ? String(v['hub-path']) : defaultHubPath(container)).replace(/^\/+|\/+$/g, '');
-        if (tree.pages.some((page) => page.migrate && page.newPath === hubPath)) fail(`--help-center: a migrated page already lives at ${hubPath}; name another route with --hub-path`);
+        const hubPath = v['hub-path'] ? String(v['hub-path']).replace(/^\/+|\/+$/g, '') : undefined;
         // The container must exist before anything is recorded: build the navigation once to find it.
         const preview = buildDocumentationNavigation({ ...tree, helpCenter: undefined }, writtenPagePaths(workspace, tree), meta);
-        try { attachHelpCenterHub(preview.navigation, { container, hubPath }); } catch (error) { fail(`--help-center: ${(error as Error).message}`); }
-        tree.helpCenter = { container, hubPath, approvedBy: by, approvedAt: new Date().toISOString() };
+        let hubs: { hubPath: string }[] = [];
+        try { hubs = attachHelpCenterHub(preview.navigation, { container, hubPath: hubPath ?? defaultHubPath(container) }).hubs; } catch (error) { fail(`--help-center: ${(error as Error).message}`); }
+        if (hubPath && hubs.length > 1) fail(`--hub-path names one route, but ${hubs.length} containers are labelled "${container}" (one per language or version); drop --hub-path and each opens at the head of its own pages`);
+        for (const hub of hubs) if (tree.pages.some((page) => page.migrate && page.newPath === hub.hubPath)) fail(`--help-center: a migrated page already lives at ${hub.hubPath}; name another route with --hub-path`);
+        tree.helpCenter = { container, ...(hubPath ? { hubPath } : {}), approvedBy: by, approvedAt: new Date().toISOString() };
         writeTree(workspace, tree);
-        ok(`${container} opens on a help-centre hub at ${hubPath}, its categories drawn from its own navigation, by ${by}; the tree changed, so approve gate 1 again`);
+        ok(`${container} opens on a help-centre hub at ${hubs.map((hub) => hub.hubPath).join(', ')}, its categories drawn from its own navigation, by ${by}; the tree changed, so approve gate 1 again`);
       }
       if (tree.helpCenter) {
         // The hub is written on every nav run, because convert rebuilds the output it lives in.
         const preview = buildDocumentationNavigation({ ...tree, helpCenter: undefined }, writtenPagePaths(workspace, tree), meta);
-        const { nodePath } = attachHelpCenterHub(preview.navigation, tree.helpCenter);
-        const hubFile = join(workspace, 'output', `${tree.helpCenter.hubPath}.mdx`);
-        mkdirSync(dirname(hubFile), { recursive: true, mode: 0o700 });
-        writeFileSync(hubFile, helpCenterHubMdx(tree.helpCenter, nodePath), { mode: 0o600 });
+        for (const hub of attachHelpCenterHub(preview.navigation, tree.helpCenter).hubs) {
+          const hubFile = join(workspace, 'output', `${hub.hubPath}.mdx`);
+          mkdirSync(dirname(hubFile), { recursive: true, mode: 0o700 });
+          writeFileSync(hubFile, helpCenterHubMdx(tree.helpCenter, hub.nodePath), { mode: 0o600 });
+        }
       }
-      const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta);
+      const withoutFolder: TreePage[] = [];
+      const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta, withoutFolder);
+      if (withoutFolder.length) {
+        // The source publishes these in no folder at all, so --place-unlisted has no folder of the
+        // source's to put them in. Inventing a container for them would state a structure the source
+        // never had, so they stay unlisted and are named here and in the report.
+        writeJson(join(workspace, 'report', 'unplaced-pages.json'), withoutFolder.map((page) => ({ pageId: page.id, route: page.newPath, title: page.title, source: page.source })));
+        console.log(`· ${withoutFolder.length} page(s) sit in no folder the source publishes, so they stay unlisted and will not be served: ${withoutFolder.slice(0, 3).map((page) => page.newPath).join(', ')}${withoutFolder.length > 3 ? ', …' : ''} (report/unplaced-pages.json)`);
+      }
       // The documentation's name travels with it; the source's logo, favicon, colours and theme do not,
       // so the migrated site shows Documentation.AI's own branding.
       const site = documentationSiteSettings(meta);
@@ -1402,7 +1435,11 @@ async function main() {
         iframeHosts: existsSync(join(workspace, 'plan', 'assets.yaml')) ? (parseYaml(readFileSync(join(workspace, 'plan', 'assets.yaml'), 'utf8')) as { iframeHosts?: string[] }).iframeHosts : undefined,
       });
       const sourceEvidence = buildSourceEvidence(workspace, tree);
-      if (sourceEvidence) sourceEvidence.declaredLosses = (d) => applyDeclaredLosses(d, verifyEngine);
+      // A substitution a named person approved is read on the source side as what replaced it, exactly
+      // as convert read it; otherwise the one page a live demo sits on is reported as differing from
+      // a source the operator already owned the difference in.
+      const verifySubstituted = new Set<string>(readScopeDecisions(workspace).substituted.map((entry) => entry.component));
+      if (sourceEvidence) sourceEvidence.declaredLosses = (d) => applyDeclaredLosses(d, verifyEngine, verifySubstituted);
       const gates = runGates({
         workspace, outputDir: join(workspace, 'output'), sourceEvidence, pinnedSourceManifest: s.hashes.sourceManifest, pinnedAcquisition: s.hashes.acquisition, pinnedOpenapi: s.hashes.openapi,
         // Gate 3 approves the report this run produces, so a local verify asks for gates 1 and 2;
@@ -1411,6 +1448,7 @@ async function main() {
         pinnedPlans: { componentPlan: s.hashes.componentPlan, urlPlan: s.hashes.urlPlan, assetPlan: s.hashes.assetPlan, blockExclusions: s.hashes.blockExclusions, scopeDecisions: s.hashes.scopeDecisions },
         sourceDocs: { *[Symbol.iterator]() { for (const doc of docs) yield { doc, outputFile: byId.get(doc.pageId)?.newPath ? join(workspace, 'output', `${byId.get(doc.pageId)!.newPath}.mdx`) : undefined }; } },
         treePages: tree.pages, quarantinedPages: quarantined, excludedPages: new Set(), unreviewed,
+        operatorPages: helpCenterHubRoutes(workspace, tree),
         previousCanonicalHash: s.hashes.previousConvertOutput, convertOutputHash: s.hashes.convertOutput, previewUrl, pinnedContractVersion: s.versions.contentContract, previewContractVersion,
         fidelityMode: s.fidelityMode ?? 'exact', sourceKind: s.source.kind, navigationSource: tree.navigationSource,
         pinnedMigrator: s.migrator, currentMigrator: captureMigratorProvenance({ repoRoot: PLUGIN_ROOT, packageVersion: CORE_VERSION }),
@@ -1429,7 +1467,10 @@ async function main() {
         // rendered and thrown away twice. The render opens accordions, expandables and tabs first,
         // so the content behind them is verified instead of excused.
         const preview = await openChromeSession(previewUrl, { concurrency: Number(v.concurrency) });
-        const renderPreview = cachedRenderer(preview.render, { prepare: EXPAND_INTERACTIVE });
+        // Renders from an earlier preview check describe an earlier deployment, so each run starts empty.
+        const renderDir = join(workspace, 'logging', 'preview-renders');
+        rmSync(renderDir, { recursive: true, force: true });
+        const renderPreview = cachedRenderer(preview.render, { prepare: EXPAND_INTERACTIVE, directory: renderDir });
         try {
         const browserConcurrency = Number(v.concurrency);
         const browser = await runBrowserFragmentGate(previewUrl, tree.pages, browserAnchors, renderPreview, browserConcurrency);
@@ -1442,12 +1483,17 @@ async function main() {
         const manifest = readManifest(workspace);
         const browserContent = await runBrowserContentGate(
           previewUrl,
-          tree.pages.map((page) => {
-            const raw = rawByPageId.get(page.id);
-            const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
-            const snapshot = readSnapshotPage(workspace, page.id);
-            return { ...page, doc: fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink)) };
-          }),
+          // Each page's source document is built when that page is checked, not for the whole site up
+          // front: holding every page's IR at once is what, with the renders, ran the heap out.
+          tree.pages.map((page) => ({
+            ...page,
+            get doc() {
+              const raw = rawByPageId.get(page.id);
+              const fromSource = raw && sourceEvidence ? rawSourceIr(raw, sourceEvidence.platform, sourceEvidence.profile, sourceEvidence.links) : undefined;
+              const snapshot = fromSource ? undefined : readSnapshotPage(workspace, page.id);
+              return fromSource ?? (snapshot && retargetDocLinks(snapshot, previewSiteLink));
+            },
+          })),
           {
             routes: writtenPagePaths(workspace, tree),
             assetUrls: new Map(Object.entries(manifest.byUrl).flatMap(([url, hash]) => { const final = manifest.entries[hash]?.finalUrl; return final ? [[url, final] as [string, string]] : []; })),

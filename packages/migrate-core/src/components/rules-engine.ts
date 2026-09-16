@@ -12,7 +12,8 @@ import { readFileSync } from 'node:fs';
 import type { Block, ComponentNode, DaiComponentNode, DocIR, Inline, ListItemNode, QuarantinedNode, RawHtmlNode } from '../ir/types.js';
 import { flareTocTree } from '../scrape/madcap-toc.js';
 import type { DiscoveredNavigationNode } from '../scrape/discovery.js';
-import { walkBlocks, inlineText, isBlockWithChildren, blocksPlainText } from '../ir/types.js';
+import { walkBlocks, inlineText, blocksText, isBlockWithChildren } from '../ir/types.js';
+import { markdownToIr } from '../ir/from-markdown.js';
 import { Ledger } from '../ledger/dispositions.js';
 import { sanitizeHtmlToJsx } from './sanitize.js';
 import { blocksToMdx } from '../ir/to-dai-mdx.js';
@@ -166,6 +167,13 @@ function matches(rule: MappingRule, node: ComponentNode): boolean {
 
 
 /** The plain text a run of blocks states, as one string; undefined when they state none. */
+/** The inline content a caption prop states, read as the Markdown it is. */
+function captionInline(caption: string, idBase: string): Inline[] {
+  const doc = markdownToIr(caption, { platform: 'dai', file: 'caption', pageId: idBase });
+  const first = doc.children[0];
+  return first && first.type === 'paragraph' && first.children.length ? first.children : [{ id: `${idBase}:t`, type: 'text', value: caption }];
+}
+
 /** A Flare table of contents as the nested list of links its tile menu draws, cut at the depth the menu declares. */
 function flareTocList(nodes: readonly DiscoveredNavigationNode[], idBase: string, depth: number, maxDepth: number): Block {
   const items = nodes.map((node, index): ListItemNode => {
@@ -298,7 +306,7 @@ const HANDLERS: Record<string, RestructureHandler> = {
     const repo = str(node.props.repo);
     const images = node.children.filter((child): child is Extract<Block, { type: 'image' }> => child.type === 'image');
     const rest = node.children.filter((child) => child.type !== 'image');
-    const title = str(node.props.title) ?? repo ?? blocksPlainText(rest) ?? 'Card';
+    const title = str(node.props.title) ?? repo ?? blocksText(rest) ?? 'Card';
     const href = str(node.props.href) ?? (repo ? `https://github.com/${repo}` : undefined);
     const description = str(node.props.description);
     // The label of a button-shaped card became its title, so it is not repeated as body text.
@@ -344,7 +352,7 @@ const HANDLERS: Record<string, RestructureHandler> = {
   /** A prompt is text meant to be copied, which is what a code block is; its description becomes the line introducing it. */
   'prompt-to-code': { reads: ['description', 'actions'], run: (node) => {
     const description = typeof node.props.description === 'string' ? node.props.description.trim() : '';
-    const value = blocksPlainText(node.children) ?? '';
+    const value = blocksText(node.children) ?? '';
     if (!value) return quarantined(node, 'a prompt holds no text to copy');
     const blocks: Block[] = [];
     if (description) blocks.push({ id: `${node.id}:desc`, type: 'paragraph', children: [{ id: `${node.id}:desc:t`, type: 'text', value: description }] });
@@ -395,13 +403,16 @@ const HANDLERS: Record<string, RestructureHandler> = {
   } },
   /** Frame around one image: a figure when it carries a caption, otherwise the bare image (the frame itself is presentation). */
   'frame-to-image': { reads: ['caption'], run: (node) => {
-    const caption = typeof node.props.caption === 'string' && node.props.caption.trim() ? node.props.caption : undefined;
+    const stated = typeof node.props.caption === 'string' && node.props.caption.trim() ? node.props.caption : undefined;
+    // A caption is Markdown, and this one names a link on the source's own frames page. Held as one
+    // text node it was written out as Markdown anyway, so the file said something the IR did not.
+    const caption = stated ? captionInline(stated, `${node.id}:cap`) : undefined;
     const [onlyChild] = node.children;
     if (node.children.length === 1 && onlyChild.type === 'image') {
-      return { blocks: caption ? [{ id: node.id, type: 'figure', image: onlyChild, caption: [{ id: node.id + ':cap:t', type: 'text', value: caption }] }] : [onlyChild] };
+      return { blocks: caption ? [{ id: node.id, type: 'figure', image: onlyChild, caption }] : [onlyChild] };
     }
     const blocks: Block[] = [...node.children];
-    if (caption) blocks.push({ id: node.id + ':cap', type: 'paragraph', children: [{ id: node.id + ':cap:t', type: 'emphasis', children: [{ id: node.id + ':cap:tt', type: 'text', value: caption }] }] });
+    if (caption) blocks.push({ id: node.id + ':cap', type: 'paragraph', children: [{ id: node.id + ':cap:t', type: 'emphasis', children: caption }] });
     return { blocks };
   } },
   /** GitBook step: it has no title of its own, so its leading heading becomes the title the Step contract requires. */
@@ -476,11 +487,6 @@ export class RulesEngine {
           this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: b.id, tier: 'T7', rule: 'T7/raw-html-sanitise' });
           out.push({ id: b.id, type: 'rawHtml', value, reviewFlag: 'T7 preserve: sanitised raw HTML' });
         }
-      } else if (b.type === 'figure' && b.caption?.some((inline) => inline.type !== 'text')) {
-        // the platform's caption is words: a link or emphasis inside the caption is written as its words
-        this.opts.ledger.transformed(pageId, b.id, [b.id], 'T2/caption-words', ['caption formatting or link dropped; the platform caption holds words only']);
-        this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: b.id, tier: 'T2', rule: 'T2/caption-words', lossy: ['caption formatting dropped'] });
-        out.push(b);
       } else if ((b.type === 'image' && !b.alt) || (b.type === 'figure' && !b.image.alt)) {
         this.opts.ledger.transformed(pageId, b.id, [b.id], 'T2/alt-missing', ['alt text missing in source; emitted alt=""']);
         this.opts.log.record({ stage: 'convert', pageId, sourceNodeId: b.id, tier: 'T2', rule: 'T2/alt-missing', lossy: ['alt missing'] });

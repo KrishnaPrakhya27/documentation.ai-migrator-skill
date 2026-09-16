@@ -21,7 +21,7 @@ import { htmlAdapterOptions, type ScrapeProfile } from '../scrape/profiles.js';
 import { titleHeading } from '../ir/page-title.js';
 import { acquiredPath, type AcquiredPage } from '../scrape/acquire.js';
 import { authoredContentSnapshot, firstFidelityDifference } from './fidelity.js';
-import { inlineText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
+import { inlineText, renderedText, walkBlocks, type Block, type DocIR, type Inline } from '../ir/types.js';
 import { retargetDocLinks, siteLinkTarget, type SiteLinks } from '../urls/site-links.js';
 import { rewriteAssetRefs, type AssetManifest, dropExcludedAssets } from '../assets/manifest.js';
 
@@ -124,7 +124,10 @@ export function rawSourceIr(page: RawSourcePage, platform: string, profile?: Scr
   // comparison covers metadata as well as body.
   // What the page stated about itself for search engines is part of what the source published, so
   // it is derived here from the same frozen bytes the output must have been built from.
-  const seo = page.html && page.url ? seoFrontmatter(extractSeo(page.html, page.url), { url: page.url, title, description }, () => undefined) : {};
+  // The platform's own social card is its branding, not the page's, and the conversion never carries
+  // one. Reading the source through the same profile keeps the two sides comparing what the page
+  // states about itself; an ogImage the author chose is still on both sides and still compared.
+  const seo = page.html && page.url ? seoFrontmatter(extractSeo(page.html, page.url), { url: page.url, title, description }, () => undefined, profile?.generatedOgImage) : {};
   const doc = markdownToIr(published.body, { platform, file: page.path, pageId: page.pageId, title, frontmatter: { title, ...(description ? { description } : {}), ...seo }, codeMetaStrip: profile?.codeMetaStrip });
   // convert points site-relative links at their migrated routes or the source site; the source is read the same way
   return links ? retargetDocLinks(doc, siteLinkTarget(links)) : doc;
@@ -291,8 +294,20 @@ export function htmlReconciliation(page: RawSourcePage, platform: string, profil
   // the conversion to carry. Where the source publishes Markdown, the rendered witness is compared
   // for the headings that Markdown states.
   const stated = page.markdown ? new Set(page.markdown.split('\n').filter((line) => /^\s*#{1,6}\s/.test(line)).map((line) => normaliseProse(line.replace(/^\s*#{1,6}\s*/, '').replace(/<a\b[^>]*><\/a>/g, '').replace(/\u200b/g, '')))) : undefined;
-  const renderedHeadings = headingWords(renderedDoc, titleHeading(rendered.children)?.id).filter((words) => !chrome.has(words) && !generated.has(words) && (!stated || stated.has(words))).filter((words, index, all) => index === 0 || all[index - 1] !== words);
+  let renderedHeadings = headingWords(renderedDoc, titleHeading(rendered.children)?.id).filter((words) => !chrome.has(words) && !generated.has(words) && (!stated || stated.has(words))).filter((words, index, all) => index === 0 || all[index - 1] !== words);
   const outputHeadings = headingWords(output);
+  // An endpoint page renders its authorization, parameter and response sections from the
+  // specification the page names in frontmatter, which `openapi-preserved` certifies against the
+  // captured document. Those headings are the platform's rendering of the spec, not words an author
+  // wrote: the published Markdown does not state them either, and the output states the operation
+  // instead. Only on such a page, and only for headings the Markdown does not state.
+  if (typeof output.frontmatter.openapi === 'string' && output.frontmatter.openapi.trim()) {
+    const markdown = rawSourceIr(page, platform, profile);
+    if (markdown) {
+      const authored = new Set(headingWords(markdown));
+      renderedHeadings = renderedHeadings.filter((word) => authored.has(word));
+    }
+  }
   const missingHeadings = headingsNotInOrder(renderedHeadings, outputHeadings);
   if (missingHeadings.length) {
     problems.push(`headings missing from output or out of order: ${JSON.stringify(missingHeadings)}; rendered ${JSON.stringify(renderedHeadings)}, output ${JSON.stringify(outputHeadings)}`);
@@ -360,21 +375,22 @@ function headingsNotInOrder(rendered: string[], output: string[]): string[] {
 }
 
 /** Inline content as rendered: an inline HTML element contributes its text, not its tags. */
-function renderedInlineText(nodes: Inline[]): string {
-  return nodes.map((n) => (n.type === 'inlineHtml' ? n.value.replace(/<[^<>]*>/g, '') : n.type === 'text' || n.type === 'inlineCode' ? n.value : n.type === 'image' ? n.alt : 'children' in n ? renderedInlineText(n.children) : '')).join('');
-}
-
 function headingWords(doc: DocIR, skipId?: string): string[] {
   const words: string[] = [];
   walkBlocks(doc.children, (block) => {
     if (skipId !== undefined && block.id === skipId) return;
-    // the words a reader sees, an inline element's included: GitBook renders `Name<mark>*</mark>`
-    if (block.type === 'heading' && block.depth > 1) words.push(normaliseProse(renderedInlineText(block.children)));
+    // A heading's words as a reader sees them, an inline element's included: the badge composed
+    // inside one is part of the heading on the rendered page (so reading it as nothing made every
+    // page with a badged heading report that heading missing), and GitBook renders `Name<mark>*</mark>`.
+    if (block.type === 'heading' && block.depth > 1) words.push(normaliseProse(renderedText(block.children)));
     else if (block.type === 'component' || block.type === 'dai') {
+      // A title stated in Markdown may hold inline markup - a step titled "Add the URL to your
+      // `docs.json` file" - and the rendered page shows the words inside it, not the backticks.
       const title = block.props.title;
       // GitBook's export labels a schema's nested fields "Object Properties" / "Array Items" on the
       // wrapper it writes; the rendered page shows no such heading, and neither does the reader.
-      if (typeof title === 'string' && title.trim() && !(block.name === 'Expandable' && /^(Object Properties|Array Items)$/.test(title.trim()))) words.push(normaliseProse(title));
+      // A title's code marks are not words the reader sees either.
+      if (typeof title === 'string' && title.trim() && !(block.name === 'Expandable' && /^(Object Properties|Array Items)$/.test(title.trim()))) words.push(normaliseProse(title.replace(/`/g, '')));
     }
   });
   return words.filter(Boolean);

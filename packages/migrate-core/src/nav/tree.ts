@@ -151,7 +151,183 @@ export function pagesWithoutPlacement(tree: Tree): TreePage[] {
   return tree.pages.filter((page) => page.migrate && page.newPath && !placed.has(page.id));
 }
 
-function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[], placeUnlisted = false): Record<string, unknown> {
+/** Containers a site states above its content: the dimensions of the site, not folders within it. */
+const DIMENSION_KINDS = ['product', 'language', 'version'] as const;
+/** Container kinds in the order `collection` names them, so a node can be rebuilt as a sibling of its kind. */
+const CONTAINER_KINDS = ['product', 'language', 'version', 'tab', 'dropdown', 'menu', 'group'] as const;
+
+/** Every route named anywhere beneath a built navigation node. */
+function routesUnder(node: unknown, out: string[] = []): string[] {
+  if (Array.isArray(node)) { for (const item of node) routesUnder(item, out); return out; }
+  if (!node || typeof node !== 'object') return out;
+  const record = node as Record<string, unknown>;
+  if (typeof record.path === 'string') out.push(record.path);
+  for (const value of Object.values(record)) if (Array.isArray(value)) routesUnder(value, out);
+  return out;
+}
+
+/** How many leading path segments two routes share. */
+function sharedSegments(a: string, b: string): number {
+  const left = a.split('/'); const right = b.split('/');
+  let shared = 0;
+  while (shared < left.length && shared < right.length && left[shared] === right[shared]) shared++;
+  return shared;
+}
+
+/** The key holding a built container's children, and the kind those children are. */
+function childrenOf(node: Record<string, unknown>): { key: string; kind: string; items: Record<string, unknown>[] } | undefined {
+  for (const [key, value] of Object.entries(node)) {
+    if (!Array.isArray(value) || !key.endsWith('s')) continue;
+    const kind = CONTAINER_KINDS.find((candidate) => `${candidate}s` === key) ?? (key === 'pages' ? 'page' : undefined);
+    if (kind) return { key, kind, items: value as Record<string, unknown>[] };
+  }
+  return undefined;
+}
+
+function containerKind(node: Record<string, unknown>): string | undefined {
+  return CONTAINER_KINDS.find((kind) => typeof node[kind] === 'string');
+}
+
+/**
+ * A page the sidebar never named, whose route is the route every page in a container sits under, is
+ * that container's own landing page — `/docs/analytics` above `/docs/analytics/traffic`. The source
+ * publishes it as the section's front page and simply does not repeat it in the sidebar, so it is
+ * written where the platform reads a container's own page, rather than as a child repeating the
+ * container's name. The deepest container wins, and a container that already states a page keeps it.
+ */
+function liftLandingPages(top: Record<string, unknown>[], rest: TreePage[]): TreePage[] {
+  const remaining = new Map(rest.map((page) => [page.newPath!, page]));
+  const containers: Record<string, unknown>[] = [];
+  const collect = (nodes: Record<string, unknown>[]): void => {
+    for (const node of nodes) {
+      const children = childrenOf(node);
+      if (!children) continue;
+      if (containerKind(node)) containers.push(node);
+      collect(children.items);
+    }
+  };
+  collect(top);
+  // The site's own root is nobody's section front page: every route sits under it, so without this
+  // the first container to be considered would claim the home page as its landing page.
+  const everything = routesUnder(top);
+  const siteRoot = everything.length ? everything.reduce((shared, route) => Math.min(shared, sharedSegments(everything[0], route)), everything[0].split('/').length) : 0;
+  // deepest first: a page is the landing page of the most specific container it leads
+  for (const node of containers.sort((a, b) => routesUnder(a).length - routesUnder(b).length)) {
+    if (typeof node.path === 'string') continue;
+    const routes = routesUnder(node);
+    if (!routes.length) continue;
+    const label = containerKind(node) ? String(node[containerKind(node)!]) : '';
+    let best: TreePage | undefined;
+    for (const page of remaining.values()) {
+      const route = page.newPath!;
+      const under = routes.filter((beneath) => beneath.startsWith(`${route}/`));
+      // Every page beneath the container sits under this route, or the container is named for it and
+      // some of them do - the same two readings `landingChild` already applies to a listed first page.
+      // A sidebar that also groups a page from elsewhere under "Analytics" does not stop
+      // `/docs/analytics` being the page that section opens on.
+      if (route.split('/').length <= siteRoot) continue;
+      // The container is named for this page, or this is simply the folder its pages sit in: a
+      // sidebar that also groups one page from elsewhere under "Analytics" does not stop
+      // `/docs/analytics` being the page that section opens on. Labels are translated per locale and
+      // routes are not, so the reading by route is what carries the other languages.
+      const named = sameLabel(route.split('/').pop() ?? '', label);
+      if (!under.length || !(named || under.length * 2 > routes.length)) continue;
+      if (!best || route.length > best.newPath!.length) best = page;
+    }
+    if (!best) continue;
+    node.path = best.newPath!;
+    Object.assign(node, pageLayout(best));
+    remaining.delete(best.newPath!);
+  }
+  return [...remaining.values()];
+}
+
+/**
+ * Places a page the sidebar never named in the container the source already publishes its folder
+ * in: `/docs/deploy/x` joins the container holding the other `/docs/deploy/` pages, and only a
+ * folder the sidebar has no container for at all - a help centre it never links - becomes a new
+ * container of its own, named for that folder and written as a sibling of the kind that level
+ * holds. A level holds one kind of thing, so a group is never pushed in beside languages.
+ *
+ * A page in no folder, under a level that cannot hold a bare page, has no folder of the source's to
+ * be placed in; it stays unlisted and is reported, rather than being given a structure the source
+ * never had.
+ */
+function placeByRoute(top: Record<string, unknown>[], rest: TreePage[]): TreePage[] {
+  interface Slot { node: Record<string, unknown>; prefix: string[]; routes: string[] }
+  const slots: Slot[] = [];
+  const collect = (nodes: Record<string, unknown>[]): void => {
+    for (const node of nodes) {
+      const children = childrenOf(node);
+      if (!children) continue;
+      if (containerKind(node)) {
+        const routes = routesUnder(node);
+        if (routes.length) {
+          const shared = routes.reduce((count, route) => Math.min(count, sharedSegments(routes[0], route)), routes[0].split('/').length);
+          slots.push({ node, prefix: routes[0].split('/').slice(0, shared), routes });
+        }
+      }
+      collect(children.items);
+    }
+  };
+  collect(top);
+  const unplaced: TreePage[] = [];
+  const members = new Map<Record<string, unknown>, Array<{ page: TreePage; folders: string[] }>>();
+  for (const page of rest) {
+    const segments = page.newPath!.split('/');
+    const folder = `${segments.slice(0, -1).join('/')}/`;
+    // The container the source already publishes this folder in: most of its pages are in that very
+    // folder, so a seventh `/docs/ai/` page joins the six, and nothing joins a container that merely
+    // happens to be small. A folder no container is built around - a help centre the sidebar never
+    // links - matches nothing here and becomes a container of its own below.
+    let best: Slot | undefined; let bestScore = [0, 0];
+    for (const slot of slots) {
+      const inFolder = slot.routes.filter((route) => route.startsWith(folder)).length;
+      if (!inFolder || inFolder * 2 <= slot.routes.length) continue;
+      if (inFolder > bestScore[0] || (inFolder === bestScore[0] && slot.routes.length < bestScore[1])) { best = slot; bestScore = [inFolder, slot.routes.length]; }
+    }
+    // Otherwise the page opens a section the sidebar has none of: it belongs at the level of the
+    // widest container its route sits inside, which is the language or version the route names.
+    if (!best) {
+      let widest = 0;
+      for (const slot of slots) {
+        if (slot.prefix.length >= segments.length) continue;
+        if (!slot.prefix.every((segment, index) => segment === segments[index])) continue;
+        if (!best || slot.prefix.length > best.prefix.length || (slot.prefix.length === best.prefix.length && slot.routes.length > widest)) { best = slot; widest = slot.routes.length; }
+      }
+    }
+    if (!best) { unplaced.push(page); continue; }
+    // the folders the container does not already stand for
+    const group = page.group.filter((name) => name && name !== '(uncategorised)');
+    let drop = 0;
+    while (drop < best.prefix.length && drop < group.length && slugify(group[drop]) === segments[drop]) drop++;
+    members.set(best.node, [...(members.get(best.node) ?? []), { page, folders: group.slice(drop) }]);
+  }
+  for (const [node, entries] of members) {
+    const children = childrenOf(node)!;
+    const direct = entries.filter((entry) => !entry.folders.length);
+    const foldered = entries.filter((entry) => entry.folders.length);
+    if (direct.length) {
+      // A page with no folder left sits beside the container's own pages. Where the container holds
+      // groups, the two live together under `pages`, which is how `collection` writes that mixture.
+      if (children.kind === 'page' || children.kind === 'group') {
+        if (children.kind === 'group') { delete node[children.key]; node.pages = children.items; }
+        const into = (node.pages ?? node[children.key]) as Record<string, unknown>[];
+        for (const { page } of direct) into.push({ ...pageMetadata(page), ...pageLayout(page), title: page.sidebarTitle ?? page.title, path: page.newPath! });
+      } else unplaced.push(...direct.map((entry) => entry.page));
+    }
+    if (!foldered.length) continue;
+    const container = childrenOf(node)!;
+    for (const built of groupsBySourcePath(foldered.map((entry) => ({ ...entry.page, group: entry.folders })))) {
+      if (container.kind === 'group' || container.kind === 'page' || !('group' in built)) { container.items.push(built); continue; }
+      const { group, ...body } = built as { group: string } & Record<string, unknown>;
+      container.items.push({ [container.kind]: group, ...body });
+    }
+  }
+  return unplaced;
+}
+
+function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[], placeUnlisted = false, unplaced: TreePage[] = []): Record<string, unknown> {
   type PageRef = { title: string; path: string };
   type Node = { group: string; pages: Array<PageRef | Node>; _order: number };
   const eligible = new Map(pages.filter((p) => p.migrate && p.newPath).map((p) => [p.id, p]));
@@ -187,8 +363,14 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
         for (const node of nodes) { if (node.type === 'page') placed.add(node.pageId); else mark(node.children); }
       };
       mark(sourceNavigation);
-      const rest = pages.filter((page) => page.migrate && page.newPath && !placed.has(page.id));
-      if (rest.length) top.push(...groupsBySourcePath(rest));
+      let rest = pages.filter((page) => page.migrate && page.newPath && !placed.has(page.id));
+      if (rest.length) rest = liftLandingPages(top, rest);
+      // A site that states languages, versions or products states them at the top, and a group
+      // pushed in beside them is a structure the navigation cannot represent at all. Each remaining
+      // page belongs to the dimension its own route sits in, so it is placed inside that container.
+      if (rest.length && top.some((node) => DIMENSION_KINDS.some((kind) => typeof node[kind] === 'string'))) rest = placeByRoute(top, rest);
+      else if (rest.length) { top.push(...groupsBySourcePath(rest)); rest = []; }
+      unplaced.push(...rest);
     }
     return collection(top, 'navigation');
   }
@@ -242,17 +424,17 @@ function collection(items: Record<string, unknown>[], parent: string): Record<st
  * languages → versions → groups/pages, each level present only when the tree uses it.
  * The schema has no `default` flag: the default version or language is listed first.
  */
-export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: string; defaultLocale?: string; sourceNavigation?: SourceNavigationNode[]; placeUnlisted?: boolean } = {}): { navigation: Record<string, unknown> } {
+export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: string; defaultLocale?: string; sourceNavigation?: SourceNavigationNode[]; placeUnlisted?: boolean; unplaced?: TreePage[] } = {}): { navigation: Record<string, unknown> } {
   const inScope = pages.filter((p) => p.migrate && p.newPath);
   const hasDimensions = (nodes: SourceNavigationNode[]): boolean => nodes.some((node) => node.type === 'group' && (node.kind === 'language' || node.kind === 'version' || hasDimensions(node.children)));
-  if (hasDimensions(defaults.sourceNavigation ?? [])) return { navigation: buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted) };
+  if (hasDimensions(defaults.sourceNavigation ?? [])) return { navigation: buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced) };
   const locales = [...new Set(inScope.map((p) => p.locale).filter((x): x is string => !!x))];
   const versions = [...new Set(inScope.map((p) => p.version).filter((x): x is string => !!x))];
   const orderFirst = <T,>(items: T[], first?: T) => (first && items.includes(first) ? [first, ...items.filter((x) => x !== first)] : items);
   const byVersion = (subset: TreePage[]): Record<string, unknown> => {
     const vs = orderFirst([...new Set(subset.map((p) => p.version).filter((x): x is string => !!x))], defaults.defaultVersion);
-    if (vs.length < 2 && !(vs.length === 1 && subset.some((p) => !p.version))) return buildSlice(subset, defaults.sourceNavigation, defaults.placeUnlisted);
-    return { versions: vs.map((v) => ({ version: v, ...buildSlice(subset.filter((p) => p.version === v), defaults.sourceNavigation, defaults.placeUnlisted) })) };
+    if (vs.length < 2 && !(vs.length === 1 && subset.some((p) => !p.version))) return buildSlice(subset, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced);
+    return { versions: vs.map((v) => ({ version: v, ...buildSlice(subset.filter((p) => p.version === v), defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced) })) };
   };
   if (locales.length >= 2) {
     const ls = orderFirst(locales, defaults.defaultLocale);
@@ -281,7 +463,7 @@ export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: 
     };
     return { navigation: { languages: ls.map((l) => ({ language: l, ...byLanguage(l) })) } };
   }
-  return { navigation: versions.length >= 2 ? byVersion(inScope) : buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted) };
+  return { navigation: versions.length >= 2 ? byVersion(inScope) : buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted, defaults.unplaced) };
 }
 
 /** Attach a group-level `openapi` property to the group at `groupPath` (DAI group-level OpenAPI connection). */
@@ -310,7 +492,15 @@ export function attachGroupOpenapi(nav: { navigation: Record<string, unknown> },
 /** A group-level OpenAPI connection the source adapter recorded (inventory/platform-meta.json `openapi`). */
 export interface GroupOpenapiRef { groupPath: string[]; spec: string; version?: string; locale?: string }
 
-export interface DocumentationNavigationMeta { openapi?: GroupOpenapiRef[] }
+export interface DocumentationNavigationMeta {
+  openapi?: GroupOpenapiRef[];
+  /**
+   * Endpoint pages, by page id: `"api-reference/<spec> METHOD /path"`. Documentation.AI binds a page
+   * to an operation from its navigation entry, not from the page's frontmatter - the deployment step
+   * reads `openapi` beside `path` and injects the rendered reference above the page's own prose.
+   */
+  pageOpenapi?: Record<string, string>;
+}
 
 /**
  * The navigation nav writes to documentation.json and the one verify expects back: the pages
@@ -350,9 +540,33 @@ export function landingChild(node: { label: string; children: SourceNavigationNo
   return undefined;
 }
 
-export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlySet<string>, platformMeta: DocumentationNavigationMeta): { navigation: Record<string, unknown> } {
+/**
+ * Writes each endpoint page's operation onto its own navigation entry, where the platform reads it.
+ * Only a page entry is bound: a container's `path` is not an endpoint the deployment step looks at.
+ */
+function bindPageOperations(node: unknown, bindings: ReadonlyMap<string, string>): Record<string, unknown> {
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (!value || typeof value !== 'object') return value;
+    const record = value as Record<string, unknown>;
+    const isContainer = CONTAINER_KINDS.some((kind) => typeof record[kind] === 'string');
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) out[key] = Array.isArray(child) ? visit(child) : child;
+    const operation = !isContainer && typeof record.path === 'string' && typeof record.title === 'string' ? bindings.get(record.path) : undefined;
+    return operation ? { ...out, openapi: operation } : out;
+  };
+  return visit(node) as Record<string, unknown>;
+}
+
+export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlySet<string>, platformMeta: DocumentationNavigationMeta, unplaced: TreePage[] = []): { navigation: Record<string, unknown> } {
   const written = tree.pages.filter((page) => page.newPath !== undefined && writtenPaths.has(page.newPath));
-  let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation, placeUnlisted: !!tree.unlistedPlacement });
+  let navigation = buildNavigation(written, { defaultVersion: tree.defaultVersion, defaultLocale: tree.defaultLocale, sourceNavigation: tree.navigation, placeUnlisted: !!tree.unlistedPlacement, unplaced });
+  const bindings = new Map<string, string>();
+  for (const page of written) {
+    const operation = platformMeta.pageOpenapi?.[page.id];
+    if (operation) bindings.set(page.newPath!, operation);
+  }
+  if (bindings.size) navigation = { navigation: bindPageOperations(navigation.navigation, bindings) };
   for (const ref of platformMeta.openapi ?? []) {
     try {
       navigation = attachGroupOpenapi(navigation, ref.groupPath, specOutputPath(ref.spec), ref.version, ref.locale);

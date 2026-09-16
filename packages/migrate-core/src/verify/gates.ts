@@ -30,6 +30,7 @@ import { documentAnchors, unresolvedFragments, htmlAnchors, splitInheritedFragme
 import type { ScrapeProfile } from '../scrape/profiles.js';
 import { requireSourceManifest, sourceUniverseProblems } from '../evidence/verify.js';
 import { requireAcquisition } from '../evidence/acquisition.js';
+import { readScopeDecisions, type AcceptedDifference } from '../evidence/scope.js';
 import { inapplicableProofs } from '../evidence/applicability.js';
 import { specOutputPath, type SpecManifest } from '../openapi/graph.js';
 
@@ -77,8 +78,17 @@ function isPlatformChromeButton(block: Block): boolean {
   return block.type === 'component' && block.name === 'button' && ['ask', 'search'].includes(String(block.props['data-action']));
 }
 
+/**
+ * A glyph named from the platform's own icon set, standing on its own and holding nothing. It is
+ * decoration drawn from a font the target does not have: no words, no link, no content of any kind,
+ * so a rule may drop it the way it drops a style element. An icon wrapping anything is not this.
+ */
+function isPlatformGlyph(block: Block): boolean {
+  return block.type === 'component' && block.name === 'Icon' && !block.children.length;
+}
+
 export function isHtmlChromeNode(block: Block | undefined): boolean {
-  return block?.type === 'component' && (HTML_CHROME_ELEMENTS.has(block.name) || isPlatformChromeButton(block));
+  return block?.type === 'component' && (HTML_CHROME_ELEMENTS.has(block.name) || isPlatformChromeButton(block) || isPlatformGlyph(block));
 }
 
 /** Reviewer recorded by the rules engine when a mapping rule, not a person, dropped a node. */
@@ -437,6 +447,12 @@ export interface GateInput {
   sourceDocs: Iterable<{ doc: DocIR; outputFile?: string }>;
   treePages: Array<{ id: string; source?: string; migrate: boolean; newPath?: string }>;
   quarantinedPages: Set<string>;
+  /**
+   * Routes written by a decision recorded on the tree rather than by a source page: the hub a
+   * help-centre container opens on. The source never had them, which is exactly why each carries an
+   * approver, so the source universe accounts for them as the operator's rather than as orphans.
+   */
+  operatorPages?: ReadonlySet<string>;
   excludedPages: Set<string>;
   unreviewed: number;
   /** Hash of the last convert and of the convert before it over identical inputs; both are convert-time hashes. */
@@ -508,7 +524,44 @@ export function runGates(input: GateInput): GateResult[] {
     const catalog = JSON.parse(readFileSync(catalogFile, 'utf8')) as { issue?: string };
     if (catalog.issue && !input.pinnedOpenapi) specProblems.push(catalog.issue);
   }
-  gates.push({ id: 'openapi-preserved', status: input.fidelityMode === 'permissive' ? 'not-run' : specProblems.length ? 'fail' : 'pass', detail: specProblems.length ? specProblems.join('; ') : input.pinnedOpenapi ? 'all captured OpenAPI source and output documents match their pins' : 'no captured OpenAPI documents declared by acquisition', samples: specProblems.slice(0, 8), count: specProblems.length });
+  // An endpoint page renders its reference only when the platform can bind it: the operation on the
+  // page's own navigation entry, a spec file at that path in the output, and that method and path in
+  // the spec. A page carrying the operation anywhere else - its frontmatter - renders as bare prose,
+  // which is what a preview of mintlify.com/docs showed on every endpoint page while this gate passed.
+  const bindingsFile = join(input.workspace, 'inventory', 'page-openapi.json');
+  let bound = 0;
+  if (existsSync(bindingsFile)) {
+    const declared = JSON.parse(readFileSync(bindingsFile, 'utf8')) as Record<string, string>;
+    const docJson = join(input.outputDir, 'documentation.json');
+    const entries = new Map<string, string>();
+    if (existsSync(docJson)) {
+      const collect = (value: unknown): void => {
+        if (Array.isArray(value)) { value.forEach(collect); return; }
+        if (!value || typeof value !== 'object') return;
+        const record = value as Record<string, unknown>;
+        if (typeof record.path === 'string' && typeof record.openapi === 'string') entries.set(record.path, record.openapi);
+        Object.values(record).forEach((child) => { if (Array.isArray(child)) collect(child); });
+      };
+      collect((JSON.parse(readFileSync(docJson, 'utf8')) as { navigation?: unknown }).navigation);
+    }
+    const specs = new Map<string, Record<string, Record<string, unknown>> | null>();
+    for (const page of input.treePages) {
+      const operation = declared[page.id];
+      if (!operation || !page.migrate || !page.newPath || !outByPath.has(page.newPath)) continue;
+      const [file, method, ...rest] = operation.split(/\s+/);
+      const endpoint = rest.join(' ');
+      if (entries.get(page.newPath) !== operation) { specProblems.push(`${page.newPath}: navigation entry does not bind ${operation}, so the platform renders no reference`); continue; }
+      if (!specs.has(file)) {
+        const specPath = join(input.outputDir, file);
+        try { specs.set(file, existsSync(specPath) ? ((JSON.parse(readFileSync(specPath, 'utf8')) as { paths?: Record<string, Record<string, unknown>> }).paths ?? {}) : null); } catch { specs.set(file, null); }
+      }
+      const paths = specs.get(file);
+      if (!paths) { specProblems.push(`${page.newPath}: spec ${file} is missing from the output or unreadable`); continue; }
+      if (!paths[endpoint]?.[method.toLowerCase()]) { specProblems.push(`${page.newPath}: ${file} has no ${method.toUpperCase()} ${endpoint}`); continue; }
+      bound++;
+    }
+  }
+  gates.push({ id: 'openapi-preserved', status: input.fidelityMode === 'permissive' ? 'not-run' : specProblems.length ? 'fail' : 'pass', detail: specProblems.length ? `${specProblems.length} OpenAPI problem(s): ${specProblems.slice(0, 3).join('; ')}` : `${input.pinnedOpenapi ? 'all captured OpenAPI source and output documents match their pins' : 'no captured OpenAPI documents declared by acquisition'}; ${bound} endpoint page(s) bound to an operation their spec defines`, samples: specProblems.slice(0, 8), count: specProblems.length });
   if (input.fidelityMode === 'permissive') {
     for (const id of ['source-manifest-pinned', 'source-universe-accounted']) gates.push({ id, status: 'not-run', detail: 'permissive mode; source universe is not certified' });
   } else {
@@ -516,7 +569,7 @@ export function runGates(input: GateInput): GateResult[] {
       const manifest = requireSourceManifest(input.workspace, input.pinnedSourceManifest);
       requireAcquisition(input.workspace, manifest, input.pinnedAcquisition, input.treePages);
       gates.push({ id: 'source-manifest-pinned', status: 'pass', detail: 'source manifest and frozen files match the discovery pin' });
-      const problems = sourceUniverseProblems({ workspace: input.workspace, manifest, treePages: input.treePages, written: new Set(outByPath.keys()), quarantined: input.quarantinedPages });
+      const problems = sourceUniverseProblems({ workspace: input.workspace, manifest, treePages: input.treePages, written: new Set([...outByPath.keys()].filter((route) => !input.operatorPages?.has(route))), quarantined: input.quarantinedPages });
       gates.push({ id: 'source-universe-accounted', status: problems.length ? 'fail' : 'pass', detail: problems.length ? `${problems.length} source universe problems` : `${manifest.pages.length} source identities accounted independently of the plan`, count: problems.length, samples: problems.slice(0, 8) });
     } catch (error) {
       const detail = (error as Error).message;
@@ -724,15 +777,25 @@ export function runGates(input: GateInput): GateResult[] {
     if (!results.length || resultIds.size !== results.length || requiredIds.some((id) => !resultIds.has(id))) {
       gates.push({ id, status: 'fail', detail: 'raw source evidence is empty, duplicated, or missing migrated pages' }); return;
     }
-    const failures = results.filter((result) => !result.pass);
+    const reported = results.filter((result) => !result.pass);
+    // A difference a named person accepted, because its cause is outside the migration. The record
+    // quotes part of what this gate reported, so it answers that difference on that page and no
+    // other: anything else this page starts differing on is still a failure.
+    const answered = (result: SourceComparison): AcceptedDifference | undefined => accepted.find((entry) =>
+      entry.gate === id && entry.route === result.path.replace(/^\/+/, '') && (result.difference ?? result.detail ?? '').includes(entry.detail));
+    const failures = reported.filter((result) => !answered(result));
+    const waived = reported.length - failures.length;
     gates.push({
       id,
       status: failures.length ? 'fail' : 'pass',
-      detail: failures.length ? summary(failures) : `${results.length} page(s) match the acquired source`,
+      detail: failures.length
+        ? summary(failures)
+        : `${results.length} page(s) match the acquired source${waived ? `; ${waived} accepted difference(s) recorded by ${[...new Set(reported.filter((result) => answered(result)).map((result) => answered(result)!.approvedBy))].join(', ')}` : ''}`,
       count: failures.length,
       samples: failures.slice(0, 5).map((failure) => `${failure.path}: ${failure.difference ?? failure.detail ?? 'differs'}`),
     });
   };
+  const accepted = exact ? readScopeDecisions(input.workspace).differences : [];
   const sourcePages = exact && evidence ? evidence.pages : [];
   sourceGate('source-content-exact', sourcePages.map((page) => sourceContentExact(page, evidence!.platform, evidence!.profile, evidence!.links, evidence!.assets, evidence!.declaredLosses)), (failures) => `${failures.length} page(s) differ from the published source`);
   sourceGate('source-metadata-exact', sourcePages.map((page) => sourceMetadataExact(page, evidence?.platform ?? 'generic', evidence?.profile)), (failures) => `${failures.length} page(s) carry a title or description the source does not state`);

@@ -78,7 +78,23 @@ export interface HelpSystemDecision {
   approvedAt?: string;
 }
 
-export interface ScopeDecisions { excluded: ScopeExclusion[]; substituted: ScopeSubstitution[]; assets: ScopeAssetExclusion[]; helpSystems: HelpSystemDecision[] }
+/**
+ * A difference between the migrated page and a source witness that a named person accepted, because
+ * its cause is outside the migration: a directive the target contract cannot express, or a source
+ * that states one thing in its published Markdown and another in its rendered page.
+ *
+ * Narrow by construction. It names one route and quotes part of the difference the gate itself
+ * reported, so it can only ever answer that difference on that page: a second difference appearing
+ * later on the same page is still reported. Only the two witness gates may be answered this way -
+ * never conversion fidelity, never the content comparison - because those measure what the
+ * migration did, not what the source says about itself.
+ */
+export interface AcceptedDifference { route: string; gate: string; detail: string; reason: string; approvedBy: string; approvedAt?: string }
+
+/** The gates a recorded difference may answer: the two that compare the output with a source witness. */
+export const ANSWERABLE_GATES: ReadonlySet<string> = new Set(['source-metadata-exact', 'html-reconciliation']);
+
+export interface ScopeDecisions { excluded: ScopeExclusion[]; substituted: ScopeSubstitution[]; assets: ScopeAssetExclusion[]; helpSystems: HelpSystemDecision[]; differences: AcceptedDifference[] }
 
 export function scopeDecisionsPath(workspace: string): string {
   return join(workspace, 'plan', 'scope-decisions.yaml');
@@ -115,6 +131,16 @@ substituted: []
 #     approvedBy: <who approved it>
 #     approvedAt: <ISO date>
 assets: []
+# differences: a difference from a source witness that a person accepted, because its cause is
+# outside the migration: a directive the target cannot express, or a source whose published Markdown
+# and rendered page disagree. It quotes part of the difference the gate reported, so it answers that
+# difference on that page and nothing else.
+#   - route: <output route>
+#     gate: source-metadata-exact | html-reconciliation
+#     detail: <words from the reported difference>
+#     reason: <why it is accepted>
+#     approvedBy: <who approved it>
+differences: []
 helpSystems: []
 `;
 
@@ -127,7 +153,7 @@ export function ensureScopeDecisionsFile(workspace: string): void {
 /** A missing file means no exclusions. A malformed entry is refused with its position and the field at fault. */
 export function readScopeDecisions(workspace: string): ScopeDecisions {
   const path = scopeDecisionsPath(workspace);
-  if (!existsSync(path)) return { excluded: [], substituted: [], assets: [], helpSystems: [] };
+  if (!existsSync(path)) return { excluded: [], substituted: [], assets: [], helpSystems: [], differences: [] };
   const parsed = parseYaml(readFileSync(path, 'utf8')) as { excluded?: unknown; substituted?: unknown; helpSystems?: unknown } | null;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.excluded)) throw new Error(`${path}: expected an object with an excluded list`);
   const entries = parsed.excluded;
@@ -206,7 +232,21 @@ export function readScopeDecisions(workspace: string): ScopeDecisions {
     }
     return { root: record.root as string, issue: record.issue as string, reason: record.reason as string, approvedBy: record.approvedBy as string, ...(record.approvedAt ? { approvedAt: record.approvedAt as string } : {}) };
   });
-  return { excluded, substituted, assets, helpSystems };
+  const stated = (parsed as { differences?: unknown }).differences;
+  if (stated !== undefined && stated !== null && !Array.isArray(stated)) throw new Error(`${path}: differences must be a list`);
+  const differences = ((stated ?? []) as unknown[]).map((entry, index): AcceptedDifference => {
+    const where = `${path}: differences[${index}]`;
+    if (!entry || typeof entry !== 'object') throw new Error(`${where} must be an object`);
+    const record = entry as Record<string, unknown>;
+    for (const field of ['route', 'gate', 'detail', 'reason', 'approvedBy'] as const) {
+      if (typeof record[field] !== 'string' || !(record[field] as string).trim()) throw new Error(`${where} needs a non-empty ${field}`);
+    }
+    const gate = (record.gate as string).trim();
+    if (!ANSWERABLE_GATES.has(gate)) throw new Error(`${where}.gate must be one of ${[...ANSWERABLE_GATES].join(', ')}: only a witness disagreeing with the source can be accepted, never what the conversion did`);
+    if (record.approvedAt !== undefined && typeof record.approvedAt !== 'string') throw new Error(`${where}.approvedAt must be a string`);
+    return { route: (record.route as string).trim(), gate, detail: (record.detail as string).trim(), reason: record.reason as string, approvedBy: record.approvedBy as string, ...(record.approvedAt ? { approvedAt: record.approvedAt as string } : {}) };
+  });
+  return { excluded, substituted, assets, helpSystems, differences };
 }
 
 /**
@@ -304,7 +344,7 @@ export function recordScopeExclusions(workspace: string, entries: readonly Scope
   const known = new Set(existing.helpSystems.map((entry) => entry.root));
   const newDecisions = decisions.filter((entry) => !known.has(entry.root));
   if (!added.length && !newDecisions.length) return 0;
-  const record = { excluded: [...existing.excluded, ...added], substituted: existing.substituted, helpSystems: [...existing.helpSystems, ...newDecisions] };
+  const record = { excluded: [...existing.excluded, ...added], substituted: existing.substituted, helpSystems: [...existing.helpSystems, ...newDecisions], differences: existing.differences };
   writeFileSync(scopeDecisionsPath(workspace), `${TEMPLATE.slice(0, TEMPLATE.indexOf('excluded: []'))}${toYaml(record)}`, { mode: 0o600 });
   return added.length;
 }

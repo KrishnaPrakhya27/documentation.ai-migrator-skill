@@ -43,6 +43,11 @@ export interface MarkdownAdapterOptions {
 }
 
 /** Removes the platform's theming directives from a fence info string, returning undefined when nothing authored remains. */
+/** The character references fenceMeta writes, read back to the characters. */
+function decodeMetaReferences(value: string): string {
+  return value.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#123;/g, '{').replace(/&#125;/g, '}').replace(/&amp;/g, '&');
+}
+
 export function stripPlatformCodeMeta(meta: string | undefined, patterns: string[] | undefined): string | undefined {
   if (!meta || !patterns?.length) return meta;
   let out = meta;
@@ -55,6 +60,18 @@ export function stripPlatformCodeMeta(meta: string | undefined, patterns: string
 const ANCHOR_OPEN = '\uE000';
 const ANCHOR_CLOSE = '\uE001';
 const SNIPPET_IMPORT = /^\s*import\s+([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+\.(?:mdx?|jsx))["'];?\s*$/;
+
+/**
+ * The theme-visibility classes of an image, in a fixed order, and nothing else it was styled with.
+ * A source that pairs a light and a dark copy of one picture hides each in the other theme; these are
+ * the only classes carried, because they decide which picture a reader sees at all.
+ */
+export function themeClassOf(value: unknown): { themeClass?: string } {
+  if (typeof value !== 'string') return {};
+  const tokens = new Set(value.split(/\s+/).filter((token) => /^(?:dark:)?(?:hidden|block)$/.test(token)));
+  const ordered = ['block', 'hidden', 'dark:block', 'dark:hidden'].filter((token) => tokens.has(token));
+  return ordered.length ? { themeClass: ordered.join(' ') } : {};
+}
 
 /** Documentation.AI writes images as <Image />, source MDX as <img />; both are images, never components. */
 function isImageElement(node: { name?: string | null }): boolean {
@@ -666,6 +683,7 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       id: idOf(node, path), src: srcOf(node), type: 'image',
       url: typeof attrs.src === 'string' ? attrs.src : '', alt: typeof attrs.alt === 'string' ? attrs.alt : '',
       title: typeof attrs.title === 'string' ? attrs.title : undefined,
+      ...themeClassOf(attrs.className ?? attrs.class),
       width: width.value, height: height.value,
       ...(width.unreadable !== undefined ? { unreadableWidth: width.unreadable } : {}),
       ...(height.unreadable !== undefined ? { unreadableHeight: height.unreadable } : {}),
@@ -781,6 +799,18 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
           if (!attrs.length && kids.length && kids.every((c: any) => c.type === 'text')) {
             return [{ ...base, type: 'inlineHtml', value: `<${name}>${kids.map((c: any) => c.value).join('')}</${name}>` }];
           }
+          // The two attributed inline elements this tool writes: the span it composes for a source
+          // badge, and the abbr that carries a tooltip's hover text. Both are its own spelling, so
+          // both read back as themselves; without this the file disagreed with the IR it came from
+          // and every page carrying a badge failed the serialization gate.
+          const plain = kids.length && kids.every((c: any) => c.type === 'text') ? kids.map((c: any) => c.value).join('') : undefined;
+          if (plain !== undefined && name === 'span' && attrValue('className') === 'dai-mig-badge') {
+            return [{ ...base, type: 'inlineHtml', value: `<span className="dai-mig-badge">${escapeHtmlText(plain)}</span>` }];
+          }
+          if (plain !== undefined && name === 'abbr' && attrValue('title') !== undefined) {
+            const tip = attrValue('title')!;
+            return [{ ...base, type: 'inlineHtml', value: `<abbr title="${tip.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')}">${escapeHtmlText(plain)}</abbr>` }];
+          }
         }
         const text = inline(node.children ?? [], p);
         // Inline source components need a human decision; preserve their visible
@@ -839,7 +869,18 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
   };
 
   /** A non-literal attribute keeps the node a source component so exact mode stops on it instead of accepting it as resolved. */
-  const jsxElement = (node: any, path: number[]): ComponentNode | DaiComponentNode => {
+  const jsxElement = (node: any, path: number[]): Block => {
+    // The badge span this tool composes, standing on its own. It was written as raw HTML and reads
+    // back as the same raw HTML; read as a component it would disagree with the IR it came from.
+    if (opts.platform === 'dai' && String(node.name) === 'span') {
+      const attrs = (node.attributes ?? []).filter((a: any) => a.type === 'mdxJsxAttribute');
+      const kids = node.children ?? [];
+      const className = attrs.length === 1 && attrs[0].name === 'className' && typeof attrs[0].value === 'string' ? attrs[0].value : undefined;
+      if (className === 'dai-mig-badge' && kids.length && kids.every((c: any) => c.type === 'text')) {
+        const text = kids.map((c: any) => c.value).join('').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        return { id: idOf(node, path), src: srcOf(node), type: 'rawHtml', value: `<span className="dai-mig-badge">${text}</span>`, reviewFlag: 'T4 compose: badge → span (custom CSS)' };
+      }
+    }
     const source = component(node, path);
     if (opts.platform !== 'dai' || source.styleDeps?.length || !isContractComponentName(source.name)) return source;
     return { id: source.id, src: source.src, type: 'dai', name: source.name, props: source.props, children: source.children };
@@ -1101,7 +1142,10 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
           const api = gitbookOpenApiBlocks(String(node.value ?? ''), { file: scope, markdown: (text, key) => markdownToIr(text, { platform: opts.platform, file: `${scope}:${key}`, pageId: opts.pageId, codeMetaStrip: opts.codeMetaStrip }).children });
           if (api) return api;
         }
-        const sourceMeta = node.meta ?? undefined;
+        // Target MDX carries meta the platform could not take as props inside one quoted `meta`
+        // prop (see fenceMeta); reading this tool's own output unwraps it back to the text it held.
+        const wrapped = opts.platform === 'dai' ? /^meta="([^"]*)"$/.exec((node.meta ?? '').trim()) : null;
+        const sourceMeta = wrapped ? decodeMetaReferences(wrapped[1]) : node.meta ?? undefined;
         const meta = stripPlatformCodeMeta(sourceMeta, opts.codeMetaStrip);
         return [{ ...base, type: 'code', lang: node.lang ?? undefined, meta, ...(sourceMeta !== undefined && sourceMeta !== meta ? { sourceMeta } : {}), value: node.value ?? '' }];
       }

@@ -3,6 +3,7 @@
  * (never through Markdown), and lets a platform profile declare which
  * elements are components so the rules engine can map them.
  */
+import { themeClassOf } from './from-markdown.js';
 import { Parser } from 'htmlparser2';
 import type { Block, Inline, ImageNode, ComponentNode, HeadingNode, ListItemNode, TableRowNode, Frontmatter, DocIR } from './types.js';
 import { inlineText } from './types.js';
@@ -384,6 +385,7 @@ export function htmlToIr(html: string, opts: HtmlAdapterOptions): HtmlToIrResult
     return {
       id: id(p, url), type: 'image', url, alt: (n.attribs.alt ?? '').trim(), title: n.attribs.title,
       ...(sources.length ? { sources } : {}),
+      ...themeClassOf(n.attribs.class),
       width: width.value, height: height.value,
       ...(width.unreadable !== undefined ? { unreadableWidth: width.unreadable } : {}),
       ...(height.unreadable !== undefined ? { unreadableHeight: height.unreadable } : {}),

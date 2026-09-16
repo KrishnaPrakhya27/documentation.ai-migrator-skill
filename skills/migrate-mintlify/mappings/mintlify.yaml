@@ -130,6 +130,9 @@ rules:
     # the folder is the disclosure: its name is the title and defaultOpen is carried as authored
     match: { name: Tree.Folder }
     to: { name: Expandable, props: { title: $name, defaultOpen: $defaultOpen } }
+    # highlight tints one row of the tree; the target draws no tree, so it is dropped and reported,
+    # the same way mint/tree-file declares it
+    drop: [highlight]
   - id: mint/tree-file
     tier: T3
     match: { name: Tree.File }
