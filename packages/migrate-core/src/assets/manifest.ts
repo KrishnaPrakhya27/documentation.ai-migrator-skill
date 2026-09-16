@@ -81,9 +81,28 @@ function componentAssetKind(componentName: string, prop: string): AssetReference
  * source. A repository or export source has no such base and is left exactly as authored.
  */
 export function resolveAssetUrl(url: string, source: string | undefined): string {
+  const proxied = gitbookImageProxyTarget(url);
+  if (proxied) return proxied;
   if (!url || !source || !/^https?:\/\//i.test(source)) return url;
   if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) return url;
   try { return new URL(url, source).toString(); } catch { return url; }
+}
+
+/**
+ * The real file behind GitBook's resizing proxy. A page may address an image as
+ * `<host>/~gitbook/image?url=<encoded>&width=…`, and the host serving that proxy is not always one
+ * that answers: this site proxies through `sites.gitbook.com`, which times out (HTTP 522) and will
+ * not serve robots.txt, while the file in its `url` parameter is served normally. The proxy is the
+ * old platform's delivery, not the asset — the asset is what it points at, at full size.
+ */
+export function gitbookImageProxyTarget(url: string): string | undefined {
+  if (!url || !/^https?:\/\//i.test(url) || !url.includes('/~gitbook/image')) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (!/\/~gitbook\/image\/?$/.test(parsed.pathname)) return undefined;
+    const target = parsed.searchParams.get('url');
+    return target && /^https?:\/\//i.test(target) ? target : undefined;
+  } catch { return undefined; }
 }
 
 function documentAssetReferences(doc: DocIR): AssetReference[] {
