@@ -1187,24 +1187,35 @@ async function main() {
         const container = String(v['help-center']).trim();
         if (!by) fail('--help-center needs --by "<who>": a hub page the source never had is a decision that records its approver');
         if (!tree.navigation?.length) fail('--help-center needs the navigation the source states; this tree records none');
-        const hubPath = (v['hub-path'] ? String(v['hub-path']) : defaultHubPath(container)).replace(/^\/+|\/+$/g, '');
-        if (tree.pages.some((page) => page.migrate && page.newPath === hubPath)) fail(`--help-center: a migrated page already lives at ${hubPath}; name another route with --hub-path`);
+        const hubPath = v['hub-path'] ? String(v['hub-path']).replace(/^\/+|\/+$/g, '') : undefined;
         // The container must exist before anything is recorded: build the navigation once to find it.
         const preview = buildDocumentationNavigation({ ...tree, helpCenter: undefined }, writtenPagePaths(workspace, tree), meta);
-        try { attachHelpCenterHub(preview.navigation, { container, hubPath }); } catch (error) { fail(`--help-center: ${(error as Error).message}`); }
-        tree.helpCenter = { container, hubPath, approvedBy: by, approvedAt: new Date().toISOString() };
+        let hubs: { hubPath: string }[] = [];
+        try { hubs = attachHelpCenterHub(preview.navigation, { container, hubPath: hubPath ?? defaultHubPath(container) }).hubs; } catch (error) { fail(`--help-center: ${(error as Error).message}`); }
+        if (hubPath && hubs.length > 1) fail(`--hub-path names one route, but ${hubs.length} containers are labelled "${container}" (one per language or version); drop --hub-path and each opens at the head of its own pages`);
+        for (const hub of hubs) if (tree.pages.some((page) => page.migrate && page.newPath === hub.hubPath)) fail(`--help-center: a migrated page already lives at ${hub.hubPath}; name another route with --hub-path`);
+        tree.helpCenter = { container, ...(hubPath ? { hubPath } : {}), approvedBy: by, approvedAt: new Date().toISOString() };
         writeTree(workspace, tree);
-        ok(`${container} opens on a help-centre hub at ${hubPath}, its categories drawn from its own navigation, by ${by}; the tree changed, so approve gate 1 again`);
+        ok(`${container} opens on a help-centre hub at ${hubs.map((hub) => hub.hubPath).join(', ')}, its categories drawn from its own navigation, by ${by}; the tree changed, so approve gate 1 again`);
       }
       if (tree.helpCenter) {
         // The hub is written on every nav run, because convert rebuilds the output it lives in.
         const preview = buildDocumentationNavigation({ ...tree, helpCenter: undefined }, writtenPagePaths(workspace, tree), meta);
-        const { nodePath } = attachHelpCenterHub(preview.navigation, tree.helpCenter);
-        const hubFile = join(workspace, 'output', `${tree.helpCenter.hubPath}.mdx`);
-        mkdirSync(dirname(hubFile), { recursive: true, mode: 0o700 });
-        writeFileSync(hubFile, helpCenterHubMdx(tree.helpCenter, nodePath), { mode: 0o600 });
+        for (const hub of attachHelpCenterHub(preview.navigation, tree.helpCenter).hubs) {
+          const hubFile = join(workspace, 'output', `${hub.hubPath}.mdx`);
+          mkdirSync(dirname(hubFile), { recursive: true, mode: 0o700 });
+          writeFileSync(hubFile, helpCenterHubMdx(tree.helpCenter, hub.nodePath), { mode: 0o600 });
+        }
       }
-      const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta);
+      const withoutFolder: TreePage[] = [];
+      const navigation = buildDocumentationNavigation(tree, writtenPagePaths(workspace, tree), meta, withoutFolder);
+      if (withoutFolder.length) {
+        // The source publishes these in no folder at all, so --place-unlisted has no folder of the
+        // source's to put them in. Inventing a container for them would state a structure the source
+        // never had, so they stay unlisted and are named here and in the report.
+        writeJson(join(workspace, 'report', 'unplaced-pages.json'), withoutFolder.map((page) => ({ pageId: page.id, route: page.newPath, title: page.title, source: page.source })));
+        console.log(`· ${withoutFolder.length} page(s) sit in no folder the source publishes, so they stay unlisted and will not be served: ${withoutFolder.slice(0, 3).map((page) => page.newPath).join(', ')}${withoutFolder.length > 3 ? ', …' : ''} (report/unplaced-pages.json)`);
+      }
       // The documentation's name travels with it; the source's logo, favicon, colours and theme do not,
       // so the migrated site shows Documentation.AI's own branding.
       const site = documentationSiteSettings(meta);
