@@ -1091,3 +1091,53 @@ describe('a page that left the migration leaves no redirect behind', () => {
     expect(redirectProblems(r.exact, new Set(['Guides/setup'])).map((p) => p.kind)).toContain('missing-target');
   });
 });
+
+describe('a section landing page opens its section', () => {
+  const page = (id: string, newPath: string, group: string[], title: string, order: number): TreePage =>
+    ({ id, title, source: `https://learn.example.com/${newPath}.htm`, group, order, oldPath: `/${newPath}.htm`, migrate: true, newPath } as TreePage);
+  // the sidebar the source states places one page; everything else is placed by --place-unlisted
+  const seed = page('seed', 'home', [], 'Home', 0);
+  const sourceNavigation = [{ type: 'page' as const, pageId: 'seed', title: 'Home' }];
+  const nav = (list: TreePage[]) => {
+    const built = buildNavigation([seed, ...list], { placeUnlisted: true, sourceNavigation }).navigation as { pages: Array<Record<string, unknown>> };
+    return built.pages.filter((entry) => entry.path !== 'home');
+  };
+  // a MadCap site publishes /Explainers.htm beside /Explainers/, and every section's page carries
+  // the site's name rather than the section's
+  const section = [
+    page('a', 'Explainers/events', ['Explainers'], 'Custom events', 2),
+    page('b', 'Explainers/points', ['Explainers'], 'Points', 3),
+  ];
+
+  it('is the group\u2019s own page, not a sibling of the group', () => {
+    const top = nav([page('lp', 'Explainers', [], 'SessionM Help Center', 1), ...section]);
+    expect(top).toHaveLength(1);
+    expect(top[0]).toMatchObject({ group: 'Explainers', path: 'Explainers' });
+    expect((top[0].pages as Array<{ title: string }>).map((entry) => entry.title)).toEqual(['Custom events', 'Points']);
+  });
+
+  it('opens the section from an index page the same way', () => {
+    const top = nav([page('lp', 'Explainers/index', ['Explainers'], 'SessionM Help Center', 1), ...section]);
+    expect(top).toHaveLength(1);
+    expect(top[0]).toMatchObject({ group: 'Explainers', path: 'Explainers/index' });
+    expect(top[0].pages).toHaveLength(2);
+  });
+
+  it('opens a section of one page too: the section keeps its page, nothing collapses', () => {
+    const top = nav([page('lp', 'Explainers', [], 'SessionM Help Center', 1), section[0]]);
+    expect(top).toHaveLength(1);
+    expect(top[0]).toMatchObject({ group: 'Explainers', path: 'Explainers' });
+    expect(top[0].pages).toHaveLength(1);
+  });
+
+  it('leaves an index page alone when it is all the folder holds: the folder would be empty', () => {
+    const top = nav([page('lp', 'Explainers/index', ['Explainers'], 'SessionM Help Center', 1)]);
+    expect(top.find((entry) => entry.group === 'Explainers')).not.toHaveProperty('path');
+    expect(top.find((entry) => entry.group === 'Explainers')!.pages).toHaveLength(1);
+  });
+
+  it('does not take a page that merely shares a name with the folder', () => {
+    const top = nav([page('x', 'Guides/Explainers', ['Guides'], 'Explainers', 1), ...section]);
+    expect(top.find((entry) => entry.group === 'Explainers')).not.toHaveProperty('path');
+  });
+});

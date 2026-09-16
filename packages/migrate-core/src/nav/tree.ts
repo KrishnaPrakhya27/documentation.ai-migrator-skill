@@ -350,22 +350,66 @@ export function buildDocumentationNavigation(tree: Tree, writtenPaths: ReadonlyS
  * structure the site already has — rather than composed here.
  */
 function groupsBySourcePath(pages: TreePage[]): Record<string, unknown>[] {
-  type Node = { group: string; pages: Array<Record<string, unknown> | Node>; order: number };
+  type Node = { group: string; key: string; pages: Array<Record<string, unknown> | Node>; order: number; route: string; members: number; own?: TreePage };
   const roots: Array<Record<string, unknown> | Node> = [];
   const byPath = new Map<string, Node>();
-  for (const page of [...pages].sort((a, b) => a.order - b.order)) {
+  const named = (value: string): boolean => !!value && value !== '(uncategorised)';
+  const sorted = [...pages].sort((a, b) => a.order - b.order);
+  const folders = (page: TreePage): string[] => page.group.filter(named);
+  // The route a folder covers is the leading segments of its pages' routes, one per folder name.
+  const folderRoute = (page: TreePage, depth: number): string => page.newPath!.split('/').slice(0, depth).join('/');
+  const keyOf = (page: TreePage): string => folders(page).join('/');
+
+  // Every folder these pages sit in, with the route it covers and how many pages it holds.
+  for (const page of sorted) {
     let container = roots;
     let key = '';
-    for (const name of page.group.filter((value) => value && value !== '(uncategorised)')) {
+    let depth = 0;
+    for (const name of folders(page)) {
       key = key ? `${key}/${name}` : name;
+      depth++;
       let node = byPath.get(key);
-      if (!node) { node = { group: name, pages: [], order: page.order }; byPath.set(key, node); container.push(node); }
+      if (!node) { node = { group: name, key, pages: [], order: page.order, route: folderRoute(page, depth), members: 0 }; byPath.set(key, node); container.push(node); }
       container = node.pages;
+    }
+    const own = byPath.get(key);
+    if (own) own.members++;
+  }
+
+  const byRoute = new Map<string, Node>();
+  for (const node of byPath.values()) if (node.route) byRoute.set(node.route, node);
+  /**
+   * The folder a page is the landing page of: the one whose own route the page sits at. A MadCap
+   * site publishes `/Explainers.htm` beside `/Explainers/`, and most static generators publish
+   * `/Explainers/index`; either way the page opens the section. The platform reads it from the
+   * container's `path`, so listing it separately showed the section twice — once as a group, once
+   * as a page under whatever title the source gave it, which on this Flare site was the same
+   * "SessionM Help Center" on every section. A folder left with nothing else beneath it is simply
+   * that page, so it stays where it is.
+   */
+  const landingFolder = (page: TreePage): Node | undefined => {
+    const node = byRoute.get(page.newPath!.replace(/\/(?:index|readme)$/i, ''));
+    if (!node || node.own) return undefined;
+    const others = node.members - (keyOf(page) === node.key ? 1 : 0);
+    return others > 0 ? node : undefined;
+  };
+
+  for (const page of sorted) {
+    const landing = landingFolder(page);
+    if (landing) { landing.own = page; continue; }
+    let container = roots;
+    let key = '';
+    for (const name of folders(page)) {
+      key = key ? `${key}/${name}` : name;
+      container = byPath.get(key)!.pages;
     }
     container.push({ ...pageMetadata(page), ...pageLayout(page), title: page.sidebarTitle ?? page.title, path: page.newPath! });
   }
+
   const clean = (items: Array<Record<string, unknown> | Node>): Record<string, unknown>[] =>
-    items.map((item) => ('group' in item && Array.isArray((item as Node).pages) ? { group: (item as Node).group, pages: clean((item as Node).pages) } : item as Record<string, unknown>));
+    items.map((item) => ('group' in item && Array.isArray((item as Node).pages)
+      ? { group: (item as Node).group, ...((item as Node).own ? { path: (item as Node).own!.newPath!, ...pageLayout((item as Node).own!) } : {}), pages: clean((item as Node).pages) }
+      : item as Record<string, unknown>));
   return clean(roots);
 }
 
