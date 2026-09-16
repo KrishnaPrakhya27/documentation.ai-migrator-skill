@@ -140,6 +140,18 @@ function shortfallsFrom(workspace: string, tree: Tree, gates: GateResult[], fide
     });
   }
 
+  // Media the migration does not carry. The page it sat on migrated, so it appears in no exclusion
+  // and no quarantine; without this the reader of the report would be told the page came over whole.
+  const excludedMedia = readScopeDecisions(workspace).assets;
+  if (excludedMedia.length) {
+    shortfalls.push({
+      heading: `${excludedMedia.length} image${excludedMedia.length === 1 ? '' : 's'} not carried over`,
+      explanation: 'Your source publishes these at an address we could not host from, so the pages that used them came over without them. Everything else on those pages is yours and unchanged. Re-upload each one and place it back where it was.',
+      ...capped(excludedMedia.map((entry) => `${entry.describe ?? entry.url ?? entry.hash} — ${entry.reason} (approved by ${entry.approvedBy})`)),
+      needsYou: true,
+    });
+  }
+
   // A help-centre hub the migration wrote: no words of its own, only the section's categories.
   if (tree.helpCenter) {
     shortfalls.push({

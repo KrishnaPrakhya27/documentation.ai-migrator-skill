@@ -40,6 +40,30 @@ export interface ScopeSubstitution {
 
 
 /**
+ * An asset the migration does not carry. Exact fidelity ships no page missing media and no page
+ * pointing at a source host, so an asset that cannot be hosted normally ends the run. This is the
+ * one way past that, and it is deliberately narrow: a named person accepts the loss for one exact
+ * source URL, the reference is removed from every page that used it rather than left pointing at
+ * the old platform, and the customer report names it. It records a loss — it never claims the page
+ * is unchanged.
+ */
+export interface ScopeAssetExclusion {
+  /**
+   * The asset's content hash from plan/assets.json. Preferred over `url`, and the only usable key
+   * for an asset whose address carries an access token: a signed URL is a credential, and a plan
+   * file is not where one belongs. Exactly one of `hash` or `url` identifies the asset.
+   */
+  hash?: string;
+  /** The asset's source URL, exactly as the manifest recorded it. Use `hash` when the URL is signed. */
+  url?: string;
+  /** What the asset is, in words, since a hash says nothing to the next reader. */
+  describe?: string;
+  reason: string;
+  approvedBy: string;
+  approvedAt?: string;
+}
+
+/**
  * A help system published on the host that this run does not migrate. It is a separate decision
  * type rather than a free-text waiver so it can only ever resolve the issue a second help system
  * raises — never a truncated crawl or an unreadable index, which no approval may wave through.
@@ -54,7 +78,7 @@ export interface HelpSystemDecision {
   approvedAt?: string;
 }
 
-export interface ScopeDecisions { excluded: ScopeExclusion[]; substituted: ScopeSubstitution[]; helpSystems: HelpSystemDecision[] }
+export interface ScopeDecisions { excluded: ScopeExclusion[]; substituted: ScopeSubstitution[]; assets: ScopeAssetExclusion[]; helpSystems: HelpSystemDecision[] }
 
 export function scopeDecisionsPath(workspace: string): string {
   return join(workspace, 'plan', 'scope-decisions.yaml');
@@ -82,6 +106,15 @@ excluded: []
 #     approvedBy: <who approved it>
 #     contentLoss: true|false
 substituted: []
+#
+# assets: media the migration does not carry, by exact source URL. The reference is removed from
+# every page that used it; exact mode never leaves it pointing at the source host.
+#   - hash: <content hash from plan/assets.json>   # or url: <source URL, when it carries no token>
+#     describe: <what the asset is, since a hash says nothing>
+#     reason: <why it cannot be hosted>
+#     approvedBy: <who approved it>
+#     approvedAt: <ISO date>
+assets: []
 helpSystems: []
 `;
 
@@ -94,7 +127,7 @@ export function ensureScopeDecisionsFile(workspace: string): void {
 /** A missing file means no exclusions. A malformed entry is refused with its position and the field at fault. */
 export function readScopeDecisions(workspace: string): ScopeDecisions {
   const path = scopeDecisionsPath(workspace);
-  if (!existsSync(path)) return { excluded: [], substituted: [], helpSystems: [] };
+  if (!existsSync(path)) return { excluded: [], substituted: [], assets: [], helpSystems: [] };
   const parsed = parseYaml(readFileSync(path, 'utf8')) as { excluded?: unknown; substituted?: unknown; helpSystems?: unknown } | null;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.excluded)) throw new Error(`${path}: expected an object with an excluded list`);
   const entries = parsed.excluded;
@@ -135,6 +168,33 @@ export function readScopeDecisions(workspace: string): ScopeDecisions {
       ...(record.contentLoss !== undefined ? { contentLoss: record.contentLoss as boolean } : {}),
     };
   });
+  const rawAssets = (parsed as { assets?: unknown }).assets;
+  if (rawAssets !== undefined && rawAssets !== null && !Array.isArray(rawAssets)) throw new Error(`${path}: assets must be a list`);
+  const byUrl = new Set<string>();
+  const assets = ((rawAssets ?? []) as unknown[]).map((entry, index): ScopeAssetExclusion => {
+    const where = `${path}: assets[${index}]`;
+    if (!entry || typeof entry !== 'object') throw new Error(`${where} must be an object`);
+    const record = entry as Record<string, unknown>;
+    for (const field of ['reason', 'approvedBy'] as const) {
+      if (typeof record[field] !== 'string' || !(record[field] as string).trim()) throw new Error(`${where}.${field} is required`);
+    }
+    for (const field of ['hash', 'url', 'describe'] as const) {
+      if (record[field] !== undefined && (typeof record[field] !== 'string' || !(record[field] as string).trim())) throw new Error(`${where}.${field} must be a non-empty string`);
+    }
+    if (record.approvedAt !== undefined && typeof record.approvedAt !== 'string') throw new Error(`${where}.approvedAt must be a string`);
+    const hash = record.hash ? (record.hash as string).trim() : undefined;
+    const url = record.url ? (record.url as string).trim() : undefined;
+    if (!hash && !url) throw new Error(`${where} needs a hash or a url to identify the asset`);
+    const key = hash ?? url!;
+    if (byUrl.has(key)) throw new Error(`${where} repeats ${hash ? 'hash' : 'url'} ${key}`);
+    byUrl.add(key);
+    return {
+      ...(hash ? { hash } : {}), ...(url ? { url } : {}),
+      ...(record.describe ? { describe: (record.describe as string).trim() } : {}),
+      reason: record.reason as string, approvedBy: record.approvedBy as string,
+      ...(record.approvedAt ? { approvedAt: record.approvedAt as string } : {}),
+    };
+  });
   const declared = (parsed as { helpSystems?: unknown }).helpSystems;
   if (declared !== undefined && !Array.isArray(declared)) throw new Error(`${path}: helpSystems must be a list`);
   const helpSystems = (declared ?? []).map((entry, index): HelpSystemDecision => {
@@ -146,7 +206,7 @@ export function readScopeDecisions(workspace: string): ScopeDecisions {
     }
     return { root: record.root as string, issue: record.issue as string, reason: record.reason as string, approvedBy: record.approvedBy as string, ...(record.approvedAt ? { approvedAt: record.approvedAt as string } : {}) };
   });
-  return { excluded, substituted, helpSystems };
+  return { excluded, substituted, assets, helpSystems };
 }
 
 /**

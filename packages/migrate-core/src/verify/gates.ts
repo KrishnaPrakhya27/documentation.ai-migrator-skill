@@ -622,8 +622,8 @@ export function runGates(input: GateInput): GateResult[] {
   gates.push({ id: 'no-unsafe-urls', status: unsafeUrls ? 'fail' : 'pass', detail: `${unsafeUrls} unsafe link or asset URLs were stripped`, count: unsafeUrls, samples: unsafeSamples });
 
   const assets = readManifest(input.workspace);
-  const unresolvedAssets = Object.values(assets.entries).filter((e) => e.status === 'failed' || (assets.provider !== 'none' && (e.status === 'kept-external' || !e.finalUrl)));
-  gates.push({ id: 'assets-ready', status: unresolvedAssets.length ? 'fail' : 'pass', detail: assets.provider === 'none' ? `${Object.values(assets.entries).filter((e) => e.status === 'kept-external').length} assets intentionally remain on source hosts (provider none)` : `${unresolvedAssets.length} assets failed, remain external, or lack a final ingested URL`, count: unresolvedAssets.length, samples: unresolvedAssets.slice(0, 5).flatMap((e) => e.sourceUrls.slice(0, 1)) });
+  const unresolvedAssets = Object.values(assets.entries).filter((e) => !e.excluded && (e.status === 'failed' || (assets.provider !== 'none' && (e.status === 'kept-external' || !e.finalUrl))));
+  gates.push({ id: 'assets-ready', status: unresolvedAssets.length ? 'fail' : 'pass', detail: assets.provider === 'none' ? `${Object.values(assets.entries).filter((e) => e.status === 'kept-external').length} assets intentionally remain on source hosts (provider none)` : `${unresolvedAssets.length} assets failed, remain external, or lack a final ingested URL${Object.values(assets.entries).filter((e) => e.excluded).length ? `; ${Object.values(assets.entries).filter((e) => e.excluded).length} excluded by approved decision` : ''}`, count: unresolvedAssets.length, samples: unresolvedAssets.slice(0, 5).flatMap((e) => e.sourceUrls.slice(0, 1)) });
 
   // 3. prose match + code blocks + tables
   // A block the ledger records as excluded was removed by a reviewed decision, so it is not prose the

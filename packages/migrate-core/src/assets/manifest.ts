@@ -44,6 +44,12 @@ export interface AssetEntry {
   error?: string;
   altMissing: number;
   sanitized?: boolean;
+  /**
+   * A named person accepted that this asset is not carried (plan/scope-decisions.yaml `assets`).
+   * The entry stays in the manifest so the decision is visible and reported; its references are
+   * removed from the pages rather than left pointing at the source host.
+   */
+  excluded?: { reason: string; approvedBy: string; approvedAt?: string };
 }
 
 export interface AssetManifest { provider: string; entries: Record<string, AssetEntry>; byUrl: Record<string, string> }
@@ -237,7 +243,37 @@ export async function collectAssets(docs: DocIR[], workspace: string, opts: Coll
 
 /** Entries the output cannot reference by a hosted URL: failed downloads or uploads, assets left on their source host, and downloads no provider has ingested. */
 export function unhostedAssets(m: AssetManifest): AssetEntry[] {
-  return Object.values(m.entries).filter((entry) => entry.status !== 'ingested' || !entry.finalUrl);
+  return Object.values(m.entries).filter((entry) => !entry.excluded && (entry.status !== 'ingested' || !entry.finalUrl));
+}
+
+/** Assets a named person accepted the migration would not carry. Reported, never silent. */
+export function excludedAssets(m: AssetManifest): AssetEntry[] {
+  return Object.values(m.entries).filter((entry) => !!entry.excluded);
+}
+
+/**
+ * Marks the entries a scope decision names. The URL must match one the manifest actually recorded:
+ * a decision naming nothing is an error, not a no-op, because a typo would otherwise read as an
+ * approval that silently protects nothing.
+ */
+export function applyAssetExclusions(m: AssetManifest, decisions: ReadonlyArray<{ hash?: string; url?: string; reason: string; approvedBy: string; approvedAt?: string }>): void {
+  for (const decision of decisions) {
+    const named = decision.hash ?? decision.url!;
+    // An asset that never downloaded has no content hash — its entry is keyed by URL — and a
+    // GitBook file URL carries an access token in its query. Matching a token-free URL against the
+    // address without its query identifies the file exactly while keeping the credential out of the
+    // plan file. A decision that does state a query must match it in full.
+    const withoutQuery = (url: string): string => url.split('?')[0];
+    const matches = (entry: AssetEntry): boolean => {
+      if (decision.hash) return entry.hash === decision.hash;
+      const url = decision.url!;
+      if (entry.sourceUrls.includes(url)) return true;
+      return !url.includes('?') && entry.sourceUrls.some((candidate) => withoutQuery(candidate) === url);
+    };
+    const entries = Object.values(m.entries).filter(matches);
+    if (!entries.length) throw new Error(`plan/scope-decisions.yaml: assets entry names ${named}, which is not an asset of this migration; use the hash or source URL exactly as plan/assets.json records it`);
+    for (const entry of entries) entry.excluded = { reason: decision.reason, approvedBy: decision.approvedBy, ...(decision.approvedAt ? { approvedAt: decision.approvedAt } : {}) };
+  }
 }
 
 /** One line per asset for stage messages: source URL, where it is used, and why it is not hosted. */
@@ -296,6 +332,38 @@ export function rewriteAssetRefs(doc: DocIR, m: AssetManifest): DocIR {
       },
     }),
   };
+}
+
+/**
+ * Removes every reference to an excluded asset. Exact output states no media it does not host and
+ * points at no source host, so the reference goes rather than degrading into a dead or external
+ * URL. A figure loses its image and therefore the figure; a paragraph keeps the words around it.
+ */
+export function dropExcludedAssets(doc: DocIR, m: AssetManifest): DocIR {
+  const isExcluded = (url: string): boolean => {
+    const resolved = resolveAssetUrl(url, doc.source);
+    const key = m.byUrl[resolved] ?? m.byUrl[url];
+    const entry = key ? m.entries[key] : Object.values(m.entries).find((e) => e.sourceUrls.includes(resolved) || e.sourceUrls.includes(url));
+    return !!entry?.excluded;
+  };
+  const inlines = (nodes: Inline[]): Inline[] => nodes.flatMap((node): Inline[] => {
+    if (node.type === 'image' && isExcluded(node.url)) return [];
+    return ['children' in node && Array.isArray((node as { children?: Inline[] }).children)
+      ? ({ ...node, children: inlines((node as unknown as { children: Inline[] }).children) } as Inline)
+      : node];
+  });
+  const strip = (blocks: Block[]): Block[] => blocks.flatMap((block): Block[] => {
+    switch (block.type) {
+      case 'image': return isExcluded(block.url) ? [] : [block];
+      case 'figure': return isExcluded(block.image.url) ? [] : [block];
+      case 'paragraph': case 'heading': return [{ ...block, children: inlines(block.children) }];
+      case 'list': return [{ ...block, children: block.children.map((item) => ({ ...item, children: strip(item.children) })) }];
+      case 'blockquote': case 'footnoteDefinition': case 'dai': case 'component':
+        return [{ ...block, children: strip(block.children as Block[]) } as Block];
+      default: return [block];
+    }
+  });
+  return { ...doc, children: strip(doc.children) };
 }
 
 /** Document360 Media/ resolver: cdn.document360.io/.../Documentation/X.png → Media/X.png (unescaped, %20 decoded). */

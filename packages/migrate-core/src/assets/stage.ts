@@ -6,7 +6,7 @@
  */
 import type { DocIR } from '../ir/types.js';
 import type { Fetcher } from '../scrape/fetcher.js';
-import { collectAssets, describeAssetEntry, unhostedAssets, type AssetEntry, type AssetManifest } from './manifest.js';
+import { applyAssetExclusions, collectAssets, describeAssetEntry, unhostedAssets, type AssetEntry, type AssetManifest } from './manifest.js';
 import { ingestAssets, type AssetProviderOptions } from './providers.js';
 
 export type FidelityMode = 'exact' | 'permissive';
@@ -18,6 +18,8 @@ export interface AssetsStageOptions {
   provider: AssetProviderOptions;
   fetcher?: Fetcher;
   localResolver?: (url: string) => string | undefined;
+  /** Assets a named person accepted the migration would not carry (plan/scope-decisions.yaml `assets`). */
+  excluded?: ReadonlyArray<{ hash?: string; url?: string; reason: string; approvedBy: string; approvedAt?: string }>;
 }
 
 export interface AssetsStageResult {
@@ -38,6 +40,7 @@ export class UnhostedAssetsError extends Error {
       `${stage} stopped: exact mode requires a hosted URL for every asset and ${entries.length} of them ${entries.length === 1 ? 'has' : 'have'} none`,
       ...entries.map((entry) => `  - ${describeAssetEntry(entry)}`),
       ...(hint ? [hint] : []),
+      'an asset the source publishes at no usable address can be accepted as a loss by adding it to the `assets` list in plan/scope-decisions.yaml, with a reason and who approved it',
     ].join('\n'));
   }
 }
@@ -51,6 +54,9 @@ export function assertAssetsHosted(manifest: AssetManifest, stage: string): void
 export async function runAssetsStage(options: AssetsStageOptions): Promise<AssetsStageResult> {
   const collected = await collectAssets(options.docs, options.workspace, { fetcher: options.fetcher, localResolver: options.localResolver, provider: options.provider.provider });
   const manifest = await ingestAssets(collected, options.provider);
+  // Applied before the gate: an approved exclusion is what lets an unhostable asset through, and
+  // applying it after the check would make the approval decorative.
+  if (options.excluded?.length) applyAssetExclusions(manifest, options.excluded);
   if (options.fidelityMode === 'exact') assertAssetsHosted(manifest, 'assets');
   return { manifest, unhosted: unhostedAssets(manifest) };
 }

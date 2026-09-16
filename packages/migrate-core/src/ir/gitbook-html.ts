@@ -40,6 +40,18 @@ export function isGitbookHtmlInline(name: string): boolean {
   return HTML_INLINE.has(name.toLowerCase());
 }
 
+/**
+ * Whether a `<picture>`'s `<source srcset>` candidate addresses the file by GitBook's internal id
+ * rather than a public URL. GitBook's published Markdown writes the dark-mode variant of a picture
+ * as `srcset="/files/<id>"`, which it publishes nowhere: resolved against the site it answers 404,
+ * and the space's own file host answers 403. It is a reference into GitBook's storage, not an asset
+ * with an address, so it cannot be hosted and is not one. The `<img>` beside it carries the same
+ * picture at a real URL and is what the page shows, in either colour scheme.
+ */
+export function isGitbookInternalFileRef(url: string): boolean {
+  return /^\/files\/[A-Za-z0-9]+$/.test(url.trim());
+}
+
 function htmlOptions(file: string): HtmlAdapterOptions {
   return { platform: 'gitbook', file, recognisers: getProfile('gitbook').recognisers };
 }

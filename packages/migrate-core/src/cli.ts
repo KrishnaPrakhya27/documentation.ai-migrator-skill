@@ -98,7 +98,7 @@ import type { DocIR } from './ir/types.js';
 import { walkBlocks, inlineText, type Block } from './ir/types.js';
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
 import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
-import { readManifest, referenceTally, rewriteAssetRefs, d360MediaResolver } from './assets/manifest.js';
+import { readManifest, referenceTally, rewriteAssetRefs, dropExcludedAssets, d360MediaResolver } from './assets/manifest.js';
 import { s3StorageFromEnv, s3StorageProblems, type AssetProviderOptions } from './assets/providers.js';
 import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
 import { runGates, canonicalHash, gateSatisfied, previewPushBlockers, releaseBlockers, waivedExactnessGates, type GateResult, type SourceEvidence } from './verify/gates.js';
@@ -995,7 +995,7 @@ async function main() {
       if (provider === 'dai-api' && Object.values(providerOptions.dai!).some((x) => !x)) fail('dai-api provider requires DAI_API_BASE and DAI_API_KEY (the key is bound to one documentation)');
       let result: AssetsStageResult;
       try {
-        result = await runAssetsStage({ workspace, docs, fidelityMode, provider: providerOptions, fetcher, localResolver });
+        result = await runAssetsStage({ workspace, docs, fidelityMode, provider: providerOptions, fetcher, localResolver, excluded: readScopeDecisions(workspace).assets });
       } catch (error) {
         if (!(error instanceof UnhostedAssetsError)) throw error;
         markStage(workspace, 'assets', 'failed', `${error.entries.length} assets without a hosted URL`);
@@ -1004,6 +1004,8 @@ async function main() {
       const entries = Object.values(result.manifest.entries);
       markStage(workspace, 'assets', 'done');
       ok(`${entries.length} assets (${referenceTally(result.manifest) || 'no references'}) via ${provider}: ${entries.filter((e) => e.status === 'ingested').length} ingested, ${entries.filter((e) => e.status === 'downloaded').length} local, ${entries.filter((e) => e.status === 'kept-external').length} kept external, ${entries.filter((e) => e.status === 'failed').length} failed; ${entries.reduce((n, e) => n + e.altMissing, 0)} references without alt`);
+      const excludedEntries = entries.filter((e) => e.excluded);
+      for (const entry of excludedEntries) console.log(`· not carried by decision (${entry.excluded!.approvedBy}): ${entry.sourceUrls[0]} — ${entry.excluded!.reason}`);
       if (provider === 'local') console.log('· provider local: release remains blocked until dai-api or s3 assigns final URLs');
       break;
     }
@@ -1073,14 +1075,14 @@ async function main() {
           fidelityRecords.push(unconvertedFidelityRecord(doc, 'held'));
           continue;
         }
-        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(inlineSnippetBodies(doc, snippets), manifest), (url, source) => parameterLink(siteLink(url, source))), engine, substitutedComponents);
+        const sourcePrepared = applyDeclaredLosses(retargetDocLinks(rewriteAssetRefs(dropExcludedAssets(inlineSnippetBodies(doc, snippets), manifest), manifest), (url, source) => parameterLink(siteLink(url, source))), engine, substitutedComponents);
         const withSnippets = inlineSnippetBodies(applyBlockExclusions(doc, blockExclusions, ledger), snippets);
         const recordSiteLink = (url: string, source?: string): string => {
           const outcome = resolveSiteLink(url, source);
           if (outcome && outcome.kind !== 'route') unmigratedLinks.push({ pageId: doc.pageId, route: page.newPath!, url, target: outcome.target, action: outcome.kind, knownSourcePage: outcome.knownSourcePage });
           return outcome?.target ?? url;
         };
-        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(withSnippets, manifest), (url, source) => parameterLink(recordSiteLink(url, source))));
+        const resolved = engine.resolveDoc(retargetDocLinks(rewriteAssetRefs(dropExcludedAssets(withSnippets, manifest), manifest), (url, source) => parameterLink(recordSiteLink(url, source))));
         const sourceSnapshot = authoredContentSnapshot(sourcePrepared);
         const resolvedSnapshot = authoredContentSnapshot(resolved);
         const pass = fidelityEqual(sourceSnapshot, resolvedSnapshot);
