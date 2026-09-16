@@ -513,7 +513,14 @@ function blocksShapeRaw(blocks: Block[], exactComponents: boolean): FidelityValu
         if (isAnchorShim(block)) return [];
         // The same blank space, read back from the file as a bare `br` element.
         if (block.name === 'br' && !block.children.length) return [];
-        if (exactComponents) return [{ type: 'component', name: block.name, props: ordered(block.props), children: blocksShape(block.children, true) }];
+        if (exactComponents) {
+          // A nested component is compared exactly, but a title folded from the component's own
+          // first line is the same reconciliation at any depth: a GitBook Step lives inside a
+          // Stepper, so skipping the fold here left every one of them differing by that title.
+          const exact = titleFold(contentProps(block.props), block.children);
+          const keep = Object.keys(block.props).length === Object.keys(exact.props as Record<string, unknown>).length ? ordered(block.props) : exact.props;
+          return [{ type: 'component', name: block.name, props: keep, children: blocksShape(exact.children, true) }];
+        }
         const framed = framedImageShape(block);
         if (framed) return framed;
         const anchored = anchorHeadingShape(block);
