@@ -256,7 +256,30 @@ export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: 
   };
   if (locales.length >= 2) {
     const ls = orderFirst(locales, defaults.defaultLocale);
-    return { navigation: { languages: ls.map((l) => ({ language: l, ...byVersion(inScope.filter((p) => p.locale === l)) })) } };
+    // A translated section's sidebar may link an untranslated page (GitBook's French sidebar lists
+    // the English integration quickstart), so every top-level container still held a page of the
+    // default language and appeared in its slice: English showed all five tabs. A container belongs
+    // to the language most of its pages are in, and each slice holds only its own.
+    const localeOf = new Map(inScope.map((p) => [p.id, p.locale]));
+    const ownLanguage = (node: SourceNavigationNode): string | undefined => {
+      const tally = new Map<string, number>();
+      const walk = (n: SourceNavigationNode) => {
+        const id = n.type === 'page' ? n.pageId : n.pageId;
+        const l = id ? localeOf.get(id) : undefined;
+        if (l) tally.set(l, (tally.get(l) ?? 0) + 1);
+        if (n.type === 'group') n.children.forEach(walk);
+      };
+      walk(node);
+      return [...tally].sort((a, b) => b[1] - a[1])[0]?.[0];
+    };
+    const sliceNavigation = (l: string) => defaults.sourceNavigation?.filter((node) => { const own = ownLanguage(node); return own === undefined || own === l; });
+    const byLanguage = (l: string) => {
+      const subset = inScope.filter((p) => p.locale === l);
+      const nav = sliceNavigation(l);
+      const vs = [...new Set(subset.map((p) => p.version).filter((x): x is string => !!x))];
+      return vs.length >= 2 ? byVersion(subset) : buildSlice(subset, nav, defaults.placeUnlisted);
+    };
+    return { navigation: { languages: ls.map((l) => ({ language: l, ...byLanguage(l) })) } };
   }
   return { navigation: versions.length >= 2 ? byVersion(inScope) : buildSlice(inScope, defaults.sourceNavigation, defaults.placeUnlisted) };
 }

@@ -150,7 +150,7 @@ function outsideCode(source: string, fn: (segment: string) => string): string {
 }
 
 export function preprocessPlatformMarkdown(source: string, platform: string): string {
-  const prepared = platform === 'gitbook' ? gitbookQuotedMarkdown(source) : source;
+  const prepared = platform === 'gitbook' ? outsideCode(gitbookQuotedMarkdown(source), gitbookButtonGaps) : source;
   return outsideCode(prepared, (segment) => preprocessSegment(segment, platform));
 }
 
@@ -172,6 +172,16 @@ function gitbookQuotedMarkdown(source: string): string {
     if (fence || !/^\s*>/.test(line)) return line;
     return line.replace(/\\`([^`\n]+?)\\`/g, '`$1`').replace(/\\\*\\\*(.+?)\\\*\\\*/g, '**$1**');
   }).join('\n');
+}
+
+/**
+ * GitBook writes a row of buttons with nothing between them (`<a class="button">Quickstart</a><a
+ * class="button">GitBook MCP</a>`) and renders each as its own button with a gap. Read as links they
+ * ran together into one word ("QuickstartGitBook MCP"), so the gap is written as the space it is.
+ * Two ordinary links the author wrote together are left as written.
+ */
+function gitbookButtonGaps(segment: string): string {
+  return segment.replace(/(<a\b[^>]*\bclass="[^"]*\bbutton\b[^"]*"[^>]*>[\s\S]*?<\/a>)(?=<a\b[^>]*\bclass="[^"]*\bbutton\b)/g, '$1 ');
 }
 
 function preprocessSegment(source: string, platform: string): string {

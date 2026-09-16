@@ -277,7 +277,7 @@ describe('GitBook repo adapter', () => {
     const shape = (blocks: Block[]): unknown[] => blocks.map((b) => (b.type === 'component' ? { [b.name]: b.props, children: shape(b.children) }
       : b.type === 'paragraph' ? `p:${inlineText(b.children)}` : b.type === 'heading' ? `h${b.depth}:${inlineText(b.children)}` : b.type === 'code' ? `code:${b.title}:${b.value}` : b.type));
     expect(shape(doc.children)).toEqual([
-      { cards: { 'data-view': 'cards' }, children: [{ card: { icon: 'leaf', title: 'No code', href: '/docs/start', image: 'https://x.example/cover.jpg' }, children: ['p:Start in 5 minutes & more.'] }] },
+      { cards: { 'data-view': 'cards', cols: 3 }, children: [{ card: { icon: 'leaf', title: 'No code', href: '/docs/start', image: 'https://x.example/cover.jpg' }, children: ['p:Start in 5 minutes & more.'] }] },
       { button: { 'data-action': 'ask' }, children: ['p:How can we help?'] },
       'p:Status',
       'p:Read the guide or ask .',
@@ -307,7 +307,7 @@ describe('GitBook repo adapter', () => {
     // a Step title stands for the heading it replaced, and an assistant prompt's text is chrome: nothing authored is missing
     expect(mdxHeadingOutline(mdx)).toEqual(headingOutline(doc));
     expect(proseSegments(doc).filter((segment) => !normaliseMdxText(mdx).includes(segment))).toEqual([]);
-    for (const expected of ['<Columns cols={2}>', '<Card title="No code" href="/docs/start" icon="leaf" image="https://x.example/cover.jpg">', '<Steps>', '<Step title="Create an account" titleType="h3">', '<Update label="2025-12-03">', '<Expandable title="API key">', '```js title="app.js"', '[https://github.com/example/repo](https://github.com/example/repo)', 'Left.', 'Right.']) expect(mdx).toContain(expected);
+    for (const expected of ['<Columns cols={3}>', '<Card title="No code" href="/docs/start" icon="leaf" image="https://x.example/cover.jpg">', '<Steps>', '<Step title="Create an account" titleType="h3">', '<Update label="2025-12-03">', '<Expandable title="API key">', '```js title="app.js"', '[https://github.com/example/repo](https://github.com/example/repo)', 'Left.', 'Right.']) expect(mdx).toContain(expected);
     expect(mdx).not.toContain('How can we help');
     expect(mdx).not.toMatch(/<(?:button|columns|column|updates|update|step|stepper|cards|card|details|summary)\b/);
     const button = doc.children.find((b) => b.type === 'component' && b.name === 'button')!;

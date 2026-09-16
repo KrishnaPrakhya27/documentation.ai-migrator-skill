@@ -57,7 +57,20 @@ function htmlOptions(file: string): HtmlAdapterOptions {
 }
 
 /** One HTML block, written without blank lines, as IR. `file` namespaces the node ids. */
-export function gitbookHtmlBlockToIr(html: string, file: string): Block[] {
+/**
+ * GitBook writes a row of buttons with nothing between them (`<a class="button">Quickstart</a><a
+ * class="button">GitBook MCP</a>`) and renders each as its own button with a gap. As links they
+ * would run together into one word ("QuickstartGitBook MCP"), so the gap is written as the space it is.
+ */
+function separateButtons(html: string): string {
+  return html.replace(/(<\/a>)(?=<a\b[^>]*\bclass="[^"]*\bbutton\b)/g, (close, _g, offset: number) => {
+    const opened = html.lastIndexOf('<a', offset);
+    return /\bclass="[^"]*\bbutton\b/.test(html.slice(opened, offset)) ? `${close} ` : close;
+  });
+}
+
+export function gitbookHtmlBlockToIr(rawHtml: string, file: string): Block[] {
+  const html = separateButtons(rawHtml);
   const element = parseHtml(html).children.find((child): child is El => child.type === 'tag');
   if (element?.name === 'table' && element.attribs['data-view'] === 'cards') return [cardTable(element, file)];
   return htmlToIr(html, htmlOptions(file)).children;
@@ -77,6 +90,9 @@ function cardTable(table: El, file: string): ComponentNode {
   for (const [key, value] of Object.entries(table.attribs)) props[key] = value === '' ? true : value;
   const rows = findAll(table, 'tr').filter((row) => row.children.some((cell) => cell.type === 'tag' && cell.name === 'td'));
   const cards = rows.map((row, index) => card(row, roles, `${file}::card${index}`));
+  // GitBook lays cards out three to a row, or two when the table asks for large cards; left to the
+  // target's default of two, a row of three wrapped its third card onto a line of its own.
+  if (props.cols === undefined) props.cols = table.attribs['data-card-size'] === 'large' ? 2 : 3;
   return { id: nodeId(file, [0], `cards:${textOf(table).slice(0, 80)}`), type: 'component', name: 'cards', platform: 'gitbook', props, children: cards, src: { file } };
 }
 
@@ -95,8 +111,15 @@ function card(row: El, roles: CardColumn[], file: string): ComponentNode {
     }
     // GitBook renders no other hidden column
     if (role === 'hidden' || isEmpty(cell)) return;
-    const icon = iconOf(cell);
-    if (icon && props.icon === undefined) { props.icon = icon; return; }
+    const icons = iconsOf(cell);
+    if (icons && props.icon === undefined && props.title === undefined) {
+      // GitBook may show several icons (`:claude: :chatgpt: :cursor:`); a card has one. The cell is
+      // the card's icon either way and never its title. A name with no Lucide equivalent (a brand
+      // logo) leaves the card without an icon rather than a broken one.
+      const lucide = icons.length === 1 ? lucideIcon(icons[0]) : undefined;
+      if (lucide) props.icon = lucide;
+      return;
+    }
     if (props.title === undefined && isTitleCell(cell)) { props.title = cleanText(textOf(cell)); return; }
     // A cell that opens with a heading and goes on (`<h4>Title</h4><p>Blurb</p>`) titles the card
     // with the heading; the rest is the card's body, not part of its title.
@@ -130,11 +153,32 @@ function isTitleCell(cell: El): boolean {
   return content.length === 1 && content[0].type === 'tag' && /^(?:h[1-6]|strong|b)$/.test(content[0].name);
 }
 
-/** The Font Awesome name of a cell holding only an icon (`<h4><i class="fa-leaf">:leaf:</i></h4>`). */
-function iconOf(cell: El): string | undefined {
+/** The Font Awesome names of a cell holding only icons (`<h4><i class="fa-leaf">:leaf:</i></h4>`), in order. */
+function iconsOf(cell: El): string[] | undefined {
   const icons = findAll(cell, 'i').filter((i) => /(?:^|\s)fa-[\w-]+/.test(i.attribs.class ?? ''));
-  if (icons.length !== 1 || cleanText(textOf(cell)) !== cleanText(textOf(icons[0]))) return undefined;
-  return (icons[0].attribs.class ?? '').match(/(?:^|\s)fa-([\w-]+)/)?.[1];
+  if (!icons.length || cleanText(textOf(cell)) !== cleanText(icons.map((icon) => textOf(icon)).join(' '))) return undefined;
+  return icons.map((icon) => (icon.attribs.class ?? '').match(/(?:^|\s)fa-([\w-]+)/)![1]);
+}
+
+/**
+ * Font Awesome names GitBook uses whose Lucide icon (what Documentation.AI renders) is spelled
+ * differently, matched by what the icon shows. A name Lucide shares is used as it is; a brand logo
+ * Lucide does not carry has no entry and yields no icon.
+ */
+const FONT_AWESOME_TO_LUCIDE: Record<string, string> = {
+  'wand-magic-sparkles': 'wand-sparkles', 'code-branch': 'git-branch', 'pen-to-square': 'square-pen',
+  'magnifying-glass-chart': 'chart-column', 'pen-ruler': 'pencil-ruler', 'file-import': 'file-input',
+  'magnifying-glass': 'search', 'hand-pointer': 'pointer', 'clock-rotate-left': 'history', 'life-ring': 'life-buoy',
+  'table-columns': 'columns-3', 'layer-group': 'layers', language: 'languages', 'code-pull-request': 'git-pull-request',
+  'puzzle-piece': 'puzzle', gears: 'cog', robot: 'bot', 'file-lines': 'file-text', 'globe-pointer': 'globe',
+  'window-restore': 'app-window', 'clipboard-list-check': 'clipboard-check', 'rectangle-terminal': 'square-terminal',
+  'chart-line-up': 'chart-line', 'octagon-check': 'circle-check',
+};
+const BRAND_ICONS = new Set(['claude', 'chatgpt', 'cursor', 'react', 'google', 'github', 'gitlab', 'slack', 'discord', 'figma', 'openai', 'x-twitter', 'linkedin', 'youtube']);
+
+function lucideIcon(fontAwesome: string): string | undefined {
+  if (BRAND_ICONS.has(fontAwesome)) return undefined;
+  return FONT_AWESOME_TO_LUCIDE[fontAwesome] ?? fontAwesome;
 }
 
 /** A parsed fragment as HTML again; the parser decoded entities, so text and attribute values are escaped anew. */

@@ -820,7 +820,50 @@ function selectorBranches(selector: string): string[] {
 }
 
 /** A site-level section: its own sidebar, reached from the section switcher every page renders. */
-export interface SiteSection { label: string; url: string }
+export interface SiteSection {
+  label: string;
+  url: string;
+  /** The section group the source shows it under (GitBook's "Resources" menu), if any. */
+  group?: string;
+}
+
+/**
+ * The site's sections as GitBook states them in the data every page embeds: its sections in order,
+ * and each section group (a header menu such as "Resources") with the sections inside it. The
+ * rendered switcher shows a group only as a button whose sections the browser fills in, so read
+ * from the HTML alone those sections were missing and their sidebars were folded into another tab.
+ */
+export function extractSiteSectionsData(html: string, baseUrl: string, origin: string, canonicalHosts?: CanonicalHosts): SiteSection[] | undefined {
+  const text = html.includes('\\"object\\":\\"site-section') ? html.replace(/\\"/g, '"') : html;
+  const marker = text.search(/\{"id":"sitesc(?:g)?_[^"]*","title":"[^"]*"(?:,"description":"[^"]*")?,"icon":"[^"]*","object":"site-section(?:-group)?","(?:url|children)"/);
+  if (marker < 0) return undefined;
+  const open = text.lastIndexOf('[', marker);
+  if (open < 0 || text.slice(open + 1, marker).trim()) return undefined;
+  // bracket-match the array, respecting strings
+  let depth = 0, inString = false, end = -1;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) { if (ch === '\\') i++; else if (ch === '"') inString = false; continue; }
+    if (ch === '"') inString = true;
+    else if (ch === '[' || ch === '{') depth++;
+    else if (ch === ']' || ch === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return undefined;
+  type Item = { title?: string; object?: string; url?: string; children?: Item[] };
+  let items: Item[];
+  try { items = JSON.parse(text.slice(open, end + 1)) as Item[]; } catch { return undefined; }
+  const out: SiteSection[] = [];
+  const add = (item: Item, group?: string) => {
+    if (item.object !== 'site-section' || !item.title || !item.url) return;
+    const url = normaliseDiscoveryUrl(item.url, baseUrl, origin, canonicalHosts);
+    if (url && !out.some((section) => section.url === url)) out.push({ label: item.title, url, ...(group ? { group } : {}) });
+  };
+  for (const item of items) {
+    if (item.object === 'site-section-group' && item.title) for (const child of item.children ?? []) add(child, item.title);
+    else add(item);
+  }
+  return out.length >= 2 ? out : undefined;
+}
 
 /**
  * The sections a site divides itself into (GitBook site sections). Read from the
@@ -855,6 +898,7 @@ function mergeSectionTabs(pages: readonly FrozenPage[], seed: string, origin: st
   const add = (stated: SiteSection[] | undefined) => {
     for (const section of stated ?? []) if (!byUrl.has(section.url)) byUrl.set(section.url, section);
   };
+  add(extractSiteSectionsData(home.html!, seed, origin));
   add(extractSectionTabs(home.html!, seed, origin, profile));
   for (const page of pages) {
     if (!page.html) continue;
@@ -886,12 +930,17 @@ export function sectionOfUrl(url: string, sections: readonly SiteSection[]): Sit
  * a tab.
  */
 export function siteSectionNavigation(sections: readonly SiteSection[], sidebars: ReadonlyMap<string, DiscoveredNavigationNode[]>): DiscoveredNavigationNode[] | undefined {
-  const tabs = sections.map((section) => ({
-    type: 'group' as const,
-    kind: 'tab' as const,
-    label: section.label,
-    children: sidebars.get(section.url) ?? [{ type: 'page' as const, url: section.url }],
-  }));
+  const sidebar = (section: SiteSection): DiscoveredNavigationNode[] => sidebars.get(section.url) ?? [{ type: 'page' as const, url: section.url }];
+  const tabs: DiscoveredNavigationNode[] = [];
+  for (const section of sections) {
+    if (!section.group) { tabs.push({ type: 'group', kind: 'tab', label: section.label, children: sidebar(section) }); continue; }
+    // A section group is one entry in the header whose sections are chosen from a menu: a tab
+    // holding each section as a dropdown with its own sidebar.
+    let tab = tabs.find((node) => node.type === 'group' && node.kind === 'tab' && node.label === section.group && (node as { grouped?: boolean }).grouped) as (DiscoveredNavigationNode & { children: DiscoveredNavigationNode[] }) | undefined;
+    if (!tab) { tab = { type: 'group', kind: 'tab', label: section.group, children: [], grouped: true } as never; tabs.push(tab!); }
+    tab!.children.push({ type: 'group', kind: 'dropdown', label: section.label, children: sidebar(section) });
+  }
+  for (const node of tabs) delete (node as { grouped?: boolean }).grouped;
   return tabs.length >= 2 ? tabs : undefined;
 }
 
@@ -911,7 +960,10 @@ function sidebarPagesInOrder(pages: readonly FrozenPage[]): FrozenPage[] {
  */
 function sectionOfPage(html: string, url: string, origin: string, profile: ScrapeProfile, sections: readonly SiteSection[] | undefined, canonicalHosts?: CanonicalHosts): SiteSection | undefined {
   const declared = extractSectionTabs(html, url, origin, profile, canonicalHosts, { requireSeveral: false });
-  return (declared ? sectionOfUrl(url, declared) : undefined) ?? (sections ? sectionOfUrl(url, sections) : undefined);
+  // Longest prefix across both: a translated page's own root is longer than the default section it
+  // sits under, and a section inside a group (Changelog, under Resources) is longer than the section
+  // the page's switcher offers, which lists groups only as a button.
+  return sectionOfUrl(url, [...(declared ?? []), ...(sections ?? [])]);
 }
 
 /** The site's own sections first, in the order it lists them, then every variant root the pages declared that those do not cover. */
@@ -1403,7 +1455,7 @@ export async function discoverLiveSite(input: {
       // section's own sidebar is read from the first crawled page inside it.
       const pageUrl = response.finalUrl || url;
       const declared = extractSectionTabs(response.body, pageUrl, origin, input.profile, canonicalHosts, { requireSeveral: false });
-      sections ??= declared && declared.length >= 2 ? declared : undefined;
+      sections ??= extractSiteSectionsData(response.body, pageUrl, origin, canonicalHosts) ?? (declared && declared.length >= 2 ? declared : undefined);
       // Where this page says it belongs. A page whose switcher names several sections belongs to the
       // one containing it; a page whose switcher names a single root — a language variant — belongs
       // to that root, which its own path would otherwise hide under the section above it.
@@ -1435,7 +1487,7 @@ export async function discoverLiveSite(input: {
 
   for (const pageUrl of [...pageSidebars.keys()].sort((a, b) => a.localeCompare(b))) {
     const { dom, declared } = pageSidebars.get(pageUrl)!;
-    const space = (declared ? sectionOfUrl(pageUrl, declared) : undefined) ?? (sections ? sectionOfUrl(pageUrl, sections) : undefined);
+    const space = sectionOfUrl(pageUrl, [...(declared ?? []), ...(sections ?? [])]);
     if (!space) continue;
     const seen = sectionSidebars.get(space.url);
     sectionSidebars.set(space.url, seen ? mergeNavigationTrees(seen, dom) : dom);
