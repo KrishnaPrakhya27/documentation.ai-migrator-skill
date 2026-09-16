@@ -1185,6 +1185,13 @@ describe('the rendered-content gate reads the whole source, not only its top lev
     expect(problems.filter((problem) => problem.startsWith('external link'))).toEqual([]);
   });
 
+  it('accepts a source path whose space the browser reads back as %20', async () => {
+    const doc = markdownToIr('---\ntitle: Delete group\n---\n\nSee [Create group](https://learn.example.com/Admin_Shadow/Create%20Group.htm).\n', { platform: 'madcap', file: 'https://learn.example.com/archive/Delete%20Group.htm', pageId: 'p' });
+    // the IR holds the path as the source wrote it, with a literal space
+    const problems = await run(doc, '<html><body><article><h1>Delete group</h1><p>See <a href="https://learn.example.com/Admin_Shadow/Create%20Group.htm">Create group</a>.</p></article></body></html>');
+    expect(problems.filter((problem) => problem.startsWith('external link'))).toEqual([]);
+  });
+
   it('still reports an external link the source never states', async () => {
     const doc = markdownToIr('---\ntitle: Delete group\n---\n\nSee [Create group](../Create.htm).\n', { platform: 'madcap', file: 'https://learn.example.com/Procedures/Delete.htm', pageId: 'p' });
     const problems = await run(doc, '<html><body><article><p>See <a href="https://elsewhere.example/Create.htm">Create group</a>.</p></article></body></html>');

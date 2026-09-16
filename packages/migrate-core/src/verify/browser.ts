@@ -360,7 +360,10 @@ function sourceLinkTargets(doc: DocIR): Set<string> {
   // wherever the operator declared the source site stays up, so both forms are the source's.
   const add = (url: string): void => {
     urls.add(url);
-    if (!doc.source || /^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith('#')) return;
+    if (url.startsWith('#')) return;
+    // A URL is compared as a URL, not as text. A space in a source path is %20 once a browser has
+    // read the link, and a link written relative to the page it sits on names the same target as
+    // its absolute form: both are the source's own statement of where it points.
     try { urls.add(new URL(url, doc.source).toString()); } catch { /* not a URL this page can resolve */ }
   };
   walkBlocks(doc.children, (block) => {

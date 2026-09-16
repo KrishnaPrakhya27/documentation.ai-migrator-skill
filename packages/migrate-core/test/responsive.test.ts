@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { runResponsiveGate, VIEWPORTS } from '../src/verify/responsive.js';
+import { runResponsiveGate, SETTLE, VIEWPORTS } from '../src/verify/responsive.js';
 import { openChromeSession } from '../src/verify/chrome-session.js';
 import { findChrome } from '../src/verify/browser.js';
 
@@ -105,4 +105,31 @@ describe.skipIf(!chrome)('measured in a real browser', () => {
       server.close();
     }
   }, 120_000);
+});
+
+describe('layout is measured once the page has stopped moving', () => {
+  it('asks the page to settle before reading it', async () => {
+    const prepares: Array<string | undefined> = [];
+    await runResponsiveGate(
+      [{ route: 'a', url: 'https://preview.test/a' }],
+      { measure: async (_url, _expression, options) => { prepares.push(options?.prepare); return reading() as never; } },
+      VIEWPORTS.slice(0, 1),
+    );
+    expect(prepares).toHaveLength(1);
+    expect(prepares[0]).toBe(SETTLE);
+  });
+
+  it('waits for the images and for two frames that agree, then resolves true', async () => {
+    // the contract the chrome session enforces: a prepare script must resolve to true
+    const settle = new Function('document', 'requestAnimationFrame', 'setTimeout', `return ${SETTLE}`);
+    let pending = { complete: false, listeners: {} as Record<string, () => void> };
+    const image = {
+      ...pending,
+      addEventListener: (name: string, fn: () => void) => { pending.listeners[name] = fn; setTimeout(fn, 0); },
+      removeEventListener: () => {},
+    };
+    const doc = { fonts: { ready: Promise.resolve() }, images: [image], documentElement: { scrollWidth: 390 } };
+    const result = await settle(doc, (fn: () => void) => setTimeout(fn, 0), setTimeout);
+    expect(result).toBe(true);
+  });
 });
