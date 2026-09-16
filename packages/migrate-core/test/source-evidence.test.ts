@@ -10,7 +10,7 @@ import { requireSourceManifest, sourceUniverseProblems } from '../src/evidence/v
 import { ensureScopeDecisionsFile, readScopeDecisions, excludeHelpSystems, recordScopeExclusions, answeredHelpSystemIssues } from '../src/evidence/scope.js';
 import { ensureWorkspace, readSession } from '../src/session/workspace.js';
 import { pageIdFromPlatform, sha256 } from '../src/session/ids.js';
-import { pinAcquisition, requireAcquisition } from '../src/evidence/acquisition.js';
+import { pinAcquisition, reanchorAcquisition, requireAcquisition } from '../src/evidence/acquisition.js';
 import { acquiredPath, acquireFirecrawlPages } from '../src/scrape/acquire.js';
 import { getProfile } from '../src/scrape/profiles.js';
 import { readTree, writeTree } from '../src/nav/tree.js';
@@ -107,6 +107,50 @@ describe('pages beside the docs on the same host', () => {
     // a page discovery did not refuse cannot be dropped this way, and nothing can be added
     expect(() => narrowSourceManifest(workspace, { ...after, pages: [] }, new Set())).toThrow(/did not refuse/);
     expect(() => narrowSourceManifest(workspace, { ...after, pages: [...after.pages, { ...after.pages[0], pageId: 'new', sourceId: 'https://example.test/docs/b', location: 'https://example.test/docs/b' }] }, new Set())).toThrow(/never held/);
+  });
+  it('carries a completed acquisition onto the narrowed manifest, because the acquired bytes never moved', () => {
+    const workspace = temp(); ensureWorkspace(workspace);
+    const location = 'https://example.test/docs/a';
+    const id = pageIdFromPlatform('generic', location);
+    const before = liveSourceManifest({ ...context, location: 'https://example.test/docs' }, { ...discovery(), refusedOutsideBase: [] } as DiscoveryResult);
+    writeSourceManifest(workspace, before);
+    mkdirSync(join(workspace, 'source-cache/acquired'), { recursive: true });
+    const record = { url: location, html: '<main>A</main>', htmlSha256: sha256('<main>A</main>'), markdown: 'A', markdownSha256: sha256('A') };
+    writeFileSync(acquiredPath(workspace, id), JSON.stringify(record));
+    const pages = [{ id, source: location, migrate: true }];
+    const pinned = pinAcquisition(workspace, before, pages, true).hash;
+
+    const after = liveSourceManifest({ ...context, location: 'https://example.test/docs' }, discovery());
+    narrowSourceManifest(workspace, after, new Set(['https://example.test/pricing']));
+    // the manifest the acquisition names has moved, so every later stage would refuse the frozen bytes
+    expect(() => requireAcquisition(workspace, after, pinned, pages)).toThrow(/does not belong/);
+
+    const repinned = reanchorAcquisition(workspace, after, pinned);
+    expect(repinned).not.toBe(pinned);
+    expect(() => requireAcquisition(workspace, after, repinned, pages)).not.toThrow();
+    // only the field naming the manifest moved; the page records are untouched
+    const index = JSON.parse(readFileSync(join(workspace, 'source-cache', 'acquisition-index.json'), 'utf8')) as { sourceManifest: string; pages: unknown[] };
+    expect(index.sourceManifest).toBe(sourceManifestHash(workspace));
+    expect(index.pages).toEqual([{ pageId: id, source: location, sha256: sha256(readFileSync(acquiredPath(workspace, id))) }]);
+    // re-anchoring is idempotent, and never re-points a capture at a universe it was not read from
+    expect(reanchorAcquisition(workspace, after, repinned)).toBe(repinned);
+    expect(() => reanchorAcquisition(workspace, after, 'not-the-pin')).toThrow(/changed since the session pinned it/);
+  });
+
+  it('refuses to re-anchor when a page that was acquired is the one leaving the universe', () => {
+    const workspace = temp(); ensureWorkspace(workspace);
+    const location = 'https://example.test/docs/a';
+    const id = pageIdFromPlatform('generic', location);
+    const before = liveSourceManifest({ ...context, location: 'https://example.test/docs' }, { ...discovery(), refusedOutsideBase: [] } as DiscoveryResult);
+    writeSourceManifest(workspace, before);
+    mkdirSync(join(workspace, 'source-cache/acquired'), { recursive: true });
+    const record = { url: location, html: '<main>A</main>', htmlSha256: sha256('<main>A</main>'), markdown: 'A', markdownSha256: sha256('A') };
+    writeFileSync(acquiredPath(workspace, id), JSON.stringify(record));
+    const pinned = pinAcquisition(workspace, before, [{ id, source: location }], true).hash;
+    // the manifest this re-derivation offers no longer holds the acquired page at all
+    const without = liveSourceManifest({ ...context, location: 'https://example.test/docs' }, discovery());
+    narrowSourceManifest(workspace, without, new Set(['https://example.test/pricing']));
+    expect(() => reanchorAcquisition(workspace, { ...without, pages: [] }, pinned)).toThrow(/left the frozen source universe/);
   });
 });
 

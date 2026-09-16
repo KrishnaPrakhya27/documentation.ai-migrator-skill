@@ -40,7 +40,7 @@ import { freezeDirectory, frozenRootPath, narrowSourceManifest, sourceManifestPa
 import { nativeSourceManifest, liveSourceManifest } from './evidence/capture.js';
 import { requireSourceManifest } from './evidence/verify.js';
 import { nativeNavigationWitness } from './evidence/native-navigation.js';
-import { pinAcquisition, requireAcquisition } from './evidence/acquisition.js';
+import { pinAcquisition, reanchorAcquisition, requireAcquisition } from './evidence/acquisition.js';
 import { answeredHelpSystemIssues, ensureScopeDecisionsFile, excludeHelpSystems, readScopeDecisions, recordScopeExclusions, scopeDecisionsPath, type DiscoveredHelpSystem } from './evidence/scope.js';
 import { captureSpecGraph, writeSpecOutput, type SpecManifest, specOutputPath } from './openapi/graph.js';
 import { readmeCatalogSpecs } from './openapi/readme.js';
@@ -562,6 +562,10 @@ async function main() {
       const discoveredSession = readSession(workspace);
       discoveredSession.hashes.sourceManifest = manifestHash;
       if (sourceManifest.source.kind === 'api') discoveredSession.hashes.acquisition = pinAcquisition(workspace, sourceManifest, tree.pages.filter((page) => page.migrate), false).hash;
+      // A narrowed manifest is a new hash, and a completed live acquisition names the manifest it
+      // belongs to. Left alone, every workspace that had already acquired would refuse its own
+      // frozen bytes from inventory onward; the bytes never moved, so the pin follows the correction.
+      else if (v.offline) discoveredSession.hashes.acquisition = reanchorAcquisition(workspace, sourceManifest, discoveredSession.hashes.acquisition);
       writeSession(workspace, discoveredSession);
       ensureScopeDecisionsFile(workspace);
       if (v.offline && existsSync(join(workspace, 'plan', 'tree.yaml'))) {

@@ -72,3 +72,32 @@ export function requireAcquisition(workspace: string, manifest: SourceManifest, 
   }
   for (const page of requiredPages) if (page.migrate && !acquired.has(page.id)) throw new Error(`${page.id}: in-scope source page has no pinned acquisition`);
 }
+
+/**
+ * Re-anchor a completed acquisition to a source manifest that an offline re-derivation narrowed.
+ *
+ * Narrowing drops only pages discovery refused as another site on this host, which were never
+ * candidates and so were never acquired: the acquired bytes and their identities do not move, and
+ * only the manifest they belong to was corrected. Re-anchoring therefore rewrites exactly the one
+ * field naming that manifest and leaves every page record byte-identical, so a capture cannot be
+ * re-pointed at a universe it was not read from. Every acquired page must still be that manifest's
+ * page at the same location; one that is not means the universe itself changed, and is refused
+ * rather than quietly unpinned.
+ */
+export function reanchorAcquisition(workspace: string, manifest: SourceManifest, pinnedHash: string | undefined): string | undefined {
+  const path = indexPath(workspace);
+  if (!pinnedHash || !existsSync(path)) return pinnedHash;
+  if (sha256(readFileSync(path)) !== pinnedHash) throw new Error('acquisition index changed since the session pinned it; complete acquisition with this migrator');
+  const manifestHash = sourceManifestHash(workspace);
+  if (!manifestHash) throw new Error('cannot re-anchor acquisition before source discovery is pinned');
+  const index = JSON.parse(readFileSync(path, 'utf8')) as AcquisitionIndex;
+  if (index.sourceManifest === manifestHash) return pinnedHash;
+  const byId = new Map(manifest.pages.map((page) => [page.pageId, page]));
+  for (const page of index.pages) {
+    if (byId.get(page.pageId)?.location !== page.source) throw new Error(`${page.source}: acquired page left the frozen source universe; capture it afresh in a new workspace`);
+  }
+  const body = `${JSON.stringify({ ...index, sourceManifest: manifestHash }, null, 2)}\n`;
+  writeFileSync(`${path}.tmp`, body, { mode: 0o600 });
+  renameSync(`${path}.tmp`, path);
+  return sha256(body);
+}
