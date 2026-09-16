@@ -42,9 +42,10 @@ function checkRow(check: CustomerCheck): string {
 }
 
 /** A shortfall as the front page states it: one sentence, a few names, no addresses. */
-function frontLine(shortfall: Shortfall): string {
-  const examples = shortfall.examples.length ? ` <span class="eg">For example: ${shortfall.examples.map(escape).join('; ')}.</span>` : '';
-  return `<li><span class="lead">${escape(shortfall.summary)}</span>${examples}</li>`;
+function frontLine(shortfall: Shortfall, withExamples = true): string {
+  const examples = withExamples && shortfall.examples.length ? ` <span class="eg">For example: ${shortfall.examples.map(escape).join('; ')}.</span>` : '';
+  const sentence = !withExamples && shortfall.readerSummary ? shortfall.readerSummary : shortfall.summary;
+  return `<li><span class="lead">${escape(sentence)}</span>${examples}</li>`;
 }
 
 /** The same shortfall in the appendix: the full list, for whoever acts on it. */
@@ -89,11 +90,19 @@ function checksAppendix(checks: CustomerCheck[]): string {
 const row = (label: string, value?: string): string =>
   value ? `<tr><th>${escape(label)}</th><td>${escape(value)}</td></tr>` : '';
 
-export function renderCustomerReportHtml(report: CustomerReport): string {
+/**
+ * `summary` writes the version for a reader rather than for the people acting on it: the verdict,
+ * the numbers, each decision and note as one plain sentence, and the checks at a glance - with no
+ * appendix, no page or link addresses and no technical detail. Nothing is dropped from the counts;
+ * the itemised lists stay in customer-report.json for the team.
+ */
+export function renderCustomerReportHtml(report: CustomerReport, options: { summary?: boolean } = {}): string {
+  const summary = options.summary === true;
   const date = new Date(report.generatedAt).toISOString().slice(0, 10);
   const { migrated: m } = report;
-  const decisions = report.shortfalls.filter((shortfall) => shortfall.needsYou);
-  const notes = report.shortfalls.filter((shortfall) => !shortfall.needsYou);
+  const shown = summary ? report.shortfalls.filter((shortfall) => !shortfall.teamOnly) : report.shortfalls;
+  const decisions = shown.filter((shortfall) => shortfall.needsYou);
+  const notes = shown.filter((shortfall) => !shortfall.needsYou);
   const openChecks = report.checks.some((check) => check.outcome === 'failed' || check.outcome === 'not-checked');
   const allWritten = m.pagesWritten === m.pagesInScope;
 
@@ -210,15 +219,15 @@ export function renderCustomerReportHtml(report: CustomerReport): string {
 <section class="band">
   <h2>What we need from you</h2>
   ${decisions.length
-      ? `<ol class="front">${decisions.map(frontLine).join('')}</ol>
-         <p class="hint">The complete lists behind each point are in the appendix at the end, for whoever will act on them.</p>`
+      ? `<ol class="front">${decisions.map((shortfall) => frontLine(shortfall, !summary)).join('')}</ol>
+         ${summary ? '' : '<p class="hint">The complete lists behind each point are in the appendix at the end, for whoever will act on them.</p>'}`
       : '<p class="none">Nothing. No decision is waiting on you.</p>'}
 </section>
 
 <section class="band">
   <h2>Good to know</h2>
   ${notes.length
-      ? `<ul class="front">${notes.map(frontLine).join('')}</ul>`
+      ? `<ul class="front">${notes.map((shortfall) => frontLine(shortfall, !summary)).join('')}</ul>`
       : '<p class="none">Nothing else changed along the way.</p>'}
 </section>
 
@@ -237,7 +246,7 @@ export function renderCustomerReportHtml(report: CustomerReport): string {
   </table>
 </section>
 
-${report.shortfalls.length || openChecks ? `<section class="band appendix">
+${!summary && (report.shortfalls.length || openChecks) ? `<section class="band appendix">
   <h2>Appendix — full lists</h2>
   <p>Everything summarised above, item by item, for the people who will act on it. Nothing is left out of this section.</p>
   ${report.shortfalls.map(appendixBlock).join('')}
@@ -248,7 +257,7 @@ ${report.shortfalls.length || openChecks ? `<section class="band appendix">
   <p>${report.fidelityMode === 'exact'
       ? 'Produced in exact mode: every statement above about your content is checked against the sealed source copy, and any difference blocks release.'
       : 'Produced in exploratory mode, which does not certify content fidelity. Checks in the fidelity family report as “not checked” rather than as passed — this run does not prove them either way.'}</p>
-  <p>Repository ${escape(report.destination.remote ?? 'not recorded')}${report.destination.branch ? ` · branch ${escape(report.destination.branch)}` : ''} · migration build ${escape(report.provenance.migrator)} · content contract ${escape(report.provenance.contentContract)} · generated ${escape(date)}</p>
+  ${summary ? '' : `<p>Repository ${escape(report.destination.remote ?? 'not recorded')}${report.destination.branch ? ` · branch ${escape(report.destination.branch)}` : ''} · migration build ${escape(report.provenance.migrator)} · content contract ${escape(report.provenance.contentContract)} · generated ${escape(date)}</p>`}
 </footer>
 
 </body></html>
