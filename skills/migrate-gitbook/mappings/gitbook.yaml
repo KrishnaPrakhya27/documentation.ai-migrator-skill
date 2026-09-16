@@ -18,7 +18,9 @@ rules:
   - id: gitbook/details
     tier: T1
     match: { name: details }
-    to: { name: Expandable, props: { title: $summary } }
+    # `open` is how the source states that the disclosure starts expanded; Documentation.AI spells
+    # the same thing `defaultOpen`. Dropping it would have closed a block the author left open.
+    to: { name: Expandable, props: { title: $summary, defaultOpen: $open } }
   - id: gitbook/embed
     tier: T3
     match: { name: embed }
