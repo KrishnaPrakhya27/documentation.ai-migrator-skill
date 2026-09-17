@@ -1,14 +1,14 @@
 {
   "name": "documentation-ai-migration",
-  "version": "0.1.0+codex.20260913033705",
-  "description": "Migrate documentation sites onto Documentation.AI: generic crawl, ReadMe, Mintlify, GitBook and Document360 importers, scraping skills per platform, verification and reporting.",
+  "version": "0.2.1",
+  "description": "Migrate a documentation site onto Documentation.AI exactly: Mintlify, GitBook, ReadMe, Document360, MadCap Flare and generic sources; deliver through your own clone, a git remote, or the Authoring MCP server with a browser sign-in; verification and a plain-language report.",
   "author": {
     "name": "Documentation.AI"
   },
   "interface": {
     "displayName": "Documentation.AI Migration",
-    "shortDescription": "Plan, convert, validate, and report documentation migrations",
-    "longDescription": "Internal migration tooling for discovering, converting, validating, and reporting documentation moves from supported platforms into Documentation.AI.",
+    "shortDescription": "Migrate a documentation site onto Documentation.AI, exactly, with a preview first",
+    "longDescription": "Discovers, converts, verifies and reports a documentation migration from Mintlify, GitBook, ReadMe, Document360, MadCap Flare or any Markdown or live site into Documentation.AI. A deterministic command line does the converting; the assistant runs it and stops at four decisions a person makes. Deliver through your own clone, a git remote, or the Authoring MCP server with a browser sign-in.",
     "developerName": "Documentation.AI",
     "category": "Developer Tools",
     "capabilities": [
@@ -16,7 +16,7 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Use $migrate to inspect a documentation source and run its four-gate migration workflow."
+      "Use $migrate to migrate a documentation site onto Documentation.AI: ask me for the source, how to deliver it, the template and a workspace folder, then run the four-gate workflow."
     ]
   },
   "skills": "./skills",

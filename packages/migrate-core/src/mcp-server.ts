@@ -84,7 +84,7 @@ function guide(options: McpServerOptions, topic: unknown): string {
   if (!/^[a-z0-9-]+$/.test(name)) throw new Error('topic must be a skill name such as "verify" or "migrate-gitbook"');
   const file = join(skills, name, 'SKILL.md');
   if (!existsSync(file)) throw new Error(`no guide named ${name}; there are: ${readdirSync(skills).filter((entry) => existsSync(join(skills, entry, 'SKILL.md'))).join(', ')}`);
-  const preface = name === 'migrate' ? 'You are driving dai-migrate through this MCP server: where the guide says to run `npx dai-migrate <command> …`, call the migration_run tool with that command and its flags; where it says to read a file, call migration_read.\n\n' : '';
+  const preface = name === 'migrate' ? 'You are driving dai-migrate through this MCP server: where the guide says to run `npx dai-migrate <command> …`, call the migration_run tool with that command and its flags; where it says to read a file, call migration_read. Where it says to ask with choices, offer numbered choices the person can answer with a number, and continue as soon as they answer.\n\n' : '';
   return preface + readFileSync(file, 'utf8');
 }
 

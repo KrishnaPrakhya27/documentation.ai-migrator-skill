@@ -29,7 +29,10 @@ states what its adapter recovers and where it stops.
 
 The skills orchestrate a deterministic CLI; they do not convert anything themselves.
 Invoke it from the repository root as `npm run dai-migrate -- <command>` or `npx dai-migrate <command>`;
-it is not installed globally.
+it is not installed globally. In a sandbox where npm cannot write its own folder (Codex), run the
+launcher directly, `node packages/migrate-core/bin/dai-migrate.mjs <command>`, with the network
+allowed and the parent of the workspace folder writable
+(`codex --sandbox workspace-write -c sandbox_workspace_write.network_access=true --add-dir <folder>`).
 The full ordered command sequence is in `skills/migrate/SKILL.md` under "Run sequence".
 In short:
 
@@ -75,7 +78,10 @@ A failing gate never withholds the preview, in any mode: once scope and plan are
 `write --push` publishes the branch with every finding recorded in
 `report/pushed-with-findings.json`; `release` is where a finding blocks.
 
-There are exactly four human approval gates, listed in the router skill. Stop at those.
+There are exactly four human approval gates, listed in the router skill. Stop at those, and ask
+with choices the person can click (Claude Code's `AskUserQuestion`; numbered choices elsewhere),
+never by asking them to type "approve gate 1". Their name is asked once and reused; when they pick
+the approving option, record it and continue with the next stages in the same turn.
 A failed check or a missing input is an exception to report, not a fifth gate.
 
 ## Where run data goes

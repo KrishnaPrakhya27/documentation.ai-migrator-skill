@@ -144,11 +144,28 @@ The skills are plain Markdown and the engine is a command line, so anything that
 | Assistant | How |
 | --- | --- |
 | **Claude Code** | install the plugin (above). Ask it to migrate a site |
-| **Codex** (ChatGPT's coding agent, CLI or IDE), Gemini CLI, and other terminal agents | open this folder. They read `AGENTS.md`, which points at `skills/migrate/SKILL.md`. Ask them to migrate a site |
+| **Codex** (ChatGPT's coding agent) | install it as a Codex plugin (below), then type `Use $migrate to migrate https://docs.acme.com onto Documentation.AI` |
+| Gemini CLI and other terminal agents | open this folder. They read `AGENTS.md`, which points at `skills/migrate/SKILL.md`. Ask them to migrate a site |
 | **Claude Desktop, Cursor, VS Code, Windsurf** and any other MCP host | add the local MCP server below. It gives the host four tools: `migration_guide`, `migration_status`, `migration_run`, `migration_read` |
 | **claude.ai, ChatGPT chat** | these run in the cloud and cannot reach your files or your git credentials. Use one of the rows above for the migration; use the chat for reviewing the report |
 
-The MCP server is this same command line, served over stdio:
+**Codex.** The repository is a Codex plugin marketplace as well (`.agents/plugins/marketplace.json`, `.codex-plugin/plugin.json`):
+
+```bash
+codex plugin marketplace add ~/documentation.ai-migration-skills        # or KrishnaPrakhya27/documentation.ai-migrator-skill
+codex plugin add documentation-ai-migration@documentation-ai-migration
+```
+
+Codex runs commands in a sandbox with the network off and only the current folder writable. A migration fetches the source, pushes or publishes, and writes its workspace elsewhere, so start Codex with both allowed:
+
+```bash
+mkdir -p ~/migrations
+codex --sandbox workspace-write -c sandbox_workspace_write.network_access=true --add-dir ~/migrations
+```
+
+Then type `Use $migrate to migrate https://docs.acme.com onto Documentation.AI` and give `~/migrations/<name>` as the workspace. Inside that sandbox `npx` cannot run, so the skill has Codex call `node packages/migrate-core/bin/dai-migrate.mjs` directly. For the MCP flow, Codex hands you the one `publish` command to run in your own terminal, because the browser sign-in is yours. To pick up a new version later: `codex plugin remove documentation-ai-migration@documentation-ai-migration`, then `codex plugin add` again.
+
+**MCP hosts.** The MCP server is this same command line, served over stdio:
 
 ```json
 {

@@ -7,6 +7,7 @@ description: Migrate a Document360 workspace onto Documentation.AI from an expor
 Implemented source preference: **export ZIP/directory** → live URL acquisition with the Document360 profile → generic profile. A Document360 API client is not implemented in this version.
 
 ## Procedure
+At every gate, ask the way the router skill (`skills/migrate/SKILL.md`, "How you ask" and "Four human gates") says: a short summary, then choices the person can click, first option approves; on approval record it under the name they gave at the start and carry on with the next stages in the same turn. Never ask them to type "approve gate N".
 1. `dai-migrate discover --export <zip|dir>`: reads `<workspace>_category_articles.json` and `Articles/`, writes `plan/tree.yaml` (category path, order, format html|md, workspace, language) and lists `unplaced` entries. **Human gate 1/4:** confirm scope; if the export mixes workspaces or languages, confirm which ones are in scope.
 2. `dai-migrate inventory`: components (infoBox/warningBox/errorBox/successBox, details, editor360-faq, tabs, tables, iframes, custom HTML), assets under `Media/`, links, heading ids, and **snippet tokens** (`{{snippet.X}}`). Snippet bodies are not in the export. Add operator-supplied bodies and resolution decisions to `inventory/snippets.json`; unresolved tokens keep affected pages quarantined.
 3. `dai-migrate plan`: **human gate 2/4** reviews the combined snippet decisions, `plan/component-plan.yaml`, `plan/urls.yaml` and `plan/assets.yaml`.

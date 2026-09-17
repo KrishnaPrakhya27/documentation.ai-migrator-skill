@@ -7,6 +7,7 @@ description: "Migrate a documentation site onto Documentation.AI from a local Ma
 For sites with no export, API or source repo, or for platforms without a dedicated skill.
 
 ## Procedure
+At every gate, ask the way the router skill (`skills/migrate/SKILL.md`, "How you ask" and "Four human gates") says: a short summary, then choices the person can click, first option approves; on approval record it under the name they gave at the start and carry on with the next stages in the same turn. Never ask them to type "approve gate N".
 1. `dai-migrate discover --url <site>` unions recursive sitemap indexes (including robots-declared and gzip maps), sidebar links, the recursive same-origin link graph, and Firecrawl `/map` when selected. Sidebar order wins; sitemap order is the fallback. Sitemap filenames may supply conservative group, locale, and version hints when the URL path does not. **Human gate 1/4:** review `inventory/sitemaps.json` and `plan/tree.yaml`; a sitemap is an inventory, not authoritative navigation.
 2. `dai-migrate acquire --profile generic`: batch scrape of the confirmed list through Firecrawl (explicit settings) or the local fetcher; content-addressed cache; robots honoured unless `--customer-authorised`.
 3. `dai-migrate inventory`: everything with a class or a non-standard tag is a component candidate; `details`, `iframe`, `video`, tables, code, images.
