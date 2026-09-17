@@ -144,7 +144,11 @@ export function documentationSiteSettings(input: SiteSettingsInput): { settings:
   if (Object.keys(seo).length) settings.seo = seo;
   if (plan.stylesheet) settings.customCss = [{ src: MIGRATION_STYLESHEET }];
   if (plan.redirects && input.redirects?.length) {
-    settings.redirects = input.redirects.filter((rule) => rule.source !== rule.destination).map((rule) => ({ source: rule.source, destination: rule.destination, ...(rule.statusCode && rule.statusCode !== 308 ? { statusCode: rule.statusCode } : {}) }));
+    // The site's root is `initialRoute`'s to open. A rule whose source is the root would answer every
+    // visit to the site with a permanent redirect, which browsers remember, to say what the
+    // platform already does.
+    const redirects = input.redirects.filter((rule) => rule.source !== rule.destination && rule.source.replace(/\/+$/, '') !== '').map((rule) => ({ source: rule.source, destination: rule.destination, ...(rule.statusCode && rule.statusCode !== 308 ? { statusCode: rule.statusCode } : {}) }));
+    if (redirects.length) settings.redirects = redirects;
   }
   return { settings, leftOut };
 }

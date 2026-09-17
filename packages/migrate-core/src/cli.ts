@@ -105,6 +105,7 @@ import { loadRawSourcePages, rawSourceIr, type RawSourcePage } from './verify/so
 import { fetchRenderer, findChrome, routeUrl, runBrowserContentGate, runBrowserFragmentGate, type BrowserAnchor, type ExpectedNavigationEntry } from './verify/browser.js';
 import { acceptPreviewRoutes, readPreviewAcceptances } from './verify/preview-acceptances.js';
 import { DEFAULT_MCP_URL, McpClient } from './publish/mcp-client.js';
+import { chooseProject, signInWithBrowser, writableProjects } from './publish/mcp-oauth.js';
 import { serveStdio } from './mcp-server.js';
 import { publishThroughMcp, type PublishProgress, type PublishResult } from './publish/publish.js';
 import { cachedRenderer, openChromeSession, EXPAND_INTERACTIVE } from './verify/chrome-session.js';
@@ -437,7 +438,9 @@ async function main() {
         if (owner) { allowedOrgs = [`${owner.host}/${owner.org}`]; console.log(`  · no --allowed-orgs given: this migration may write only to ${owner.host}/${owner.org}, the organisation of the repository named here`); }
       }
       const s3Configured = s3StorageProblems(s3StorageFromEnv(process.env)).length === 0;
-      const pre = await preflight({ target: { landing, repoRemote: remoteAtInit }, allowedRemoteOrgs: allowedOrgs, daiApiBase: process.env.DAI_API_BASE, daiApiKey: process.env.DAI_API_KEY, s3Configured });
+      // One variable is enough: with a key and no base, the platform is the public one the MCP endpoint lives on.
+      const daiApiBase = process.env.DAI_API_BASE ?? (process.env.DAI_API_KEY ? new URL(process.env.DAI_MCP_URL ?? DEFAULT_MCP_URL).origin : undefined);
+      const pre = await preflight({ target: { landing, repoRemote: remoteAtInit }, allowedRemoteOrgs: allowedOrgs, daiApiBase, daiApiKey: process.env.DAI_API_KEY, s3Configured });
       for (const c of pre.checks) console.log(`  ${c.status === 'ok' ? '✔' : c.status === 'fail' ? '✖' : '·'} ${c.id}: ${c.detail}`);
       if (pre.checks.some((c) => c.status === 'fail')) fail('preflight failed; fix the connection issues above before migrating (nothing was written)');
       writeJson(join(workspace, 'report', 'preflight.json'), pre.checks);
@@ -1715,23 +1718,42 @@ async function main() {
     case 'publish': {
       // The MCP flow: the same output, sent straight into the Documentation.AI project through the
       // platform's Authoring MCP server and published on a working version of its own. No git, no
-      // repository access: the project's API key is the only credential. The live site is untouched
-      // until a person merges the working version.
+      // repository access, no key to mint: the person signs in to their Documentation.AI account.
+      // The live site is untouched until a person merges the working version.
       const workspace = ws(); const s = readSession(workspace);
       requireStages(s, 'nav');
       if ((s.fidelityMode ?? 'exact') === 'exact') assertAssetsHosted(readManifest(workspace), 'publish');
-      const token = process.env.DAI_API_KEY;
-      if (!token) fail('publish sends the migration into your Documentation.AI project and needs that project\'s API key in DAI_API_KEY (dashboard → project → API keys). To deliver through git instead, use write --push');
       assertReadyToSend(workspace, s, 'publish', !!v['allow-lossy']);
       const branch = v.branch?.trim() || `migration/${s.migrationId}`;
       if (!/^[A-Za-z0-9._/-]+$/.test(branch) || branch.startsWith('-') || branch.includes('..')) fail(`--branch ${branch} is not a usable working-version name: letters, digits, dot, dash, underscore and slash only`);
       const progressFile = join(workspace, 'report', 'mcp-publish.json');
-      const client = new McpClient({ url: process.env.DAI_MCP_URL, token, clientVersion: CORE_VERSION });
+      const mcpUrl = process.env.DAI_MCP_URL ?? DEFAULT_MCP_URL;
+      // Whoever migrates into a project already has an account with access to it, so signing in is
+      // enough: the same browser sign-in every MCP host uses. A project API key (DAI_API_KEY) is the
+      // alternative for a machine nobody sits at. The sign-in token stays in memory and is never written anywhere.
+      const apiKey = process.env.DAI_API_KEY;
+      let token = apiKey;
+      if (!token) {
+        try { token = (await signInWithBrowser({ mcpUrl, log: (message) => console.log(`  · ${message}`) })).accessToken; }
+        catch (error) { fail(`could not sign in to Documentation.AI: ${(error as Error).message}`); }
+      }
+      const client = new McpClient({ url: mcpUrl, token: token!, clientVersion: CORE_VERSION });
       await client.connect();
+      // A key is bound to one project. An account may reach several, so the project is named, remembered, or the only one.
+      let project: { organizationId: string; documentationId: string } | undefined;
+      if (!apiKey) {
+        try {
+          const listing = await client.call<Parameters<typeof writableProjects>[0]>('list_projects', {});
+          const chosen = chooseProject(writableProjects(listing.structured), v.project, s.target.documentationId);
+          project = { organizationId: chosen.organizationId, documentationId: chosen.documentationId };
+          Object.assign(s.target, { organizationId: chosen.organizationId, documentationId: chosen.documentationId, projectName: chosen.name }); writeSession(workspace, s);
+          console.log(`  · publishing into "${chosen.name}" in ${chosen.organizationName}, on a working version of its own; the live site is not touched`);
+        } catch (error) { await client.close(); fail((error as Error).message); }
+      }
       let result: PublishResult;
       try {
         result = await publishThroughMcp({
-          client, outputDir: join(workspace, 'output'), branch,
+          client, outputDir: join(workspace, 'output'), branch, project,
           commitMessage: `Migrate ${typeof readPlatformMeta(workspace).name === 'string' ? readPlatformMeta(workspace).name : 'documentation'} (${s.migrationId})`,
           removeOldPages: !!v['remove-old-pages'],
           progress: existsSync(progressFile) ? readJson<PublishProgress>(progressFile) : undefined,
@@ -1749,24 +1771,32 @@ async function main() {
       markStage(workspace, 'publish', 'done', `${result.branch}${result.commitSha ? `@${result.commitSha.slice(0, 8)}` : ''}`);
       ok(`${result.created + result.rewritten + result.alreadySent} files on working version ${result.branch} (${result.created} created, ${result.rewritten} rewritten, ${result.alreadySent} already there); ${result.status === 'published' ? 'published' : 'nothing new to publish'}. The live site is unchanged`);
       if (result.replacedPages.length) console.log(`  · ${result.replacedPages.length} page(s) the project had before are no longer in the navigation${result.removedPages.length ? ' and were deleted (--remove-old-pages)' : ', so they are not served; their files are left in place (publish --remove-old-pages deletes them)'}`);
-      // A preview of the working version, by the platform's own REST API and the same key.
-      if (!v['no-wait']) {
-        const apiBase = (s.target.apiBase ?? process.env.DAI_API_BASE ?? new URL(process.env.DAI_MCP_URL ?? DEFAULT_MCP_URL).origin).replace(/\/$/, '');
-        const api = new DaiClient({ baseUrl: apiBase, apiKey: token });
+      // Publishing a working version starts its preview build on the platform by itself (the same
+      // path the editor's Save takes). With a project key the address is looked up here, and the
+      // build is asked for if none appears. Signed in without a key there is nothing to look it up
+      // with yet: the MCP server does not return preview addresses, so the person reads it from the dashboard.
+      if (!apiKey) {
+        console.log(`  · Documentation.AI is building a preview of ${result.branch}. Open the project in the dashboard, switch to the working version ${result.branch}, and copy the preview address from the Save menu (or from Deployments → Preview) once it is ready, then run`);
+        console.log(`    dai-migrate verify --workspace ${workspace} --preview-url <that address>`);
+      } else if (!v['no-wait']) {
+        const apiBase = (s.target.apiBase ?? process.env.DAI_API_BASE ?? new URL(mcpUrl).origin).replace(/\/$/, '');
+        const api = new DaiClient({ baseUrl: apiBase, apiKey });
         const minutes = Number(v['preview-timeout']);
         if (!Number.isFinite(minutes) || minutes < 1 || minutes > 120) fail('--preview-timeout must be 1..120 minutes');
-        const requested = await api.deployPreview(result.branch);
-        if (requested.status >= 400) console.log(`  · the preview build could not be requested (HTTP ${requested.status}); open the dashboard → Deployments → Preview, then pass the URL to verify --preview-url`);
-        else {
-          console.log(`  · waiting up to ${minutes} min for the preview of ${result.branch}`);
-          const res = await api.waitForBranchDeployment(result.branch, { timeoutMs: minutes * 60_000 });
-          if (res.outcome === 'ready' && res.deployment?.url) {
-            s.target.previewUrl = res.deployment.url.startsWith('http') ? res.deployment.url : `https://${res.deployment.url}`;
-            s.target.previewDeploymentId = res.deployment.deploymentId; s.target.apiBase ??= apiBase; writeSession(workspace, s);
-            ok(`preview ready: ${s.target.previewUrl}`);
-            console.log(`  next: dai-migrate verify --workspace ${workspace} --preview`);
-          } else console.log(`  · the preview was not ready within ${minutes} min (${res.outcome}); read its URL from the dashboard → Deployments → Preview and run verify --preview-url <url>`);
+        console.log(`  · waiting up to ${minutes} min for the preview of ${result.branch}`);
+        // the platform's own build first; asked for only if none shows up
+        let res = await api.waitForBranchDeployment(result.branch, { timeoutMs: 60_000 });
+        if (res.firstSeenMs === undefined) {
+          const requested = await api.deployPreview(result.branch);
+          if (requested.status >= 400) console.log(`  · no preview build appeared and one could not be requested (HTTP ${requested.status}); previews need a plan that includes them`);
         }
+        if (res.outcome !== 'ready') res = await api.waitForBranchDeployment(result.branch, { timeoutMs: minutes * 60_000 });
+        if (res.outcome === 'ready' && res.deployment?.url) {
+          s.target.previewUrl = res.deployment.url.startsWith('http') ? res.deployment.url : `https://${res.deployment.url}`;
+          s.target.previewDeploymentId = res.deployment.deploymentId; s.target.apiBase ??= apiBase; writeSession(workspace, s);
+          ok(`preview ready: ${s.target.previewUrl}`);
+          console.log(`  next: dai-migrate verify --workspace ${workspace} --preview`);
+        } else console.log(`  · the preview was not ready within ${minutes} min (${res.outcome}); read its address from the dashboard → Deployments → Preview and run verify --preview-url <address>`);
       }
       console.log(`  to go live after review and release: merge the working version ${result.branch} into the live version in the dashboard (or ask your agent to call merge_branches on the Authoring MCP server)`);
       break;

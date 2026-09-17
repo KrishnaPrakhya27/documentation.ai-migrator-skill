@@ -26,6 +26,8 @@ export const WORKSPACE_DIRS = ['source-cache', 'snapshot', 'inventory', 'plan', 
 export interface SessionTarget {
   /** 'customer-org' (option A) or 'demo-org' (option B) */
   landing: 'customer-org' | 'demo-org';
+  /** The name of the project a signed-in person published into through the Authoring MCP server (`organizationId` and `documentationId` hold its ids), so a later publish of this migration goes to the same one. */
+  projectName?: string;
   /** The customer's own clone of their Documentation.AI repository (init --clone): `write` builds the migration branch in it, and its `origin` is the remote. */
   cloneDir?: string;
   organizationId?: string;

@@ -47,11 +47,15 @@ Commands (run in order; the workflow has exactly four standard human gates):
                a branch already pushed is evidence and is never rewritten
                --allow-lossy (permissive sessions) records the unproven exactness gates as waived in report/lossy-push.json
                a failing gate never withholds the push, in any mode: it is recorded in report/pushed-with-findings.json and blocks release
-  publish      [--branch <working version>] [--remove-old-pages] [--no-wait] [--preview-timeout min]
+  publish      [--project "<name or id>"] [--branch <working version>] [--remove-old-pages] [--no-wait] [--preview-timeout min]
                the MCP flow, instead of write --push: sends the output straight into your Documentation.AI project through the
-               Authoring MCP server (DAI_API_KEY is the only credential; no git), onto a working version of its own, publishes
-               that version and asks for its preview. The live site is untouched until the working version is merged.
-               A run that stops continues where it stopped. --remove-old-pages also deletes the pages the project had before.
+               Authoring MCP server. No git and no API key: it opens your browser to sign in to Documentation.AI, the same way
+               an assistant connects to the MCP server (the sign-in is kept in memory only). With several projects, name one
+               with --project; it is remembered for this migration. DAI_API_KEY, when set, is used instead of signing in
+               (for a machine nobody sits at) and also looks the preview address up.
+               Everything lands on a working version of its own, published once; the platform then builds its preview. The
+               live site is untouched until the working version is merged. A run that stops continues where it stopped.
+               --remove-old-pages also deletes the pages the project had before.
   verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
                [--renderer fetch|chrome] [--responsive sample|all|off]
                the preview check reads every page over HTTP (minutes, no browser needed). It fails a page only for what a reader
@@ -109,7 +113,7 @@ export function parseCommandLine() {
     preview: { type: 'boolean', default: false }, 'preview-url': { type: 'string' }, 'preview-contract-version': { type: 'string' },
     renderer: { type: 'string' }, responsive: { type: 'string' }, route: { type: 'string', multiple: true },
     'keep-external': { type: 'boolean', default: false },
-    branch: { type: 'string' }, 'remove-old-pages': { type: 'boolean', default: false },
+    branch: { type: 'string' }, 'remove-old-pages': { type: 'boolean', default: false }, project: { type: 'string' },
     'log-originals': { type: 'boolean', default: false },
     help: { type: 'boolean', default: false },
   },

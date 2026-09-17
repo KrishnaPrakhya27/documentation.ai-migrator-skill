@@ -90,7 +90,7 @@ describe('the site plan', () => {
 
   it('is written under the platform\'s own keys, with hosted images only, and the platform\'s schema accepts it', () => {
     const hosted = (url: string): string | undefined => (url.includes('/logo/') ? url.replace('cdn.acme.test', 'media.documentation.test') : undefined);
-    const { settings, leftOut } = documentationSiteSettings({ name: 'Acme', plan, hosted, redirects: [{ source: '/old', destination: '/new', statusCode: 308 }, { source: '/same', destination: '/same' }, { source: '/temp', destination: '/t', statusCode: 307 }] });
+    const { settings, leftOut } = documentationSiteSettings({ name: 'Acme', plan, hosted, redirects: [{ source: '/old', destination: '/new', statusCode: 308 }, { source: '/same', destination: '/same' }, { source: '/temp', destination: '/t', statusCode: 307 }, { source: '/', destination: '/index' }] });
     expect(settings).toEqual({
       name: 'Acme', template: 'classic',
       colors: { light: { brand: '#166e3f' }, dark: { brand: '#26bd6c' } },

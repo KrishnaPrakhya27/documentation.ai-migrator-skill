@@ -42,9 +42,9 @@ The migration is the same in every case. What differs is how the result reaches 
 | --- | --- | --- | --- |
 | **Clone flow** | you have cloned the repository Documentation.AI created for your project | git access to that repository. **No API key.** | `init --clone <folder>` … `write --push` |
 | **Git flow** | you have the repository's URL but no clone, or your team migrates for several customers | git access; an API key is optional and finds the preview URL for you | `init --remote <git url>` … `write --push` |
-| **MCP flow** | you do not want to touch git at all | your project's API key | `publish` (sends everything through Documentation.AI's [Authoring MCP server](https://documentation.ai/docs/ai/authoring-mcp-server)) |
+| **MCP flow** | you do not want to touch git at all | your Documentation.AI account. **No API key, no git.** You sign in through the browser | `publish` (sends everything through Documentation.AI's [Authoring MCP server](https://documentation.ai/docs/ai/authoring-mcp-server)) |
 
-In the clone and git flows the push starts a preview build on Documentation.AI by itself. In the MCP flow `publish` asks for the preview. Either way the live site changes only when you merge.
+In every flow Documentation.AI builds a preview of what was delivered by itself, and the live site changes only when you merge.
 
 ---
 
@@ -54,7 +54,7 @@ In the clone and git flows the push starts a preview build on Documentation.AI b
 | --- | --- |
 | Node.js 22 or newer | the command line |
 | git, for the clone and git flows | the migration branch is pushed with your own git credentials |
-| A Documentation.AI project | the target. Its API key is needed only for the MCP flow |
+| A Documentation.AI project and an account that can edit it | the target. No API key is needed in any flow; one is optional and only saves you copying the preview address |
 | Permission to read the source | **written permission from the site's owner before crawling a live site**, or use an export or the docs repository instead |
 | Chrome or Chromium (optional) | measures phone and tablet layout on the preview, and prints the PDF report. Everything else works without it |
 | Image hosting (optional) | the Documentation.AI media API or an S3/R2 bucket. Without either, pictures stay at the addresses that serve them today, and the report says so |
@@ -115,7 +115,7 @@ npx dai-migrate release   --workspace $W              # → report/release-certi
 npx dai-migrate report    --workspace $W              # the report, as HTML, PDF and JSON
 ```
 
-**Where the preview URL comes from.** With no API key, open your project's dashboard → Deployments → Preview, copy the URL of the migration branch once it is ready, and pass it as `--preview-url`. It is remembered, so later runs only need `verify --preview`. With `DAI_API_KEY` and `DAI_API_BASE` set, `write --push` waits for the preview and records the URL itself.
+**Where the preview URL comes from.** With no API key, open your project's dashboard → Deployments → Preview, copy the URL of the migration branch once it is ready, and pass it as `--preview-url`. It is remembered, so later runs only need `verify --preview`. With `DAI_API_KEY` set, `write --push` waits for the preview and records the URL itself.
 
 **The other two flows** change two lines:
 
@@ -123,14 +123,15 @@ npx dai-migrate report    --workspace $W              # the report, as HTML, PDF
 # git flow: name the repository instead of a clone (the migrator clones it into the workspace)
 npx dai-migrate init --workspace $W --source https://docs.acme.com --remote git@github.com:acme/docs.git --customer-authorised
 
-# MCP flow: no git. init needs no --clone or --remote, and publish replaces write --push
-export DAI_API_KEY=…                                   # your project's key, from the dashboard
+# MCP flow: no git and no key. init needs no --clone or --remote, and publish replaces write --push
 npx dai-migrate init    --workspace $W --source https://docs.acme.com --customer-authorised
 #   … the same stages …
-npx dai-migrate publish --workspace $W                 # working version migration/<id> → published → preview
+npx dai-migrate publish --workspace $W                 # opens your browser to sign in, then publishes
 ```
 
-`publish` sends every file first, then the settings and navigation, then publishes the working version once and asks for its preview. If it stops half-way, run it again and it continues. Pages your project had before are taken out of the navigation (so they are no longer served) and left in place; `--remove-old-pages` deletes them. Go live by merging the working version in the dashboard.
+`publish` opens your browser so you can sign in to Documentation.AI, exactly as an assistant does when it connects to the MCP server. The sign-in is held in memory for that run and never written anywhere. If your account can edit several projects, name the one you mean with `--project "<name>"`; it is remembered for this migration. Then it sends every file, then the settings and navigation, and publishes a working version `migration/<id>` once. Documentation.AI builds that version's preview by itself: open the project in the dashboard, switch to the working version, copy the preview address from the Save menu (or from Deployments → Preview), and pass it to `verify --preview-url`.
+
+If `publish` stops half-way, run it again and it continues. Pages your project had before are taken out of the navigation (so they are no longer served) and left in place; `--remove-old-pages` deletes them. Go live by merging the working version in the dashboard. On a machine nobody sits at, set `DAI_API_KEY` to the project's key instead of signing in; with a key the preview address is looked up for you.
 
 **No image hosting?** With no API key and no bucket, run `assets --provider none --keep-external --by "Your Name"`. Pictures stay at the addresses that serve them today and keep working while those stay online. The report reminds you to upload them before the old site is switched off.
 
@@ -168,7 +169,7 @@ command = "node"
 args = ["/absolute/path/to/documentation.ai-migration-skills/packages/migrate-core/bin/dai-migrate.mjs", "mcp"]
 ```
 
-Put `DAI_API_KEY` in the server's `env` only if you use the MCP flow. Whichever assistant drives it, the rules live in the command line: it refuses a workspace inside this folder, refuses to push unapproved scope, and records every approval with a person's name.
+No key goes in the server's configuration: `publish` opens your browser to sign in. Whichever assistant drives it, the rules live in the command line: it refuses a workspace inside this folder, refuses to push unapproved scope, and records every approval with a person's name.
 
 ---
 
@@ -299,7 +300,8 @@ report/           everything below
 | Variable | Used for |
 | --- | --- |
 | `MIGRATION_WORKSPACE` | instead of `--workspace` |
-| `DAI_API_KEY`, `DAI_API_BASE` | optional in the clone and git flows (finds the preview URL, checks the project up front, media API). Required for `publish` |
+| `DAI_API_KEY` | your project's key. Optional everywhere: it finds the preview address for you, checks the project up front, enables the media API, and lets `publish` run without a browser sign-in |
+| `DAI_API_BASE` | the platform's API address. Defaults to `https://api.documentation.ai`; set it only for another environment |
 | `DAI_MCP_URL` | the Authoring MCP endpoint, default `https://api.documentation.ai/mcp` |
 | `MIGRATION_ALLOWED_ORGS` | for teams: the organisations a migration may write to. Without it a migration may write only to the organisation of the repository named at `init` |
 | `R2_*` / S3 settings, `MIGRATION_ASSET_PROVIDER` | hosting pictures in your own bucket |

@@ -48,7 +48,7 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'migration_run', title: 'Run a migration stage',
-    description: 'Runs one dai-migrate command in a workspace and returns what it printed. Stages stop and name what to fix rather than guess; never work around a stopped stage. `approve` and `accept` record a decision a named person made: call them only after that person has reviewed what the gate asks for and said yes, with their name in --by.',
+    description: 'Runs one dai-migrate command in a workspace and returns what it printed. Stages stop and name what to fix rather than guess; never work around a stopped stage. `approve` and `accept` record a decision a named person made: call them only after that person has reviewed what the gate asks for and said yes, with their name in --by. `publish` opens the person\'s browser so they can sign in to Documentation.AI; tell them to look for it before you call it.',
     inputSchema: {
       type: 'object', required: ['command', 'workspace'],
       properties: {

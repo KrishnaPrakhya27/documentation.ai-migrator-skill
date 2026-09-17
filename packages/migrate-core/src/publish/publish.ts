@@ -34,6 +34,13 @@ export interface PublishOptions {
   outputDir: string;
   /** The working version to publish onto; created from the live version when it does not exist. */
   branch: string;
+  /**
+   * The project, for a signed-in person (who may have several). Sent on every call rather than
+   * selected once: the server remembers a selection per account for a week, across every MCP host
+   * that account uses, so relying on it would let another conversation redirect this publish.
+   * Omitted with an API key, which is already bound to one project.
+   */
+  project?: { organizationId: string; documentationId: string };
   commitMessage: string;
   /** Also delete the pages the navigation no longer names. Off by default: a file outside the navigation is not served, and deleting is the owner's call. */
   removeOldPages?: boolean;
@@ -137,7 +144,9 @@ const sha = (text: string): string => createHash('sha256').update(text).digest('
 const alreadyExists = (error: unknown): boolean => error instanceof McpToolError && /already exists/i.test(error.message);
 
 export async function publishThroughMcp(options: PublishOptions): Promise<PublishResult> {
-  const { client, outputDir, branch } = options;
+  const { outputDir, branch } = options;
+  const target = options.project ? { organizationId: options.project.organizationId, documentationId: options.project.documentationId } : {};
+  const client: Pick<McpClient, 'call'> = { call: (tool, args) => options.client.call(tool, { ...args, ...target }) };
   const log = options.log ?? (() => undefined);
   const warnings: string[] = [];
   const files = outputFiles(outputDir);
@@ -171,7 +180,8 @@ export async function publishThroughMcp(options: PublishOptions): Promise<Publis
   for (const [index, file] of contentFiles.entries()) {
     const content = readFileSync(join(outputDir, file), 'utf8');
     const hash = sha(content);
-    if (progress.sent[file] === hash) { alreadySent++; continue; }
+    // skipped only when the working version really holds it: the record alone could be from another project's version of the same name
+    if (progress.sent[file] === hash && existing.has(file)) { alreadySent++; continue; }
     if (existing.has(file)) { await client.call('rewrite_page', { path: file, content, branch }); rewritten++; }
     else {
       try { await client.call('create_page', { path: file, content, branch }); created++; }

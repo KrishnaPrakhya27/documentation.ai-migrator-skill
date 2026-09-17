@@ -45,7 +45,7 @@ npm run dai-migrate -- convert     --workspace <path>     # twice
 npm run dai-migrate -- nav         --workspace <path>
 npm run dai-migrate -- verify      --workspace <path>     # human gate 3
 npm run dai-migrate -- write       --workspace <path> --push      # clone or git flow
-npm run dai-migrate -- publish     --workspace <path>             # MCP flow instead (needs DAI_API_KEY; no git)
+npm run dai-migrate -- publish     --workspace <path>             # MCP flow instead (browser sign-in; no git, no key)
 npm run dai-migrate -- verify      --workspace <path> --preview [--preview-url <url>]   # human gate 4
 npm run dai-migrate -- release     --workspace <path>              # immutable four-gate certificate
 npm run dai-migrate -- report      --workspace <path>
@@ -54,8 +54,9 @@ npm run dai-migrate -- report      --workspace <path>
 Three ways to deliver, chosen with the person at the start: the **clone flow** (`init --clone
 <their clone of the project's repository>`; no API key, the pushed branch gets its preview by
 itself, and the preview URL is read from the dashboard), the **git flow** (`init --remote <url>`)
-and the **MCP flow** (`publish`, which sends the output through Documentation.AI's Authoring MCP
-server with the project's API key; never send page content through your own tool calls).
+and the **MCP flow** (`publish`, which signs the person in through their browser and sends the
+output through Documentation.AI's Authoring MCP server; never send page content through your own
+tool calls).
 
 The preview check (`verify --preview`) fails a route only for something a reader would miss: a
 page that does not load, a source passage or heading that is nowhere on it, a link into nothing, a
