@@ -8,6 +8,7 @@ import { parse as parseYaml, stringify as toYaml } from 'yaml';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { slugify } from '../urls/slugger.js';
+import { drawableIconName, loadContract } from '@dai/content-contract';
 import type { LlmsEntry } from '../scrape/published-markdown.js';
 
 export interface TreePage {
@@ -25,6 +26,8 @@ export interface TreePage {
   tags?: string;
   badge?: string;
   method?: string;
+  /** The layout mode the source states for this page (Mintlify `mode`: wide, custom, frame, center). Presentation only. */
+  mode?: string;
   /** Sidebar anchor text as the source renders it. Cross-checked against `sidebarTitle`; never used in its place. */
   domSidebarTitle?: string;
   /**
@@ -74,12 +77,20 @@ export interface TreePage {
 
 /** Navigation placements are separate from page entities: one page may appear in several groups. */
 export type SourceNavigationNode =
-  | { type: 'page'; pageId: string; title?: string; icon?: string; tags?: string; badge?: string; method?: string }
+  | {
+      type: 'page'; pageId: string; title?: string; icon?: string; tags?: string; badge?: string; method?: string;
+      /** The layout mode the source states for the page (Mintlify `mode`). */
+      mode?: string;
+      /** The source publishes this entry and hides it from its sidebar. It keeps its place; whether it is shown is the operator's decision (`nav --place-unlisted`). */
+      hidden?: boolean;
+    }
   | {
       type: 'group'; kind?: NavigationContainerKind; label: string; children: SourceNavigationNode[];
       /** The page this container itself opens, when the source gives it one (a GitBook parent page, a Flare topic with subtopics). Written as the container's `path`, never as a duplicate first entry. */
       pageId?: string;
       icon?: string; href?: string; expandable?: boolean; description?: string;
+      /** A container the source states and hides (mintlify.com/docs hides a whole "Help center" tab): its label, kind and order are the source's own. */
+      hidden?: boolean;
     };
 
 export type NavigationContainerKind = 'product' | 'language' | 'version' | 'tab' | 'dropdown' | 'menu' | 'group';
@@ -118,6 +129,35 @@ export interface Tree {
   defaultLocale?: string;
 }
 
+/**
+ * The navigation a crawl read, as the tree states it: every URL becomes the page entity it names.
+ * One function for discovery and for verification's re-read, so both sides of `navigation-exact`
+ * carry an entry's presentation, its hidden mark and its container's own page the same way. A URL
+ * no discovered page answers to is reported through `unmapped`, never dropped in silence.
+ */
+export function sourceNavigationFromDiscovered(
+  nodes: readonly import('../scrape/discovery.js').DiscoveredNavigationNode[],
+  pageIdOf: (url: string) => string | undefined,
+  unmapped: string[] = [],
+): SourceNavigationNode[] {
+  const out: SourceNavigationNode[] = [];
+  for (const node of nodes) {
+    if (node.type === 'page') {
+      const pageId = pageIdOf(node.url);
+      if (!pageId) { unmapped.push(node.url); continue; }
+      const { type: _type, url: _url, ...stated } = node;
+      out.push({ type: 'page', pageId, ...Object.fromEntries(Object.entries(stated).filter((entry) => entry[1] !== undefined)) });
+      continue;
+    }
+    const children = sourceNavigationFromDiscovered(node.children, pageIdOf, unmapped);
+    const { pageUrl, ...container } = node;
+    const ownId = pageUrl ? pageIdOf(pageUrl) : undefined;
+    if (pageUrl && !ownId) unmapped.push(pageUrl);
+    if (children.length || node.href || ownId) out.push({ ...container, ...(ownId ? { pageId: ownId } : {}), children });
+  }
+  return out;
+}
+
 export function writeTree(workspace: string, tree: Tree): void {
   writeFileSync(join(workspace, 'plan', 'tree.yaml'), toYaml(tree), { mode: 0o600 });
 }
@@ -128,10 +168,12 @@ export function readTree(workspace: string): Tree {
 
 /** Nested groups → navigation for one version/locale slice. Uses `groups` at the root, `pages` inside. */
 /** Every page id the source navigation places, however deeply nested. */
-export function placedPageIds(nodes: SourceNavigationNode[] | undefined): Set<string> {
+export function placedPageIds(nodes: SourceNavigationNode[] | undefined, includeHidden = false): Set<string> {
   const ids = new Set<string>();
   const walk = (items: SourceNavigationNode[]): void => {
     for (const node of items) {
+      // an entry the source hides is published but placed nowhere a reader sees
+      if (node.hidden && !includeHidden) continue;
       if (node.type === 'page') ids.add(node.pageId);
       else { if (node.pageId) ids.add(node.pageId); walk(node.children); }
     }
@@ -147,7 +189,7 @@ export function placedPageIds(nodes: SourceNavigationNode[] | undefined): Set<st
  */
 export function pagesWithoutPlacement(tree: Tree): TreePage[] {
   if (!tree.navigation?.length) return [];
-  const placed = placedPageIds(tree.navigation);
+  const placed = placedPageIds(tree.navigation, !!tree.unlistedPlacement);
   return tree.pages.filter((page) => page.migrate && page.newPath && !placed.has(page.id));
 }
 
@@ -335,9 +377,12 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
     const convert = (nodes: SourceNavigationNode[]): Record<string, unknown>[] => {
       const out: Record<string, unknown>[] = [];
       for (const node of nodes) {
+      // An entry the source hides keeps the place the source gave it, and is written only once an
+      // operator has decided unlisted pages are shown (`nav --place-unlisted`).
+      if (node.hidden && !placeUnlisted) continue;
       if (node.type === 'page') {
         const page = eligible.get(node.pageId);
-        if (page) out.push({ ...pageMetadata(page), ...pageMetadata(node), ...pageLayout(page), title: node.title ?? page.sidebarTitle ?? page.title, path: page.newPath! });
+        if (page) out.push({ ...pageMetadata(page), ...pageMetadata(node), ...pageLayout(page, node), title: node.title ?? page.sidebarTitle ?? page.title, path: page.newPath! });
         continue;
       }
       // A container whose first page is its own landing page — titled as the container is, or
@@ -356,7 +401,7 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
       // first page entry instead of its `path`: the platform reads the operation from a page entry only.
       const ownBound = !!own && bound.has(own.id);
       const kids = ownBound ? [{ ...pageMetadata(own!), ...pageLayout(own!), title: node.label, path: own!.newPath! }, ...children] : children;
-      if (kids.length || node.href) out.push({ [kind]: node.label, ...navigationMetadata(node), ...(own && !ownBound ? { path: own.newPath!, ...pageLayout(own) } : {}), ...(kids.length ? collection(kids, kind) : {}) });
+      if (kids.length || node.href) out.push({ [kind]: node.label, ...containerPresentation(node, kind), ...(own && !ownBound ? { path: own.newPath!, ...pageLayout(own) } : {}), ...(kids.length ? collection(kids, kind) : {}) });
       }
       return out;
     };
@@ -399,16 +444,54 @@ function buildSlice(pages: TreePage[], sourceNavigation?: SourceNavigationNode[]
 }
 
 /**
- * Per-page layout the renderer reads from the page's navigation entry. Only a difference the
- * source actually showed is written: `show-sidebar` defaults to true, so a page that rendered a
- * sidebar carries nothing, and a page that rendered none carries false.
+ * What a Mintlify page `mode` shows and hides, in the platform's own per-entry switches. `wide`
+ * drops the table of contents for room; `custom` is a blank canvas under the top bar; `frame` is
+ * that canvas with the sidebar kept; `center` centres the content with neither rail.
  */
-function pageLayout(page: { sourceSidebar?: 'rendered' | 'absent' }): Record<string, boolean> {
-  return page.sourceSidebar === 'absent' ? { 'show-sidebar': false } : {};
+const MODE_LAYOUT: Record<string, Record<string, boolean | string>> = {
+  wide: { 'show-toc': false, 'content-width': 'wide' },
+  custom: { 'show-sidebar': false, 'show-toc': false, 'show-parent-label': false, 'show-page-navigation': false, 'ask-feedback': false, 'content-width': 'wide' },
+  frame: { 'show-toc': false, 'show-parent-label': false, 'show-page-navigation': false, 'ask-feedback': false, 'content-width': 'wide' },
+  center: { 'show-sidebar': false, 'show-toc': false },
+};
+
+/**
+ * Per-page layout the renderer reads from the page's navigation entry. Only a difference the
+ * source actually showed or stated is written: every switch defaults to shown, so a page that
+ * rendered a sidebar carries nothing, a page that rendered none carries false, and a page whose
+ * source states a layout mode carries that mode's switches.
+ */
+function pageLayout(page: { sourceSidebar?: 'rendered' | 'absent'; mode?: string }, node?: { mode?: string }): Record<string, boolean | string> {
+  const mode = node?.mode ?? page.mode;
+  return { ...(mode ? MODE_LAYOUT[mode.toLowerCase()] ?? {} : {}), ...(page.sourceSidebar === 'absent' ? { 'show-sidebar': false } : {}) };
 }
 
+/** The HTTP method a page entry may state, as the platform spells it; anything else is not written. */
+export function navigationMethod(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const method = value.trim().toUpperCase();
+  return loadContract().navigation.httpMethods.includes(method) ? method : undefined;
+}
+
+/**
+ * Presentation a page entry carries. An icon is written under the name the renderer draws it by
+ * (a source spells Font Awesome or a newer Lucide), and one it cannot draw is not written at all:
+ * the renderer would show nothing for it, silently.
+ */
 function pageMetadata(page: { icon?: string; tags?: string; badge?: string; method?: string }): Record<string, string> {
-  return Object.fromEntries(Object.entries({ icon: page.icon, tags: page.tags, badge: page.badge, method: page.method }).filter((entry): entry is [string, string] => entry[1] !== undefined));
+  return Object.fromEntries(Object.entries({ icon: drawableIconName(page.icon), tags: page.tags, badge: page.badge, method: navigationMethod(page.method) }).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1] !== ''));
+}
+
+/** Presentation a container carries, limited to what the platform accepts on that kind of container: a description exists only on a dropdown and a menu. */
+function containerPresentation(node: { icon?: string; href?: string; expandable?: boolean; description?: string }, kind: string): Record<string, string | boolean> {
+  const accepted = new Set(loadContract().navigation.containerProps[kind] ?? []);
+  const out: Record<string, string | boolean> = {};
+  const icon = drawableIconName(node.icon);
+  if (icon && accepted.has('icon')) out.icon = icon;
+  if (typeof node.href === 'string' && node.href && accepted.has('href')) out.href = node.href;
+  if (typeof node.description === 'string' && node.description && accepted.has('description')) out.description = node.description;
+  if (typeof node.expandable === 'boolean' && accepted.has('expandable')) out.expandable = node.expandable;
+  return out;
 }
 
 function collection(items: Record<string, unknown>[], parent: string): Record<string, unknown> {
@@ -442,6 +525,17 @@ export function buildNavigation(pages: TreePage[], defaults: { defaultVersion?: 
   };
   if (locales.length >= 2) {
     const ls = orderFirst(locales, defaults.defaultLocale);
+    // The platform nests a language inside a version, never the reverse: a language may hold tabs,
+    // dropdowns, menus, groups or pages. A site with both dimensions is written version first.
+    if (versions.length >= 2) {
+      const vs = orderFirst(versions, defaults.defaultVersion);
+      const versioned = vs.map((v) => {
+        const inVersion = inScope.filter((p) => p.version === v);
+        const languagesHere = ls.filter((l) => inVersion.some((p) => p.locale === l));
+        return { version: v, languages: languagesHere.map((l) => ({ language: l, ...buildSlice(inVersion.filter((p) => p.locale === l), defaults.sourceNavigation, defaults.placeUnlisted, [], defaults.bound) })) };
+      });
+      return { navigation: { versions: versioned } };
+    }
     // A translated section's sidebar may link an untranslated page (GitBook's French sidebar lists
     // the English integration quickstart), so every top-level container still held a page of the
     // default language and appeared in its slice: English showed all five tabs. A container belongs
@@ -548,7 +642,8 @@ export function landingChild(node: { label: string; children: SourceNavigationNo
 }
 
 /**
- * Writes each endpoint page's operation onto its own navigation entry, where the platform reads it.
+ * Writes each endpoint page's operation onto its own navigation entry, where the platform reads it,
+ * with the HTTP method the sidebar shows beside the title.
  * Only a page entry is bound: a container's `path` is not an endpoint the deployment step looks at.
  */
 function bindPageOperations(node: unknown, bindings: ReadonlyMap<string, string>): Record<string, unknown> {
@@ -560,7 +655,11 @@ function bindPageOperations(node: unknown, bindings: ReadonlyMap<string, string>
     const out: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(record)) out[key] = Array.isArray(child) ? visit(child) : child;
     const operation = !isContainer && typeof record.path === 'string' && typeof record.title === 'string' ? bindings.get(record.path) : undefined;
-    return operation ? { ...out, openapi: operation } : out;
+    if (!operation) return out;
+    // The sidebar draws an endpoint's method badge from `method` on the entry and from nothing
+    // else: it is not read out of `openapi`. The operation states it, so the entry does too.
+    const method = navigationMethod(/^\S+\s+(\w+)\s+\S/.exec(operation)?.[1]);
+    return { ...out, openapi: operation, ...(method ? { method } : {}) };
   };
   return visit(node) as Record<string, unknown>;
 }

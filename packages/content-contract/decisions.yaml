@@ -42,11 +42,15 @@ propOverrides:
     # Decision 2026-09-16: the renderer applies Image's className to its figure, and the site CSS holds
     # block, hidden, dark:block and dark:hidden. A light and a dark copy of one picture need them, or
     # both show in both themes (mintlify.com/docs: ~110 pages). Only these theme-visibility values.
+    # Decision 2026-09-17: the renderer draws an image's alt text as a visible caption when no caption
+    # is given, so every migrated image gained a caption its source never showed. `dai-mig-no-caption`
+    # marks an image the source shows without one and `dai-mig-decorative` one it draws as decoration;
+    # the migration's own stylesheet (styles/migration.css) acts on them, and nothing else does.
     className:
       type: string
       required: false
-      enum: ["block", "hidden", "dark:block", "dark:hidden", "block dark:hidden", "hidden dark:block"]
-      description: "Theme visibility of one copy of a light/dark image pair. Renderer-verified; the web editor may not preserve it.""
+      tokens: ["block", "hidden", "dark:block", "dark:hidden", "dai-mig-no-caption", "dai-mig-decorative"]
+      description: "Space-separated: the theme visibility of one copy of a light/dark image pair, and the migration's own presentation hooks. Renderer-verified; the web editor may not preserve it."
 
 # Value maps applied by the converter when a source value is not in the canonical enum.
 valueMaps:

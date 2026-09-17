@@ -54,17 +54,37 @@ describe('navigation follows renderer container rules', () => {
     expect(check({ dropdowns: [{ dropdown: 'Docs', dropdowns: [{ dropdown: 'Nested', pages: [page] }] }] })).toEqual([]);
   });
 
-  it('accepts languages containing versions, tabs and menus', () => {
-    expect(check({ languages: [{ language: 'ar', versions: [{ version: 'v1', tabs: [{ tab: 'Docs', menus: [{ menu: 'Guide', pages: [page] }] }] }] }] })).toEqual([]);
+  // The grammar is read from the platform's published schema (products > versions > languages >
+  // tabs > dropdowns > menus > groups > pages): a version holds languages, never the reverse.
+  it('accepts versions containing languages, tabs and menus', () => {
+    expect(check({ versions: [{ version: 'v1', languages: [{ language: 'ar', tabs: [{ tab: 'Docs', menus: [{ menu: 'Guide', pages: [page] }] }] }] }] })).toEqual([]);
+    expect(check({ products: [{ product: 'Product', languages: [{ language: 'ar', pages: [page] }] }] })).toEqual([]);
+  });
+
+  it('accepts a menu that is only an external link, as the schema does', () => {
+    expect(check({ tabs: [{ tab: 'Learn', menus: [{ menu: 'Lessons', href: 'https://learn.example/' }, { menu: 'Guides', pages: [page] }] }] })).toEqual([]);
   });
 
   it.each([
-    { products: [{ product: 'Product', languages: [{ language: 'ar', pages: [page] }] }] },
-    { versions: [{ version: 'v1', languages: [{ language: 'ar', pages: [page] }] }] },
+    { languages: [{ language: 'ar', versions: [{ version: 'v1', pages: [page] }] }] },
     { groups: [{ group: 'Docs', tabs: [{ tab: 'Nested', pages: [page] }] }] },
     { tabs: [{ tab: 'Docs', versions: [{ version: 'v1', pages: [page] }] }] },
+    { tabs: [{ tab: 'Docs', menus: [{ menu: 'Guide', dropdowns: [{ dropdown: 'Nested', pages: [page] }] }] }] },
   ])('rejects invalid nesting %#', (navigation) => {
     expect(check(navigation).some((issue) => issue.message.includes('cannot contain'))).toBe(true);
+  });
+
+  it('refuses what the renderer would ignore in silence: an icon it cannot draw, a method it does not know, a property of another kind', () => {
+    expect(check({ pages: [{ ...page, icon: 'book-open', method: 'POST', 'content-width': 'wide', 'show-toc': false }] })).toEqual([]);
+    expect(check({ pages: [{ ...page, icon: 'file-braces' }] })[0].message).toMatch(/icon "file-braces" is not a name the renderer/);
+    expect(check({ pages: [{ ...page, method: 'FETCH' }] })[0].message).toMatch(/method "FETCH"/);
+    expect(check({ tabs: [{ tab: 'Docs', description: 'Only a dropdown or a menu has one', pages: [page] }] })[0].message).toMatch(/"description" is not a tab property/);
+    expect(check({ pages: [{ ...page, href: 'https://x.example/' }] })[0].message).toMatch(/both "path" and "href"/);
+  });
+
+  it('lets a container that opens its own page state that page\'s display options', () => {
+    expect(check({ groups: [{ group: 'Guide', path: 'guide', 'show-sidebar': false, pages: [] }] }).filter((issue) => /show-sidebar/.test(issue.message))).toEqual([]);
+    expect(check({ groups: [{ group: 'Guide', 'show-sidebar': false, pages: [page] }] })[0].message).toMatch(/"show-sidebar" is not a group property/);
   });
 });
 

@@ -73,6 +73,17 @@ export function themeClassOf(value: unknown): { themeClass?: string } {
   return ordered.length ? { themeClass: ordered.join(' ') } : {};
 }
 
+/**
+ * Whether the source draws an image as decoration: it takes no pointer events (a hero background),
+ * it is hidden from assistive technology, or it says so by role — or, read back from this tool's
+ * own output, it carries the hook that said so.
+ */
+export function decorativeOf(attrs: { class?: unknown; className?: unknown; 'aria-hidden'?: unknown; ariaHidden?: unknown; role?: unknown }): { decorative?: true } {
+  const classes = String(attrs.className ?? attrs.class ?? '').split(/\s+/);
+  const hiddenFromReaders = String(attrs['aria-hidden'] ?? attrs.ariaHidden ?? '') === 'true' || /^(?:presentation|none)$/.test(String(attrs.role ?? ''));
+  return classes.includes('pointer-events-none') || classes.includes('dai-mig-decorative') || hiddenFromReaders ? { decorative: true } : {};
+}
+
 /** Documentation.AI writes images as <Image />, source MDX as <img />; both are images, never components. */
 function isImageElement(node: { name?: string | null }): boolean {
   return node.name === 'Image' || String(node.name).toLowerCase() === 'img';
@@ -665,7 +676,8 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
   };
   const srcOf = (node: any) => ({ file: opts.file, line: node.position?.start?.line, col: node.position?.start?.column });
 
-  const imageFromMarkdown = (node: any, path: number[]): ImageNode => ({ id: idOf(node, path), src: srcOf(node), type: 'image', url: node.url ?? '', alt: node.alt ?? '', title: node.title ?? undefined });
+  // A Markdown image has no caption syntax: what the source shows under it is nothing.
+  const imageFromMarkdown = (node: any, path: number[]): ImageNode => ({ id: idOf(node, path), src: srcOf(node), type: 'image', url: node.url ?? '', alt: node.alt ?? '', title: node.title ?? undefined, ...(opts.platform !== 'dai' ? { captionless: true } : {}) });
 
   const imageFromMdx = (node: any, path: number[]): ImageNode => {
     const attrs: Record<string, string | number | boolean | null> = {};
@@ -684,6 +696,8 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
       url: typeof attrs.src === 'string' ? attrs.src : '', alt: typeof attrs.alt === 'string' ? attrs.alt : '',
       title: typeof attrs.title === 'string' ? attrs.title : undefined,
       ...themeClassOf(attrs.className ?? attrs.class),
+      ...decorativeOf(attrs as Record<string, unknown>),
+      ...(opts.platform !== 'dai' || String(attrs.className ?? attrs.class ?? '').split(/\s+/).includes('dai-mig-no-caption') ? { captionless: true } : {}),
       width: width.value, height: height.value,
       ...(width.unreadable !== undefined ? { unreadableWidth: width.unreadable } : {}),
       ...(height.unreadable !== undefined ? { unreadableHeight: height.unreadable } : {}),
@@ -859,6 +873,12 @@ export function markdownToIr(source: string, opts: MarkdownAdapterOptions): DocI
           styleDeps.push(`expression:${attr.name}`);
         } else props[attr.name] = literal;
       }
+    }
+    // A grid wrapper is a layout the platform can express, unlike every other utility class on a div:
+    // the marker lets a mapping rule tell the two apart without reading class names itself.
+    if (opts.platform !== 'dai' && String(node.name).toLowerCase() === 'div') {
+      const classes = String(props.className ?? props.class ?? '').split(/\s+/);
+      if (classes.includes('grid') && classes.some((token) => /(?:^|:)grid-cols-([2-9]|1[0-2])$/.test(token))) styleDeps.push('layout:grid');
     }
     return {
       id: idOf(node, path), src: srcOf(node), type: 'component',

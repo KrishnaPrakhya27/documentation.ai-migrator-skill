@@ -32,7 +32,10 @@ describe('an endpoint page bound where the platform reads it', () => {
     const { navigation } = buildDocumentationNavigation(tree, new Set(['docs/api/introduction', 'docs/api/update/status']), { pageOpenapi: { status: operation } });
     const byPath = new Map(entries(navigation).map((entry) => [entry.path, entry]));
     expect(byPath.get('docs/api/update/status')?.openapi).toBe(operation);
+    // the sidebar draws the method badge from `method` alone; it is never read out of `openapi`
+    expect(byPath.get('docs/api/update/status')?.method).toBe('GET');
     expect(byPath.get('docs/api/introduction')?.openapi).toBeUndefined();
+    expect(byPath.get('docs/api/introduction')?.method).toBeUndefined();
   });
 
   it('binds nothing for a page that was not written', () => {

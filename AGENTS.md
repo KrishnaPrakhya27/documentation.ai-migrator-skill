@@ -34,21 +34,35 @@ The full ordered command sequence is in `skills/migrate/SKILL.md` under "Run seq
 In short:
 
 ```
-npm run dai-migrate -- init --workspace <path> --source <url|path> --target <customer-org|demo-org> --remote <git url> --fidelity exact --allowed-orgs <owner>
+npm run dai-migrate -- init --workspace <path> --source <url|path> (--clone <folder> | --remote <git url>) --template <classic|atlas>
 npm run dai-migrate -- fingerprint --workspace <path>
 npm run dai-migrate -- discover    --workspace <path>     # human gate 1
 npm run dai-migrate -- acquire     --workspace <path>
 npm run dai-migrate -- inventory   --workspace <path>
-npm run dai-migrate -- plan        --workspace <path>     # human gate 2
-npm run dai-migrate -- assets      --workspace <path> --provider <none|local|s3|dai-api>
-npm run dai-migrate -- convert     --workspace <path>
+npm run dai-migrate -- plan        --workspace <path>     # human gate 2 (includes plan/site.yaml, the site's look)
+npm run dai-migrate -- assets      --workspace <path> [--provider <none|local|s3|dai-api>]
+npm run dai-migrate -- convert     --workspace <path>     # twice
 npm run dai-migrate -- nav         --workspace <path>
 npm run dai-migrate -- verify      --workspace <path>     # human gate 3
-npm run dai-migrate -- write       --workspace <path> --push
-npm run dai-migrate -- verify      --workspace <path> --preview   # human gate 4
+npm run dai-migrate -- write       --workspace <path> --push      # clone or git flow
+npm run dai-migrate -- publish     --workspace <path>             # MCP flow instead (needs DAI_API_KEY; no git)
+npm run dai-migrate -- verify      --workspace <path> --preview [--preview-url <url>]   # human gate 4
 npm run dai-migrate -- release     --workspace <path>              # immutable four-gate certificate
 npm run dai-migrate -- report      --workspace <path>
 ```
+
+Three ways to deliver, chosen with the person at the start: the **clone flow** (`init --clone
+<their clone of the project's repository>`; no API key, the pushed branch gets its preview by
+itself, and the preview URL is read from the dashboard), the **git flow** (`init --remote <url>`)
+and the **MCP flow** (`publish`, which sends the output through Documentation.AI's Authoring MCP
+server with the project's API key; never send page content through your own tool calls).
+
+The preview check (`verify --preview`) fails a route only for something a reader would miss: a
+page that does not load, a source passage or heading that is nowhere on it, a link into nothing, a
+missing sidebar entry. How the platform draws a page is a note, never a failure; do not chase
+notes. A person who has looked at a failing route and is satisfied records that with
+`accept --route <route> --reason "<why>" --by "<who>"`. You never approve a gate or accept a
+finding yourself.
 
 `--fidelity exact` is the default and the only mode for a customer migration.
 `--fidelity permissive` is for test runs the user explicitly asks for: it reports the

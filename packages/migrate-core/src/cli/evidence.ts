@@ -9,12 +9,12 @@
  * They report a missing input by throwing; the command turns that into the operator's error, which
  * keeps the workspace conventions and the message in one place.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { frozenRootPath, sourceManifestPath, type SourceManifest } from '../evidence/manifest.js';
 import { nativeNavigationWitness } from '../evidence/native-navigation.js';
 import { attachHelpCenterHub } from '../nav/help-center.js';
-import { buildDocumentationNavigation, type SourceNavigationNode, type Tree } from '../nav/tree.js';
+import { buildDocumentationNavigation, sourceNavigationFromDiscovered, type SourceNavigationNode, type Tree } from '../nav/tree.js';
 import { getProfile } from '../scrape/profiles.js';
 import { CanonicalHosts } from '../scrape/fetcher.js';
 import { navigationFromFrozenPages, type DiscoveredNavigationNode, type DiscoveryResult } from '../scrape/discovery.js';
@@ -73,6 +73,60 @@ export function writtenPagePaths(workspace: string, tree: Tree): Set<string> {
 }
 
 /**
+ * The routes the written documentation.json names, anywhere in its navigation. The platform serves
+ * a page only when a navigation entry names it, so a page written as a file and named by none (a
+ * page the source publishes outside its sidebar, left unlisted at `nav`) answers with the
+ * platform's not-found page however well it was migrated.
+ */
+export function servedRoutes(workspace: string): Set<string> | undefined {
+  const file = join(workspace, 'output', 'documentation.json');
+  if (!existsSync(file)) return undefined;
+  const served = new Set<string>();
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (!node || typeof node !== 'object') return;
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'path' && typeof value === 'string') served.add(value.replace(/^\/+|\/+$/g, ''));
+      else walk(value);
+    }
+  };
+  try {
+    const config = JSON.parse(readFileSync(file, 'utf8')) as { navigation?: unknown; initialRoute?: unknown };
+    walk(config.navigation);
+    if (typeof config.initialRoute === 'string') served.add(config.initialRoute.replace(/^\/+|\/+$/g, ''));
+  } catch { return undefined; }
+  return served;
+}
+
+const routeOfLink = (link: string): string => link.split(/[?#]/)[0].replace(/^\/+|\/+$/g, '');
+
+/** Old addresses the written documentation.json redirects, as routes: a link to one lands on a page. */
+export function redirectSourceRoutes(workspace: string): Set<string> {
+  const file = join(workspace, 'output', 'documentation.json');
+  if (!existsSync(file)) return new Set();
+  try {
+    const redirects = (JSON.parse(readFileSync(file, 'utf8')) as { redirects?: Array<{ source?: unknown }> }).redirects ?? [];
+    return new Set(redirects.flatMap((rule) => (typeof rule.source === 'string' ? [routeOfLink(rule.source)] : [])));
+  } catch { return new Set(); }
+}
+
+/** Links the source site itself had broken (the local internal-links gate lists them), as routes. */
+export function inheritedBrokenLinkRoutes(workspace: string): Set<string> {
+  const file = join(workspace, 'report', 'inherited-broken-page-links.json');
+  if (!existsSync(file)) return new Set();
+  try {
+    return new Set((JSON.parse(readFileSync(file, 'utf8')) as Array<{ link?: unknown }>).flatMap((entry) => (typeof entry.link === 'string' ? [routeOfLink(entry.link)] : [])));
+  } catch { return new Set(); }
+}
+
+/** Pages written as files that no navigation entry names: not served by the platform (see `servedRoutes`). */
+export function unservedRoutes(workspace: string, tree: Tree): Set<string> {
+  const served = servedRoutes(workspace);
+  if (!served) return new Set();
+  return new Set([...writtenPagePaths(workspace, tree)].filter((route) => !served.has(route)));
+}
+
+/**
  * The sidebar the source states, flattened in reading order. A page placed in two groups
  * appears twice, which is what the rendered sidebar must show.
  */
@@ -81,6 +135,8 @@ export function expectedSidebar(tree: Tree): ExpectedNavigationEntry[] {
   const out: ExpectedNavigationEntry[] = [];
   const walk = (nodes: SourceNavigationNode[], groupPath: string[]): void => {
     for (const node of nodes) {
+      // an entry the source hides is in the sidebar only once an operator has placed unlisted pages
+      if (node.hidden && !tree.unlistedPlacement) continue;
       if (node.type === 'group') { walk(node.children, [...groupPath, node.label]); continue; }
       const page = byId.get(node.pageId);
       if (page?.migrate && page.newPath) out.push({ groupPath, label: node.title ?? page.sidebarTitle ?? page.title });
@@ -114,13 +170,7 @@ export function buildSourceEvidence(workspace: string, tree: Tree): SourceEviden
       const nodes = derived.nodes;
       navigationSource = derived.source;
       const byUrl = new Map(tree.pages.map((page) => [page.source.replace(/\/$/, ''), page.id]));
-      const toSource = (items: DiscoveredNavigationNode[]): SourceNavigationNode[] => items.flatMap((node): SourceNavigationNode[] => {
-        if (node.type === 'page') { const id = byUrl.get(node.url.replace(/\/$/, '')); return id ? [{ type: 'page', pageId: id, title: node.title }] : []; }
-        const children = toSource(node.children);
-        const { pageUrl, ...container } = node;
-        const ownId = pageUrl ? byUrl.get(pageUrl.replace(/\/$/, '')) : undefined;
-        return children.length || node.href || ownId ? [{ ...container, ...(ownId ? { pageId: ownId } : {}), children }] : [];
-      });
+      const toSource = (items: DiscoveredNavigationNode[]): SourceNavigationNode[] => sourceNavigationFromDiscovered(items, (navUrl) => byUrl.get(navUrl.replace(/\/$/, '')));
       navigation = buildDocumentationNavigation({ ...tree, navigation: toSource(nodes) }, writtenPagePaths(workspace, tree), readPlatformMeta(workspace)).navigation;
     }
   } else if (!seed) {

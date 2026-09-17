@@ -1,322 +1,326 @@
-# documentation.ai-migration-skills
+# Documentation.AI migrator
 
-Agent skills plus a deterministic TypeScript core (`dai-migrate`) for moving a documentation site onto Documentation.AI **exactly**: the migrated content and structure are the source's own, proven against a sealed copy of the source, with a customer-facing report of what arrived, what did not, and why.
+Move a documentation site onto [Documentation.AI](https://documentation.ai) **exactly**: the text, titles, sidebar, order, links, images and code of the migrated site are your source's own, proven against a sealed copy of the source, and you see a preview before anything goes live.
 
-It runs as a Claude Code (or Codex) plugin: the skills in `skills/` tell the agent what to do, and the agent drives the CLI. The CLI does all conversion; the agent never converts anything itself.
+It is a set of agent skills plus a deterministic command line, `dai-migrate`. Your AI assistant (Claude Code, Codex, Claude Desktop, Cursor…) reads the skills and drives the command line; the command line does all of the converting. The assistant never rewrites your content itself.
 
-- **One rule:** migrated text, titles, descriptions, sidebar labels, groups, order, links, images, code and component semantics must be the source's. Styling may differ. Content may not. When a stage cannot prove something it stops and names what to fix.
-- **Four human gates** and nothing else: scope and structure, conversion plan, pre-push review, preview and release.
-- **A failing check is a finding, never a lock on the preview.** Once scope and plan are approved, the migration branch is pushed with every finding recorded; findings block `release`, not the preview.
-- **Run data never lives in this repository.** Every command takes `--workspace <dir>` outside the plugin.
+What you get:
+
+- **Your content, unchanged.** Every page is checked against the source in both directions. When something cannot be carried exactly, the run stops and says what to fix. It never guesses.
+- **Your site's look.** Your brand colour, logo, favicon, top-bar links and old-address redirects are carried into the new site's settings, and you pick the template (`classic` or `atlas`). All of it is proposed in one file you can edit.
+- **A preview first.** The migration lands on its own branch (or working version). Your live site is untouched until you merge it.
+- **Four decisions, made by a person.** Scope, conversion plan, pre-publish review, release. Nothing else asks for your attention.
+- **A plain report** of what arrived, what did not, and why, written for someone who was not in the room.
 
 ---
 
 ## Contents
 
-1. [Requirements](#requirements)
-2. [Install](#install)
-3. [Quick start](#quick-start)
-4. [How a migration runs](#how-a-migration-runs)
-5. [Supported sources](#supported-sources)
-6. [The workspace](#the-workspace)
-7. [Reports](#reports)
-8. [Fixing the migrator mid-run](#fixing-the-migrator-mid-run)
-9. [Several migrations at once](#several-migrations-at-once)
-10. [Environment variables](#environment-variables)
-11. [Rules you never break](#rules-you-never-break)
-12. [Developing](#developing)
-13. [Troubleshooting](#troubleshooting)
-14. [Repository map](#repository-map)
+1. [Choose how to deliver](#choose-how-to-deliver)
+2. [What you need](#what-you-need)
+3. [Install](#install)
+4. [Quick start](#quick-start)
+5. [Use it from any assistant](#use-it-from-any-assistant)
+6. [The four decisions](#the-four-decisions)
+7. [The look of your site](#the-look-of-your-site)
+8. [The preview check](#the-preview-check)
+9. [Stages](#stages)
+10. [Supported sources](#supported-sources)
+11. [The workspace and the reports](#the-workspace-and-the-reports)
+12. [Environment variables](#environment-variables)
+13. [Rules that are never broken](#rules-that-are-never-broken)
+14. [Troubleshooting](#troubleshooting)
+15. [Developing](#developing)
 
 ---
 
-## Requirements
+## Choose how to deliver
+
+The migration is the same in every case. What differs is how the result reaches your Documentation.AI project.
+
+| Flow | Choose it when | You need | Delivered by |
+| --- | --- | --- | --- |
+| **Clone flow** | you have cloned the repository Documentation.AI created for your project | git access to that repository. **No API key.** | `init --clone <folder>` … `write --push` |
+| **Git flow** | you have the repository's URL but no clone, or your team migrates for several customers | git access; an API key is optional and finds the preview URL for you | `init --remote <git url>` … `write --push` |
+| **MCP flow** | you do not want to touch git at all | your project's API key | `publish` (sends everything through Documentation.AI's [Authoring MCP server](https://documentation.ai/docs/ai/authoring-mcp-server)) |
+
+In the clone and git flows the push starts a preview build on Documentation.AI by itself. In the MCP flow `publish` asks for the preview. Either way the live site changes only when you merge.
+
+---
+
+## What you need
 
 | Need | Why |
 | --- | --- |
-| Node.js 22 or newer, npm | the CLI and its tests |
-| git, and push access to the customer's docs repository | `write --push` publishes a migration branch |
-| `gh auth login` (or SSH keys) | the private plugin repository and GitHub remotes |
-| Google Chrome or Chromium (optional) | `verify --preview` renders the deployed preview; `report` prints the PDF. Without it the HTML and JSON are still written |
-| Documentation.AI API key and base URL (optional) | `init` settles the platform questions up front: the connected repository, previews, the media API, the asset provider |
+| Node.js 22 or newer | the command line |
+| git, for the clone and git flows | the migration branch is pushed with your own git credentials |
+| A Documentation.AI project | the target. Its API key is needed only for the MCP flow |
+| Permission to read the source | **written permission from the site's owner before crawling a live site**, or use an export or the docs repository instead |
+| Chrome or Chromium (optional) | measures phone and tablet layout on the preview, and prints the PDF report. Everything else works without it |
+| Image hosting (optional) | the Documentation.AI media API or an S3/R2 bucket. Without either, pictures stay at the addresses that serve them today, and the report says so |
 
 ---
 
 ## Install
 
-The plugin is hosted in a private GitHub repository: `KrishnaPrakhya27/documentation.ai-migrator-skill`. You need read access to it on GitHub and git credentials on your machine (`gh auth login` is enough).
-
-### As a Claude Code plugin
-
-Inside Claude Code:
-
-```
-/plugin marketplace add KrishnaPrakhya27/documentation.ai-migrator-skill
-/plugin install documentation-ai-migration@documentation-ai-migration
-```
-
-The marketplace and the plugin are both named `documentation-ai-migration` (see `.claude-plugin/marketplace.json`); `/plugin` lists the exact names if they ever change. The same commands exist on the command line as `claude plugin marketplace add …` and `claude plugin install …`. To pick up a new version later:
-
-```
-/plugin marketplace update documentation-ai-migration
-```
-
-The CLI needs its dependencies installed once inside the plugin's checkout. Find where Claude Code cloned the marketplace (`/plugin` shows it; by default under `~/.claude/plugins/`) and run `npm install` there. If that is awkward, use a local clone instead (next section), which is what every migration so far has done.
-
-### From a local clone
-
 ```bash
 git clone https://github.com/KrishnaPrakhya27/documentation.ai-migrator-skill.git ~/documentation.ai-migration-skills
 cd ~/documentation.ai-migration-skills
 npm install
-npm run typecheck && npm test        # 80 files, ~790 tests, no network
 ```
 
-Then either register the clone as a marketplace (`/plugin marketplace add ~/documentation.ai-migration-skills` followed by the same `/plugin install`), or start Claude Code with the plugin loaded from disk:
+**Claude Code**, as a plugin:
 
-```bash
-claude --plugin-dir ~/documentation.ai-migration-skills
+```
+/plugin marketplace add ~/documentation.ai-migration-skills
+/plugin install documentation-ai-migration@documentation-ai-migration
 ```
 
-The skills reference the CLI as `npx dai-migrate <command>` (or `npm run dai-migrate -- <command>`), run from the plugin root. It is not installed globally.
+You can add the marketplace straight from GitHub instead (`/plugin marketplace add KrishnaPrakhya27/documentation.ai-migrator-skill`); then run `npm install` once inside the folder Claude Code cloned it to. Or start Claude Code with the plugin loaded from disk: `claude --plugin-dir ~/documentation.ai-migration-skills`.
 
-### Team settings (optional)
+**Any other assistant**: see [Use it from any assistant](#use-it-from-any-assistant).
 
-To have the marketplace and plugin enabled for everyone opening a given project, add to that project's `.claude/settings.json`:
-
-```json
-{
-  "extraKnownMarketplaces": {
-    "documentation-ai-migration": {
-      "source": { "source": "github", "repo": "KrishnaPrakhya27/documentation.ai-migrator-skill" }
-    }
-  },
-  "enabledPlugins": { "documentation-ai-migration@documentation-ai-migration": true }
-}
-```
+The command line is run from this folder as `npx dai-migrate <command>`. It is not installed globally. `npx dai-migrate --help` lists every command and flag.
 
 ---
 
 ## Quick start
 
-Ask the agent to migrate a site and it follows `skills/migrate/SKILL.md`. Run by hand, a migration is this sequence, from the plugin root, with a workspace **outside** the plugin:
+Tell your assistant: *"Migrate https://docs.acme.com onto Documentation.AI. My project's repository is cloned at ~/acme-docs."* It follows `skills/migrate/SKILL.md` and stops at the four decisions.
+
+By hand, the clone flow is this sequence. The workspace holds everything the run produces and lives **outside** this folder.
 
 ```bash
-W=~/migrations/acme-docs          # never inside this repository
+W=~/migrations/acme-docs
 
-npx dai-migrate init      --workspace $W --source https://docs.acme.com --target customer-org \
-                          --remote git@github.com:acme/docs.git --fidelity exact --allowed-orgs acme \
-                          --customer-authorised
-npx dai-migrate fingerprint --workspace $W            # which platform is this?
-npx dai-migrate discover  --workspace $W              # → plan/tree.yaml           [human gate 1]
-npx dai-migrate approve   --workspace $W --gate 1 --by "Your Name <you@company>"
-npx dai-migrate acquire   --workspace $W              # freeze every page (live sources only)
+npx dai-migrate init      --workspace $W --source https://docs.acme.com --clone ~/acme-docs \
+                          --template classic --customer-authorised
+npx dai-migrate fingerprint --workspace $W            # which platform is the source?
+npx dai-migrate discover  --workspace $W              # → plan/tree.yaml                  [decision 1]
+npx dai-migrate approve   --workspace $W --gate 1 --by "Your Name"
+npx dai-migrate acquire   --workspace $W              # seal a copy of every page (live sites)
 npx dai-migrate inventory --workspace $W
-npx dai-migrate plan      --workspace $W              # → plan/*.yaml              [human gate 2]
-npx dai-migrate approve   --workspace $W --gate 2 --by "Your Name <you@company>"
-npx dai-migrate assets    --workspace $W --provider dai-api
+npx dai-migrate plan      --workspace $W              # → plan/*.yaml, plan/site.yaml     [decision 2]
+npx dai-migrate approve   --workspace $W --gate 2 --by "Your Name"
+npx dai-migrate assets    --workspace $W              # host the pictures
 npx dai-migrate convert   --workspace $W
-npx dai-migrate convert   --workspace $W              # twice: proves determinism
-npx dai-migrate nav       --workspace $W
-npx dai-migrate verify    --workspace $W              # local gates                [human gate 3]
-npx dai-migrate write     --workspace $W --push       # migration branch + preview URL
-npx dai-migrate verify    --workspace $W --preview    # gates on the deployed preview [human gate 4]
-npx dai-migrate approve   --workspace $W --gate 3 --by "…"   # and --gate 4 after the preview review
+npx dai-migrate convert   --workspace $W              # twice: proves the result is repeatable
+npx dai-migrate nav       --workspace $W              # → output/documentation.json
+npx dai-migrate verify    --workspace $W              # checks on your machine             [decision 3]
+npx dai-migrate approve   --workspace $W --gate 3 --by "Your Name"
+npx dai-migrate write     --workspace $W --push       # migration branch → preview build
+npx dai-migrate verify    --workspace $W --preview-url https://…   # checks on the preview   [decision 4]
+npx dai-migrate approve   --workspace $W --gate 4 --by "Your Name"
 npx dai-migrate release   --workspace $W              # → report/release-certificate.json
-npx dai-migrate report    --workspace $W              # team files + customer report (HTML, PDF, JSON)
+npx dai-migrate report    --workspace $W              # the report, as HTML, PDF and JSON
 ```
 
-`npx dai-migrate --help` prints every command and flag.
+**Where the preview URL comes from.** With no API key, open your project's dashboard → Deployments → Preview, copy the URL of the migration branch once it is ready, and pass it as `--preview-url`. It is remembered, so later runs only need `verify --preview`. With `DAI_API_KEY` and `DAI_API_BASE` set, `write --push` waits for the preview and records the URL itself.
 
-Two things to have before you start:
+**The other two flows** change two lines:
 
-- **Written permission from the customer to crawl their site** (`--customer-authorised` records it), or a native export or repository instead of a crawl. Never crawl without it.
-- **The git remote of the repository connected to the target Documentation.AI project.** `init` proves push access with a dry run that changes nothing, and refuses to reuse a remote from some other migration.
+```bash
+# git flow: name the repository instead of a clone (the migrator clones it into the workspace)
+npx dai-migrate init --workspace $W --source https://docs.acme.com --remote git@github.com:acme/docs.git --customer-authorised
+
+# MCP flow: no git. init needs no --clone or --remote, and publish replaces write --push
+export DAI_API_KEY=…                                   # your project's key, from the dashboard
+npx dai-migrate init    --workspace $W --source https://docs.acme.com --customer-authorised
+#   … the same stages …
+npx dai-migrate publish --workspace $W                 # working version migration/<id> → published → preview
+```
+
+`publish` sends every file first, then the settings and navigation, then publishes the working version once and asks for its preview. If it stops half-way, run it again and it continues. Pages your project had before are taken out of the navigation (so they are no longer served) and left in place; `--remove-old-pages` deletes them. Go live by merging the working version in the dashboard.
+
+**No image hosting?** With no API key and no bucket, run `assets --provider none --keep-external --by "Your Name"`. Pictures stay at the addresses that serve them today and keep working while those stay online. The report reminds you to upload them before the old site is switched off.
 
 ---
 
-## How a migration runs
+## Use it from any assistant
 
-### Stages
+The skills are plain Markdown and the engine is a command line, so anything that can read instructions and run a command can drive a migration.
+
+| Assistant | How |
+| --- | --- |
+| **Claude Code** | install the plugin (above). Ask it to migrate a site |
+| **Codex** (ChatGPT's coding agent, CLI or IDE), Gemini CLI, and other terminal agents | open this folder. They read `AGENTS.md`, which points at `skills/migrate/SKILL.md`. Ask them to migrate a site |
+| **Claude Desktop, Cursor, VS Code, Windsurf** and any other MCP host | add the local MCP server below. It gives the host four tools: `migration_guide`, `migration_status`, `migration_run`, `migration_read` |
+| **claude.ai, ChatGPT chat** | these run in the cloud and cannot reach your files or your git credentials. Use one of the rows above for the migration; use the chat for reviewing the report |
+
+The MCP server is this same command line, served over stdio:
+
+```json
+{
+  "mcpServers": {
+    "dai-migrate": {
+      "command": "node",
+      "args": ["/absolute/path/to/documentation.ai-migration-skills/packages/migrate-core/bin/dai-migrate.mjs", "mcp"]
+    }
+  }
+}
+```
+
+That block goes in `claude_desktop_config.json` for Claude Desktop, `.cursor/mcp.json` for Cursor, or `.vscode/mcp.json` for VS Code (there the top-level key is `servers`). For Codex add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.dai-migrate]
+command = "node"
+args = ["/absolute/path/to/documentation.ai-migration-skills/packages/migrate-core/bin/dai-migrate.mjs", "mcp"]
+```
+
+Put `DAI_API_KEY` in the server's `env` only if you use the MCP flow. Whichever assistant drives it, the rules live in the command line: it refuses a workspace inside this folder, refuses to push unapproved scope, and records every approval with a person's name.
+
+---
+
+## The four decisions
+
+| Decision | After | You confirm |
+| --- | --- | --- |
+| 1 · scope and structure | `discover` | `plan/tree.yaml` is your site: every page, its title, its place in the sidebar. To leave pages out, record them in `plan/scope-decisions.yaml` with a reason and your name |
+| 2 · conversion plan | `plan` | the address plan, how each kind of component is converted, the pictures, and `plan/site.yaml` (the look) |
+| 3 · pre-publish review | `verify` | the converted site and what the checks found. **A finding never holds back the preview.** It is recorded, shown to you, and must be cleared before release |
+| 4 · preview and release | `verify --preview` | the rendered preview. `release` then writes the certificate |
+
+`approve --gate <n> --by "<who>"` records each decision against the exact files you looked at. If they change, the approval lapses and the run says so. An assistant never approves for you.
+
+---
+
+## The look of your site
+
+`plan` writes `plan/site.yaml` from what your source says about itself. Edit it freely: none of it is content.
+
+```yaml
+branding:
+  carry: true                    # false leaves colours, logo and favicon out (the platform's defaults apply)
+  colors: { light: "#166e3f", dark: "#26bd6c" }
+  logo:    { light: https://…/logo-light.svg, dark: https://…/logo-dark.svg }
+  favicon: { light: https://…/favicon.ico }
+navbar:
+  primary: { title: Get started, link: https://acme.com/start }
+  links:   [{ title: Talk to us, link: https://acme.com/contact }]
+template: classic                # or atlas; also settable up front with init --template
+stylesheet: true                 # ships styles/migration.css: small finishing rules, all scoped to the migration's own markup
+redirects: true                  # old addresses redirect to the pages that replace them
+```
+
+`nav` writes these into `documentation.json` under the platform's own settings and checks the result against the platform's published schema. Logos and favicons are hosted with the rest of your pictures. Sidebar icons, API method badges (GET, POST…), "new"/"beta" badges, page layout modes and link-only tabs are carried from the source too. What the platform has no setting for (a footer, custom fonts, a banner) is listed under `notCarried` so you know.
+
+---
+
+## The preview check
+
+`verify --preview` reads every page of the preview over HTTP. A thousand pages take a few minutes, and no browser is needed.
+
+It **fails** a page only for something a reader would miss:
+
+- the page does not load,
+- a passage or a heading of the source is nowhere on it,
+- a link on it leads nowhere,
+- a sidebar entry is missing.
+
+Everything else is **a note, never a failure**: the language label the platform draws on a code block, a "required" pill, a caption, request samples laid out beside the text, a wide table that scrolls sideways on a phone. Your written pages were already proven exact before the push; how the platform draws them is not something a migration can change, so it is listed for you to look at and nothing more.
+
+If a page does fail and you have looked at it and are satisfied, say so:
+
+```bash
+npx dai-migrate accept --workspace $W --route docs/keys --reason "the sample moved into the API playground on purpose" --by "Your Name"
+npx dai-migrate verify --workspace $W --preview
+```
+
+The report keeps the finding with your name beside it. Options: `--renderer chrome` opens every page in a headless browser and also checks the content behind accordions and tabs (slower); `--responsive all|off` measures layout on every page or not at all (the default is a spread of 24 pages).
+
+---
+
+## Stages
 
 | Stage | What it does | Writes |
 | --- | --- | --- |
-| `init` | creates the workspace, pins the migrator build, proves the remote and (with an API key) the platform | `session.json`, `report/preflight.json` |
-| `fingerprint` | scores which platform the source is | `plan/fingerprint.json` |
-| `discover` | finds every page and the source's own navigation; freezes the source universe | `plan/tree.yaml`, `source-cache/discovery-result.json`, `source-cache/source-manifest.json` |
-| `acquire` | freezes each page: its rendered HTML, its published Markdown where the platform serves one, its `llms.txt` entry; `--openapi <url>` captures a spec the source shows | `source-cache/acquired/` |
-| `inventory` | reads every page into the intermediate representation; records headings, links, components, fidelity records | `snapshot/`, `inventory/` |
-| `plan` | proposes the URL plan, the component plan, the asset plan | `plan/urls.yaml`, `plan/component-plan.yaml`, `plan/assets.yaml` |
-| `assets` | downloads, de-duplicates and hosts media | `plan/assets.json`, `assets-original/`, `assets-ready/` |
-| `convert` | converts every page to Documentation.AI MDX by rule; quarantines what it cannot carry exactly | `output/`, `ledger/`, `quarantine/` |
-| `nav` | writes `documentation.json`: navigation, redirects, anchor shims | `output/documentation.json`, `report/redirects.*.json`, `report/anchors.json` |
-| `verify` | runs the 37 release gates locally, or against the deployed preview with `--preview` | `report/gates.json`, `report/review-queue.md` |
-| `write --push` | writes the migration branch `migration/<session>` and pushes it; waits for the preview | `repo/`, preview URL in `session.json` |
-| `release` | validates the four approvals against their pinned evidence | `report/release-certificate.json` |
-| `report` | team reports and the customer report | `report/summary.md`, `report/customer-report.{html,pdf,json}` |
+| `init` | creates the workspace, records the build, checks that you can push | `session.json`, `report/preflight.json` |
+| `fingerprint` | works out which platform the source is | `plan/fingerprint.json` |
+| `discover` | finds every page and the source's own navigation | `plan/tree.yaml`, `source-cache/source-manifest.json` |
+| `acquire` | seals a copy of each page; `--openapi <url>` captures an API specification | `source-cache/acquired/` |
+| `inventory` | reads every page into a neutral form; records headings, links, components | `snapshot/`, `inventory/` |
+| `plan` | proposes addresses, component conversions, pictures and the site's look | `plan/urls.yaml`, `plan/component-plan.yaml`, `plan/assets.yaml`, `plan/site.yaml` |
+| `assets` | downloads, de-duplicates and hosts pictures and files | `plan/assets.json` |
+| `convert` | converts every page by rule; holds back what it cannot carry exactly | `output/`, `ledger/`, `quarantine/` |
+| `nav` | writes `documentation.json`: navigation, settings, redirects | `output/documentation.json`, `output/styles/migration.css` |
+| `verify` | runs the checks, on your machine or against the preview | `report/gates.json`, `report/review-queue.md` |
+| `write --push` / `publish` | delivers the migration and gets a preview | the migration branch or working version |
+| `accept` | records that a named person accepted a preview finding | `plan/preview-acceptances.yaml` |
+| `release` | confirms all four decisions against what they approved | `report/release-certificate.json` |
+| `report` | the customer report and the team's files | `report/customer-report.{html,pdf,json}` |
 
-A stage that fails stops and names what to fix. Fix the plan or the migrator, then run the stage again. Never hand-edit `output/`.
+A stage that fails stops and names what to fix. Fix the plan (or the migrator) and run the stage again. Never edit `output/` by hand.
 
-### The four human gates
+**If the migrator itself is fixed mid-run**, do not crawl the site again: `rebase --reason "…"`, then `discover --offline`, then continue from `inventory`. The sealed source is re-read; nothing is fetched.
 
-| Gate | After | The person confirms |
-| --- | --- | --- |
-| 1 · scope and structure | `discover` | `plan/tree.yaml` is the site: every page, its title, its place in the navigation. Pages to leave out go in `plan/scope-decisions.yaml` with a reason and an approver, never by deleting tree entries |
-| 2 · conversion plan | `plan` | the URL plan, the component decisions (per component cluster, applied per instance), the asset plan |
-| 3 · pre-push review | `verify` | the output and the findings. **A failing gate is a finding for this review, not a reason to withhold the preview** |
-| 4 · preview and release | `verify --preview` | the deployed preview, route by route. `release` then writes the certificate; nothing is cut over without it |
-
-`approve --gate <n> --by "<who>"` records each one against the exact state approved; if that state changes, the approval lapses and `human-gates-approved` says so.
-
-### Exact and permissive
-
-`init --fidelity exact` is the default and the only mode for a customer migration. It certifies the output against the raw acquired source, in both directions and in order: text the output has that the source does not fails as hard as text that is missing (that is what catches platform chrome). Titles and descriptions come only from what the source states. An asset that cannot be hosted, a page whose published Markdown cannot be acquired, an authored block someone wants to drop (`plan/block-exclusions.yaml` is refused in exact mode): each stops the run.
-
-`--fidelity permissive` is for exploration. The same pipeline runs, but the exact-family gates report `not-run` instead of `pass`, assets may stay on the source host (`assets --provider none`), and `write --push --allow-lossy` records the unproven gates as waived in `report/lossy-push.json`. The branch is not a certified migration and must never be released to a customer.
-
-### What a failing gate means
-
-`verify` writes `report/gates.json` and a readable `report/review-queue.md`. Each gate is a fact about the output, in the run's own words, with samples. The exact family (`source-content-exact`, `source-metadata-exact`, `html-reconciliation`, `chrome-absent`, `navigation-exact`, `conversion-fidelity`, `serialized-output-exact`, `no-authored-exclusions`, `source-universe-accounted`) compares against the sealed source.
-
-Two gates fail on every re-run and are not defects: `human-gates-approved` (the tree or plan changed since the approval, so approve again) and `migrator-pinned` when the build changed (run `rebase`, below).
-
-`write --push` never refuses over a failing gate or a missing gate-3 sign-off, in any mode. It requires gates 1 and 2, records every open finding in `report/pushed-with-findings.json`, prints them, and pushes. `release` is where a finding blocks.
+`init --fidelity exact` is the default and the only mode for a real migration. It stops rather than ship a difference: a page whose published Markdown cannot be acquired, a picture nobody hosts (unless a named person decides otherwise), a title the source never stated, an authored block someone wants to drop (`plan/block-exclusions.yaml` is refused in exact mode). `--fidelity permissive` is for exploring: the exactness checks report `not-run` instead of passing, and the result must not be released.
 
 ---
 
 ## Supported sources
 
-The router (`skills/migrate/SKILL.md`) fingerprints the source and hands off to a platform skill. Every adapter passes one shared conformance suite, so a guarantee that holds for one holds for all.
+| Source | How it is read |
+| --- | --- |
+| **Mintlify** site or repository | `docs.json`/`mint.json` navigation (languages, versions, tabs, menus, groups), icons, badges, page modes, hidden pages, snippets, redirects, OpenAPI; live sites through their published Markdown |
+| **GitBook** site or Git Sync repository | `SUMMARY.md`, `.gitbook.yaml`, blocks (`hint`, `tabs`, `stepper`, `embed`, `openapi`…), section switcher, published Markdown |
+| **ReadMe** project | sync repository or API v2 (`README_API_KEY`) |
+| **Document360** | export ZIP or folder, or the live site |
+| **MadCap Flare** published site | pages plus the navigation data files the site publishes; tile grids, tab strips |
+| **Fern, Docusaurus, Nextra** repositories | through the adapter registry; a sidebar written in executable JavaScript is reviewed at decision 1 |
+| Any Markdown/MDX/HTML folder, any live site | sitemaps, sidebars, same-site links |
 
-| Source | How it is read | Skill |
+API reference pages are bound to their operation in your OpenAPI specification, with the method badge in the sidebar. A help centre can open on a card hub (`nav --help-center "<tab or group>" --by "<who>"`), in every language the site has. `docs/STATUS.md` records what is verified for each platform and where the boundaries are.
+
+---
+
+## The workspace and the reports
+
+```
+session.json      the run's identity, stage state, approvals, preview URL
+plan/             what a person reviews: tree, addresses, components, pictures, site look, scope decisions
+source-cache/     the sealed source; never rewritten
+output/           the migrated site: one MDX file per page, documentation.json, api-reference/, styles/
+quarantine/       pages held back, each with the reason
+report/           everything below
+```
+
+| File | For | What |
 | --- | --- | --- |
-| Mintlify site or repository | `docs.json`/`mint.json` navigation (versions, languages, tabs, anchors, dropdowns, groups), snippets, redirects, group-level OpenAPI, custom heading ids; live sites through the sidebar and the published Markdown | `migrate-mintlify`, `scrape-mintlify` |
-| GitBook site or Git Sync repository | `SUMMARY.md`, `.gitbook.yaml`, Liquid blocks (`hint`, `tabs`, `stepper`, `embed`, `openapi`…), section switcher and section groups, published Markdown and `llms.txt`; a supplied OpenAPI spec (`acquire --openapi <url>`) | `migrate-gitbook`, `scrape-gitbook` |
-| ReadMe project | sync repository or API v2 (`README_API_KEY`), categories, guides, reference pages | `migrate-readme`, `scrape-readme` |
-| Document360 | export ZIP or directory (articles, categories, media, snippet tokens), or the live site | `migrate-document360`, `scrape-document360` |
-| MadCap Flare (published site) | pages plus the navigation data files the site publishes (`Data/HelpSystem.xml`, table-of-contents chunks); tile grids, tab strips and linked tables of contents | `migrate-generic` (`madcap` profile) |
-| Fern, Docusaurus, Nextra repositories | through the adapter registry; a sidebar written in executable JavaScript is reported as unread and reviewed at gate 1 | `migrate-generic` |
-| Any local Markdown/MDX/HTML repository, any live site | sitemaps, sidebars, same-origin links; optional Firecrawl | `migrate-generic`, `scrape-generic` |
-
-API reference pages migrate the way the platform renders them: `openapi:` on the page's navigation entry over a spec under `api-reference/`. Group-level (auto) references attach to the group; custom-mode pages are never emitted. A source help centre can open on the platform's card hub (`nav --help-center`).
-
-`docs/STATUS.md` records what is verified and the explicit boundaries per platform.
-
----
-
-## The workspace
-
-Everything a migration produces lives in the workspace, mode `0700`:
-
-```
-session.json                 identity, stage state, pins (migrator build, plans, output hash), approvals, preview URL
-plan/                        what a person reviews: tree.yaml, urls.yaml, component-plan.yaml, assets.yaml, scope-decisions.yaml
-source-cache/                the sealed source: discovery-result.json, source-manifest.json, acquired/<pageId>.json
-snapshot/  inventory/        the intermediate representation and per-page records (fidelity, anchors, links, page-openapi)
-assets-original/ assets-ready/
-output/                      the migrated site: MDX per page, documentation.json, api-reference/
-ledger/                      one disposition per source block: identical, transformed, excluded, quarantined
-quarantine/                  pages held back, each with the reason and both snapshots
-repo/                        clone of the customer's repository, where the migration branch is written
-report/                      everything below
-```
-
-Plans are YAML that a person edits; the stages read them. The sealed source is never rewritten: a migrator fix re-derives from it (see below).
-
----
-
-## Reports
-
-Written by `report` after `verify`:
-
-| File | For whom | What |
-| --- | --- | --- |
-| `report/customer-report.pdf` / `.html` | the customer | the verdict, four numbers, the decisions they must make as plain sentences with example page names, what is good to know, the checks at a glance, and an appendix with the complete lists for whoever acts on them |
-| `report/customer-report.json` | the customer's team | the same data, every item |
-| `report --summary` | a reader | the same page without the appendix, addresses or build detail |
-| `report/summary.md`, `report/review-queue.md` | the migration team | build provenance, every gate with samples, in the run's own words |
-| `report/gates.json`, `report/redirects.*.json`, `report/anchors.json`, `report/unlisted-pages.json`, `report/unmigrated-links.json`, `report/platform-gaps.json` | engineering | the machine-readable facts |
-
-Gate ids never appear in the customer report; each is said in the customer's terms (`report/gate-language.ts`). Reasons a page was left out are said in plain words (`SKIP_REASON_LANGUAGE` in `report/customer-data.ts`). Nothing is dropped silently: the appendix and the JSON are complete.
-
-The PDF is printed by the same headless Chrome `verify --preview` uses. `--no-pdf` writes the HTML only.
-
----
-
-## Fixing the migrator mid-run
-
-A fix to this plugin changes what the migrator derives, never what the source served. Do **not** start a new workspace and crawl the site again:
-
-```bash
-npx dai-migrate rebase   --workspace $W --reason "what the fix changed"
-npx dai-migrate discover --workspace $W --offline      # rebuilds plan/tree.yaml from the sealed source, fetching nothing
-npx dai-migrate inventory --workspace $W               # then continue the sequence
-```
-
-`rebase` re-pins the build, records the reason in `session.json` (the report lists every build that touched the migration) and marks derived stages stale. `discover --offline` keeps the scope decisions reviewed at gate 1. Re-confirm gate 1 afterwards; the structure may have changed, which is why the fix was made. Start a new workspace only if the re-derivation says the source universe itself would change.
-
----
-
-## Several migrations at once
-
-Each migration is one workspace and, while the migrator is being fixed for it, one git branch and one worktree of this repository:
-
-```bash
-cd ~/documentation.ai-migration-skills
-git worktree add ~/dai-migrator-acme -b migrate/acme main
-cd ~/dai-migrator-acme && npm install
-```
-
-Run that migration's commands from that worktree, and its workspace elsewhere (`~/migrations/acme`). When the fixes are done, merge the branch into `main`, run `npm run typecheck && npm test`, and remove the worktree (`git worktree remove ~/dai-migrator-acme`). A run that needs no code changes can use the `main` checkout directly.
-
-The repository owner commits and pushes; agents leave changes in the working tree with a proposed commit message.
+| `report/customer-report.pdf` / `.html` | the site's owner | the verdict, the numbers, the decisions still open as plain sentences, and an appendix with every list |
+| `report --summary` | a reader in a hurry | the same first page without the appendix |
+| `report/review-queue.md` | whoever runs the migration | every check in the run's own words, with examples and notes |
+| `report/gates.json`, `report/preview-routes.json`, `report/responsive.json` | engineering | the facts, machine-readable |
 
 ---
 
 ## Environment variables
 
-| Variable | Used by |
+| Variable | Used for |
 | --- | --- |
-| `MIGRATION_WORKSPACE` | every command, instead of `--workspace` |
-| `DAI_API_BASE`, `DAI_API_KEY` | `init` platform checks, `assets --provider dai-api`, preview lookup |
-| `FIRECRAWL_API_KEY`, `FIRECRAWL_ZERO_DATA_RETENTION` | `acquire --fetcher firecrawl`; Firecrawl may retain scraped pages unless zero data retention is set and agreed |
-| `README_API_KEY`, `README_BRANCH` | ReadMe API v2 discovery |
-| `MIGRATION_ALLOWED_ORGS` | the organisations `write` may push to |
-| `MIGRATION_RPS`, `MIGRATION_CONCURRENCY`, `MIGRATION_DISCOVERY_LIMIT` | crawl rate and size |
-| `MIGRATION_HEADERS_FILE`, `MIGRATION_COOKIES_FILE`, `MIGRATION_AUTH_ORIGINS`, `HTTPS_PROXY` | authenticated or proxied sources |
-| `MIGRATION_ASSET_PROVIDER`, `MIGRATION_PREVIEW_TIMEOUT_MIN`, `MIGRATION_TARGET_PUBLIC_BASE`, `MIGRATION_SEARCH_URL_TEMPLATE` | defaults for `assets`, `write`, the cutover notes |
-| `NODE_OPTIONS=--max-old-space-size=8192` | sites above a thousand pages; verification streams pages, the rewriting stages hold the corpus |
+| `MIGRATION_WORKSPACE` | instead of `--workspace` |
+| `DAI_API_KEY`, `DAI_API_BASE` | optional in the clone and git flows (finds the preview URL, checks the project up front, media API). Required for `publish` |
+| `DAI_MCP_URL` | the Authoring MCP endpoint, default `https://api.documentation.ai/mcp` |
+| `MIGRATION_ALLOWED_ORGS` | for teams: the organisations a migration may write to. Without it a migration may write only to the organisation of the repository named at `init` |
+| `R2_*` / S3 settings, `MIGRATION_ASSET_PROVIDER` | hosting pictures in your own bucket |
+| `FIRECRAWL_API_KEY`, `README_API_KEY` | optional fetchers and the ReadMe API |
+| `MIGRATION_RPS`, `MIGRATION_CONCURRENCY` | crawl rate; concurrency of the preview check |
+| `CHROME_PATH` | a Chrome or Chromium binary, if it is not found by itself |
+| `NODE_OPTIONS=--max-old-space-size=8192` | sites above a thousand pages |
 
-Credentials go in the environment or in files outside the workspace. Nothing here reads a `.env` for secrets, and no credential is ever written to a file, log or report.
-
----
-
-## Rules you never break
-
-- No customer or demo content in this repository: no captures, no workspaces, no outputs. A test enforces it.
-- No crawl without the customer's written authorisation, or a native export or repository instead.
-- Never work around a stopped stage, never weaken or skip a gate, never hand-edit `output/`.
-- No fallback that silently substitutes content for something the source states.
-- No executable output: no scripts, no event handlers, no `.jsx` snippets. Unsafe or unresolved content blocks release.
-- Never reuse another migration's remote. Never rewrite a branch that was already pushed (`write --revision` supersedes it).
-- Never paste secrets, cookies or tokens into any file or log.
+Keep credentials in the environment. No credential is ever written to a file, log or report.
 
 ---
 
-## Developing
+## Rules that are never broken
 
-```bash
-npm install
-npm run typecheck
-npm test                                            # unit tier: synthetic inputs, no network
-DAI_SOURCE_TRUTH_DIR=<dir> npm run test:proof       # exactness proof against a saved real site (held outside the repo)
-npm run test:scale                                  # generated corpora; DAI_SCALE_PAGES sets the size
-npm run contract:extract                            # regenerate the content contract from the product repos
-```
-
-Before reporting a gate fix, prove it on a real captured workspace: copy the workspace, `rebase` → `discover --offline` → `inventory` → … → `verify`, and read `report/gates.json`. Unit tests passing while a gate still fails on the real site has cost a day more than once.
-
-Conventions: TypeScript strict, explicit types on exports, no `any`, async/await, names that say what they do, comments that say why. Deterministic output: the same input produces byte-identical files. Fail closed.
+- No crawl without the owner's written permission. Use an export or the repository otherwise.
+- Customer content never lives in this folder. Workspaces are always somewhere else.
+- A stopped stage is never worked around, a check is never weakened, `output/` is never edited by hand.
+- Nothing is substituted silently for something the source states.
+- No executable output: no scripts, no event handlers.
+- A branch that was pushed is never rewritten (`write --revision "<why>"` makes a new one).
+- An assistant never approves a decision. A person does, by name.
 
 ---
 
@@ -324,27 +328,33 @@ Conventions: TypeScript strict, explicit types on exports, no `any`, async/await
 
 | The run says | What it means | What to do |
 | --- | --- | --- |
-| `--push refused until scope and plan are approved` | gates 1 and 2 are not recorded, or lapsed because the plan changed | review, then `approve --gate 1` / `--gate 2 --by "…"` |
-| `human-gates-approved` fails after a re-run | the tree or plan changed since the approval | review and approve again |
-| `migrator-pinned` fails | the build changed since `init` | `rebase --reason "…"` then `discover --offline` and continue |
-| `discover` refuses: source manifest would change | a fix would change which pages exist, not only how they are read | that is a new capture: start a new workspace |
-| `openapi-preserved`: navigation entry does not bind … | an endpoint page is hidden or unlisted, so no entry can carry its operation | place the page in the navigation, or accept that it renders as prose |
-| pages quarantined for `exact-fidelity` | conversion could not carry the page without changing it; `quarantine/<page>.json` holds both snapshots | fix the cause in the migrator, `rebase`, re-derive; never exclude the content |
-| `linked table of contents … was not captured with the site` | an older capture predates the feature that freezes Flare data files | `discover` and `acquire` again on this build |
-| `unmigrated-links` fails | links point at source pages not in scope | migrate those pages, fix the links, or record `unmigratedLinks: source` in `plan/urls.yaml` if the old site stays up |
+| `refused until scope and plan are approved` | decisions 1 and 2 are not recorded, or lapsed because a plan changed | review, then `approve --gate 1` / `--gate 2 --by "…"` |
+| `human-gates-approved` fails after a re-run | the tree or a plan changed since the approval | review and approve again |
+| `migrator-pinned` fails | this tool changed since `init` | `rebase --reason "…"`, then `discover --offline` and continue |
+| `assets stopped: exact mode requires a hosted URL` | no image hosting is configured | set up the media API or a bucket, or `assets --provider none --keep-external --by "…"` |
+| `browser-content` fails | a page of the preview is missing something a reader would look for | open `report/review-queue.md`, look at the page, then fix it or `accept` it |
+| `publish` stops with `duplicate_path` | the platform refuses a navigation that lists one page twice through the MCP server | deliver with `write --push` instead, or place the page once at decision 1 |
+| the "Learn" link in a dropdown opens `/null` | a link-only dropdown or menu item; the platform's renderer needs a fix | the preview check names these; report it to Documentation.AI |
+| no preview URL after `write --push` | no API key is configured, so it is not looked up | copy it from the dashboard → Deployments → Preview and pass `--preview-url` |
 | no PDF | Chrome is absent | the HTML and JSON are written; install Chrome or use `--no-pdf` |
 
 ---
 
-## Repository map
+## Developing
+
+```bash
+npm run typecheck
+npm test                                            # synthetic inputs, no network
+DAI_SOURCE_TRUTH_DIR=<dir> npm run test:proof       # exactness proof against a saved real site, kept outside the repo
+npm run contract:extract                            # regenerate the content contract from the platform's own schema
+```
+
+Before reporting a fix to a check, prove it on a real captured workspace: copy the workspace, `rebase` → `discover --offline` → … → `verify`, and read `report/gates.json`. Conventions: strict TypeScript, no `any`, async/await, names that say what they do, comments that say why. The same input produces byte-identical output. Fail closed.
 
 ```
-skills/                    operator skills: migrate (router), migrate-<platform>, scrape-<platform>, migrate-generic, verify, report
-packages/migrate-core/     the engine: cli.ts and cli/, scrape/, adapters/, ir/ (HTML/MDX → IR → MDX), components/ (rules engine),
-                           assets/, nav/, urls/, verify/ (gates, fidelity, source truth), report/, evidence/, session/
-packages/content-contract/ the Documentation.AI content contract (components, props, navigation, redirects) with strict validators
+skills/                    the assistant's instructions: migrate (router), migrate-<platform>, scrape-<platform>, verify, report
+packages/migrate-core/     the engine: cli, scrape, adapters, ir, components (rules), assets, nav, urls, verify, publish, report
+packages/content-contract/ the Documentation.AI content contract: components, navigation grammar, settings schema, icon names
 docs/STATUS.md             what is verified, the boundaries, and a dated log of every cause fixed
-docs/platform/             notes on the platform surfaces the migrator relies on
-AGENTS.md                  the working rules for an agent in this repository
-.claude-plugin/            plugin and marketplace manifests
+AGENTS.md                  the working rules for an assistant in this repository
 ```

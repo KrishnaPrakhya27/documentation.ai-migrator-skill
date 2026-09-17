@@ -14,6 +14,6 @@ Implemented source preference: **sync repository** (`docs/<category>/*.md`, fron
 ## Procedure
 1. `dai-migrate init ... --repo <sync-repo> --platform readme` (or `--source https://<subdomain>.readme.io` for API or scrape).
 2. `dai-migrate discover` → **human gate 1/4**: review `plan/tree.yaml`; hidden pages are in `inventory/platform-meta.json`.
-3. `inventory` → `plan` → **human gate 2/4** (variables, glossary terms, Recipes without bodies and marketplace components) → `assets` → `convert` twice → `nav` → local `verify` → **human gate 3/4** → `write --push` (waits for the preview) → `verify --preview` → **human gate 4/4** → `release` (writes the immutable cutover certificate) → `report`.
+3. `inventory` → `plan` → **human gate 2/4** (variables, glossary terms, Recipes without bodies and marketplace components) → `assets` → `convert` twice → `nav` → local `verify` → **human gate 3/4** → `write --push` (or `publish` in the MCP flow) → `verify --preview` → **human gate 4/4** → `release` (writes the immutable cutover certificate) → `report`.
 
 Not implemented: API reference generation from ReadMe's OpenAPI uploads (export the spec and use the Mintlify-style group-level `openapi` in `documentation.json` manually), variables and glossary substitution, Changelog → Update conversion.

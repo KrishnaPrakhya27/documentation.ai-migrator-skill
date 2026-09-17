@@ -15,6 +15,7 @@ import type { DiscoveredNavigationNode } from '../scrape/discovery.js';
 import { walkBlocks, inlineText, blocksText, isBlockWithChildren } from '../ir/types.js';
 import { markdownToIr } from '../ir/from-markdown.js';
 import { Ledger } from '../ledger/dispositions.js';
+import { drawableIconName } from '@dai/content-contract';
 import { sanitizeHtmlToJsx } from './sanitize.js';
 import { blocksToMdx } from '../ir/to-dai-mdx.js';
 import { loadContract } from '@dai/content-contract';
@@ -360,6 +361,19 @@ const HANDLERS: Record<string, RestructureHandler> = {
     return { blocks, lossy: ['the prompt\'s "open in editor" actions are not carried; the text stays copyable'] };
   } },
   /**
+   * A Tailwind grid wrapper (`<div className="grid sm:grid-cols-2 gap-4">`) is a column layout, and
+   * the platform has a component for exactly that. Unwrapped like any other layout div, the cards of
+   * a landing page stacked into one long column. The widest column count the classes state is the
+   * layout on a desktop, which is what `Columns` takes; it handles the narrower screens itself.
+   */
+  'grid-to-columns': { reads: ['className', 'class'], run: (node, rule) => {
+    const classes = String(node.props.className ?? node.props.class ?? '').split(/\s+/);
+    const counts = classes.flatMap((token) => { const match = /(?:^|:)grid-cols-(\d+)$/.exec(token); return match ? [Number(match[1])] : []; });
+    const cols = Math.min(4, Math.max(2, ...counts));
+    const children = node.children.filter((child) => !(child.type === 'paragraph' && !child.children.length));
+    return { blocks: [{ id: node.id, type: 'dai', name: 'Columns', props: { cols }, children, rule: rule.id }] };
+  } },
+  /**
    * A live demo whose interactivity is the content: a generator, a playground, a counter. Nothing
    * static reproduces one, and a static shell of a generator looks broken rather than merely
    * reduced, so it becomes a card linking to the working tool - in the widget's own position,
@@ -444,12 +458,23 @@ const HANDLERS: Record<string, RestructureHandler> = {
 
 export class RulesEngine {
   private rules: MappingRule[];
+  /** Links a rule wrote by the operator's decision, per page: they point where that person said, and nothing retargets them. */
+  private declared = new Map<string, Set<string>>();
   constructor(private opts: EngineOptions) {
     this.rules = opts.mappings.filter((m) => m.platform === opts.platform || m.platform === '*').flatMap((m) => m.rules);
   }
 
   findRule(node: ComponentNode): MappingRule | undefined {
     return this.rules.find((r) => matches(r, node));
+  }
+
+  /**
+   * The links rules have written on this page by an operator's decision (a card to a live tool that
+   * still lives on the source site). A link a handler draws between pages is retargeted like any
+   * other; one a person pointed somewhere on purpose stays where they pointed it.
+   */
+  declaredLinks(pageId: string): ReadonlySet<string> {
+    return this.declared.get(pageId) ?? new Set();
   }
 
   /** Resolve every ComponentNode in the document, depth-first, children first. */
@@ -547,6 +572,7 @@ export class RulesEngine {
       result = outcome.blocks;
       handlerLossy = outcome.lossy ?? [];
       declaredLinks = outcome.declaredLinks ?? [];
+      if (declaredLinks.length) this.declared.set(pageId, new Set([...(this.declared.get(pageId) ?? []), ...declaredLinks]));
       mapped = handler.reads;
     } else if (rule.children === 'unwrap') {
       result = node.children;
@@ -568,12 +594,26 @@ export class RulesEngine {
     } else {
       throw new Error(`Rule ${rule.id} has neither to, handler nor children:unwrap`);
     }
+    // An icon is written under the name the renderer's library draws it by. Sources spell Font Awesome
+    // (Mintlify's and GitBook's default) or a newer Lucide; a name the renderer does not have draws
+    // nothing, silently, so it is translated where an equivalent exists and otherwise left out and said.
+    const iconNotes: string[] = [];
+    result = result.map((block): Block => {
+      if (block.type !== 'dai' || typeof block.props.icon !== 'string') return block;
+      const stated = block.props.icon;
+      const drawable = drawableIconName(stated);
+      if (drawable === stated) return block;
+      const { icon: _icon, ...rest } = block.props;
+      if (!drawable) iconNotes.push(`icon "${stated}" has no equivalent the renderer draws; left out`);
+      return { ...block, props: drawable ? { ...rest, icon: drawable } : rest };
+    });
     const authored = Object.keys(node.props).filter((p) => node.props[p] !== undefined && node.props[p] !== null);
     const dropped = rule.drop ?? [];
     const lossy = [
       ...authored.filter((p) => dropped.includes(p)).map((p) => `${p} dropped`),
       ...authored.filter((p) => !dropped.includes(p) && !mapped.includes(p)).map((p) => `${p} dropped (no mapping in ${rule.id})`),
       ...handlerLossy,
+      ...iconNotes,
       ...(node.styleDeps ?? []).filter((x) => x.startsWith('expression:')).map((x) => `${x} removed without evaluation`),
     ];
     const outIds = result.map((r) => r.id);

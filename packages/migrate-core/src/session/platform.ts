@@ -59,6 +59,14 @@ export class DaiClient {
     return { status: r.status, deployments: r.body?.deployments ?? [] };
   }
 
+  /** Asks the platform to build a preview of one branch (a working version). The build is then found like any other, by `waitForBranchDeployment`. */
+  async deployPreview(branch: string): Promise<{ status: number; deploymentId?: string }> {
+    const res = await this.fetchImpl(`${this.base}/api/v1/deploy/preview`, { method: 'POST', headers: { authorization: `Bearer ${this.opts.apiKey}`, accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({ branch }), signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000) });
+    if (!res.ok) return { status: res.status };
+    const body = await res.json().catch(() => ({})) as { deploymentId?: string; deployment?: { deploymentId?: string } };
+    return { status: res.status, deploymentId: body.deploymentId ?? body.deployment?.deploymentId };
+  }
+
   /** API-key media surface (platform dependency G7). 200 means `--provider dai-api` can ingest. */
   async mediaAvailable(): Promise<{ status: number; available: boolean }> {
     const r = await this.get<unknown>('/media?limit=1');

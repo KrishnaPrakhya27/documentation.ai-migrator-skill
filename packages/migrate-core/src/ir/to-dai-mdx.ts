@@ -124,7 +124,11 @@ function plainCaption(caption: Inline[]): boolean {
 
 function imageToMdx(image: ImageNode, caption?: string): string {
   const safe = markdownUrl(image.url, 'resource');
-  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null, className: image.themeClass ?? null, caption: caption ?? null }, true) : escapeText(image.alt);
+  // The renderer draws an image's alt text under it as a caption when no caption is given. A source
+  // that shows the picture without one keeps it that way: the hook is what the migration's
+  // stylesheet hides the fallback by, and alt stays where it belongs, with screen readers.
+  const hooks = [image.themeClass, image.decorative ? 'dai-mig-decorative' : undefined, image.captionless && !caption && image.alt.trim() ? 'dai-mig-no-caption' : undefined].filter(Boolean).join(' ');
+  return safe ? openTag('Image', { src: safe, alt: image.alt, title: image.title ?? null, width: image.width ?? null, height: image.height ?? null, className: hooks || null, caption: caption ?? null }, true) : escapeText(image.alt);
 }
 
 export function openTag(name: string, props: Record<string, string | number | boolean | null>, selfClose = false): string {

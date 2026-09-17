@@ -52,7 +52,16 @@ export interface AssetEntry {
   excluded?: { reason: string; approvedBy: string; approvedAt?: string };
 }
 
-export interface AssetManifest { provider: string; entries: Record<string, AssetEntry>; byUrl: Record<string, string> }
+export interface AssetManifest {
+  provider: string; entries: Record<string, AssetEntry>; byUrl: Record<string, string>;
+  /**
+   * A named person decided the pictures stay at the addresses they are served from today, because
+   * no image hosting is configured for this migration (no Documentation.AI API key, no storage
+   * bucket). The pages are whole and the pictures show, for as long as those addresses stay online:
+   * the report says so, and says what to do before the old site is switched off.
+   */
+  keptExternal?: { by: string; at: string };
+}
 
 export function readManifest(workspace: string): AssetManifest {
   const p = join(workspace, 'plan', 'assets.json');
@@ -261,8 +270,23 @@ export async function collectAssets(docs: DocIR[], workspace: string, opts: Coll
 }
 
 /** Entries the output cannot reference by a hosted URL: failed downloads or uploads, assets left on their source host, and downloads no provider has ingested. */
+/** The synthetic page the site plan's logo and favicon are collected under, so they are hosted with the pages' media. */
+export const SITE_BRANDING_PAGE = 'site-branding';
+
+/** An image only the site plan shows (a logo, a favicon): presentation, never a page's content. */
+export function isSiteBrandingOnly(entry: AssetEntry): boolean {
+  return entry.references.length > 0 && entry.references.every((reference) => reference.page?.id === SITE_BRANDING_PAGE);
+}
+
+/**
+ * Assets a page needs that nobody hosts. A logo or favicon the site plan carries is not among them:
+ * it is presentation, so one that cannot be hosted is left out of documentation.json and said so at
+ * `nav`, rather than stopping a migration whose every page is whole.
+ */
 export function unhostedAssets(m: AssetManifest): AssetEntry[] {
-  return Object.values(m.entries).filter((entry) => !entry.excluded && (entry.status !== 'ingested' || !entry.finalUrl));
+  return Object.values(m.entries).filter((entry) => !entry.excluded && !isSiteBrandingOnly(entry) && (entry.status !== 'ingested' || !entry.finalUrl)
+    // left where it is served today by a named person's decision, not for want of trying
+    && !(m.keptExternal && entry.status === 'kept-external'));
 }
 
 /** Assets a named person accepted the migration would not carry. Reported, never silent. */

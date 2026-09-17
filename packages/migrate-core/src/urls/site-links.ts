@@ -207,8 +207,13 @@ export function siteLinkTarget(links: SiteLinks): (url: string, source?: string)
   return (url, source) => resolve(url, source)?.target ?? url;
 }
 
-/** The document with every link retargeted: prose, list items, quotes, table cells, captions and a component's link props. */
-export function retargetDocLinks(doc: DocIR, target: (url: string, source?: string) => string): DocIR {
+/**
+ * The document with every link retargeted: prose, list items, quotes, table cells, captions and a
+ * component's link props. `keep` names links that stay exactly as written: the ones a rule wrote by
+ * an operator's decision, which point at the source site on purpose.
+ */
+export function retargetDocLinks(doc: DocIR, resolve: (url: string, source?: string) => string, keep: ReadonlySet<string> = new Set()): DocIR {
+  const target = (url: string, source?: string): string => (keep.has(url) ? url : resolve(url, source));
   // A canonical naming another page is a link between pages: it must follow that page to where it
   // was migrated, exactly as a body link does, or it keeps pointing at the site being left.
   const canonical = typeof doc.frontmatter?.canonical === 'string' ? target(doc.frontmatter.canonical, doc.source) : undefined;

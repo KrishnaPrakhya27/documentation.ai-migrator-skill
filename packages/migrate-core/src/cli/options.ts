@@ -9,8 +9,16 @@ import { parseArgs } from 'node:util';
 export const HELP = `dai-migrate <command> [options]
 
 Commands (run in order; the workflow has exactly four standard human gates):
-  init         --workspace <dir> --source <url|path> --target customer-org|demo-org --remote <git url> [--platform p] [--export <zip|dir>] [--fidelity exact|permissive] [--allowed-orgs a,b] [--customer-authorised]
-               verifies the remote, the API key, the connected repository, previews and the media API up front; records the asset provider
+  init         --workspace <dir> --source <url|path> (--clone <dir> | --remote <git url>) [--platform p] [--export <zip|dir>] [--fidelity exact|permissive] [--template classic|atlas] [--target customer-org|demo-org] [--allowed-orgs a,b] [--customer-authorised]
+               --clone is your own clone of your Documentation.AI project's repository: the migration branch is built in it and
+               pushed to its origin with your git credentials, and the platform previews the pushed branch by itself. No API key is needed.
+               --remote names the repository instead, and the migrator clones it into the workspace.
+               DAI_API_KEY (optional) lets the migrator look the preview URL up and check the project connection up front;
+               without it the preview URL is read from the dashboard and passed to verify --preview-url.
+               --allowed-orgs (or MIGRATION_ALLOWED_ORGS) lists the organisations a team may write to; without it a migration may
+               write only to the organisation of the repository named here. --target defaults to customer-org.
+               --template picks the site's look up front: classic (sidebar layout, the default) or atlas (denser navigation, content on a card);
+               it is proposed in plan/site.yaml with the source's brand colours, logo and top-bar links, and can be changed there
   fingerprint  [--url <u>] [--export <zip|dir>] [--repo <dir>]     → plan/fingerprint.json
   discover     [--export <zip|dir>] [--url <u>] [--discovery-limit n] [--offline] [--exclude-help-system <root> --by "<who>"] → plan/tree.yaml [gate 1: scope]
                --offline rebuilds the tree and navigation from the frozen source already in the workspace; it fetches nothing
@@ -23,7 +31,9 @@ Commands (run in order; the workflow has exactly four standard human gates):
   acquire      [--fetcher local|firecrawl] [--zero-data-retention] [--profile p] [--urls file] [--proxy url] [--headers-file json] [--cookies-file file] → source-cache/acquired/
   inventory                                                         → snapshot/, inventory/*.json
   plan         [--mode preserve|restructure|hybrid] [--strip-prefix p] [--case preserve|lower] → plan/*.yaml [gate 2: conversion plan]
-  assets       [--provider none|local|s3|dai-api]                   → plan/assets.json, assets-original/
+  assets       [--provider none|local|s3|dai-api] [--keep-external --by "<who>"] → plan/assets.json, assets-original/
+               with no image hosting configured (no API key, no bucket), --provider none --keep-external --by "<who>" records
+               a named person's decision to leave pictures at the addresses that serve them today; the report says so
   convert                                                           → output/, ledger/, quarantine/
   nav          [--place-unlisted --by "<who>"]                      → output/documentation.json, report/redirects.*.json, report/anchors.json
                [--help-center "<container>" [--hub-path <route>] --by "<who>"]
@@ -37,7 +47,21 @@ Commands (run in order; the workflow has exactly four standard human gates):
                a branch already pushed is evidence and is never rewritten
                --allow-lossy (permissive sessions) records the unproven exactness gates as waived in report/lossy-push.json
                a failing gate never withholds the push, in any mode: it is recorded in report/pushed-with-findings.json and blocks release
+  publish      [--branch <working version>] [--remove-old-pages] [--no-wait] [--preview-timeout min]
+               the MCP flow, instead of write --push: sends the output straight into your Documentation.AI project through the
+               Authoring MCP server (DAI_API_KEY is the only credential; no git), onto a working version of its own, publishes
+               that version and asks for its preview. The live site is untouched until the working version is merged.
+               A run that stops continues where it stopped. --remove-old-pages also deletes the pages the project had before.
   verify       [--preview] [--preview-url <u>] [--preview-contract-version v] → local [gate 3: pre-push] or preview [gate 4: release]; --preview uses the URL recorded by write
+               [--renderer fetch|chrome] [--responsive sample|all|off]
+               the preview check reads every page over HTTP (minutes, no browser needed). It fails a page only for what a reader
+               would miss: it does not load, a source passage or heading is nowhere on it, a link leads nowhere. How the platform
+               draws a page (labels on code blocks, captions, layout on a phone) is listed as a note and never fails.
+               --renderer chrome opens each page in a headless browser and also checks content behind accordions and tabs (slower)
+               --responsive measures phone/tablet/desktop layout on a spread of pages (default), on all of them, or not at all
+  accept       --route <route> [--route …] --reason "<why>" --by "<who>"
+               records that a named person looked at a preview finding and accepted it; verify --preview then reports the route
+               as accepted instead of failing. Without --route, lists what has been accepted.
   release                                                            validates all four approvals and writes an immutable release certificate
   report       [--no-pdf] [--summary]                               → report/summary.md, report/platform-gaps.json,
                and the customer-facing report/customer-report.{html,pdf,json}: what was migrated,
@@ -45,7 +69,11 @@ Commands (run in order; the workflow has exactly four standard human gates):
                --no-pdf writes the HTML only (no browser needed)
                --summary writes the reader's version: verdict, numbers, decisions and checks, without the appendix, addresses or technical detail
 
-Every command except init takes --workspace <dir> (or MIGRATION_WORKSPACE).`;
+  mcp                                                                serves the migrator to any MCP host over stdio (Claude Desktop, Cursor, VS Code, Codex…):
+               tools migration_guide, migration_status, migration_run, migration_read. Add it to the host as the command
+               "npx dai-migrate mcp" run from this repository.
+
+Every command except init and mcp takes --workspace <dir> (or MIGRATION_WORKSPACE).`;
 
 /** The parsed command line. The return type is inferred so each flag keeps the type its definition gives it. */
 export function parseCommandLine() {
@@ -56,6 +84,7 @@ export function parseCommandLine() {
     source: { type: 'string' }, target: { type: 'string' }, platform: { type: 'string' }, export: { type: 'string' }, url: { type: 'string' }, repo: { type: 'string' },
     'allowed-orgs': { type: 'string', default: process.env.MIGRATION_ALLOWED_ORGS ?? '' },
     'customer-authorised': { type: 'boolean', default: false },
+    template: { type: 'string' }, clone: { type: 'string' },
     fidelity: { type: 'string', default: 'exact' },
     mode: { type: 'string' }, 'strip-prefix': { type: 'string' }, case: { type: 'string' },
     provider: { type: 'string', default: process.env.MIGRATION_ASSET_PROVIDER }, fetcher: { type: 'string', default: 'local' }, profile: { type: 'string' }, urls: { type: 'string' },
@@ -78,6 +107,9 @@ export function parseCommandLine() {
     remote: { type: 'string' }, push: { type: 'boolean', default: false }, 'allow-lossy': { type: 'boolean', default: false },
     'no-wait': { type: 'boolean', default: false }, 'no-pdf': { type: 'boolean', default: false }, summary: { type: 'boolean', default: false }, 'preview-timeout': { type: 'string', default: process.env.MIGRATION_PREVIEW_TIMEOUT_MIN ?? '15' },
     preview: { type: 'boolean', default: false }, 'preview-url': { type: 'string' }, 'preview-contract-version': { type: 'string' },
+    renderer: { type: 'string' }, responsive: { type: 'string' }, route: { type: 'string', multiple: true },
+    'keep-external': { type: 'boolean', default: false },
+    branch: { type: 'string' }, 'remove-old-pages': { type: 'boolean', default: false },
     'log-originals': { type: 'boolean', default: false },
     help: { type: 'boolean', default: false },
   },

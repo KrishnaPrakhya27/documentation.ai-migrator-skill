@@ -12,6 +12,11 @@
  *     --app /path/documentation-ai-app \
  *     --backend /path/documentation-ai-backend \
  *     --dashboard /path/documentation-ai-dashboard [--check]
+ *
+ * It also copies the platform's published `documentation.json` JSON Schema beside the contract
+ * (`documentation.schema.json`), summarises the navigation grammar and page-entry properties from
+ * it, and records the Lucide icon names the renderer's installed `lucide-react` can draw: an icon
+ * name it does not have renders nothing, silently.
  */
 import { parseArgs } from 'node:util';
 import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
@@ -34,6 +39,8 @@ const { values } = parseArgs({
 interface PropSchema {
   type?: string | string[];
   enum?: unknown[];
+  /** A space-separated value, each part of which must be one of these. */
+  tokens?: string[];
   default?: unknown;
   description?: string;
   required?: boolean;
@@ -161,6 +168,9 @@ function main() {
     .filter((n) => validator.has(n) || ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'pre', 'blockquote', 'a'].includes(n))
     .sort();
 
+  const siteConfig = siteConfigFrom(join(values.dashboard!, 'public', 'documentation.json'));
+  const icons = lucideIconsFrom(join(values.app!, 'node_modules', 'lucide-react'));
+
   const contract = {
     contractVersion: decisions.version,
     generatedAt: new Date().toISOString(),
@@ -168,6 +178,8 @@ function main() {
       renderer: 'documentation-ai-app/src/components/mdx-components/MDXRemoteServer.tsx',
       deploymentValidator: 'documentation-ai-backend/src/trigger/services/deployment/mdxValidation.service.ts',
       editorSchemas: 'documentation-ai-dashboard/src/components/ucc/*.json',
+      siteConfigSchema: 'documentation-ai-dashboard/public/documentation.json',
+      icons: 'documentation-ai-app/node_modules/lucide-react/dist/esm/icons/*.js',
     },
     emittable,
     components,
@@ -177,10 +189,15 @@ function main() {
       optional: ['description', 'metaTitle', 'metaDescription', 'ogImage', 'canonical', 'jsonLd'],
     },
     navigation: {
-      // hand-written from the published schema, not extracted from the renderer
-      rootKeys: ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'],
+      rootKeys: siteConfig.rootKeys,
+      childKeys: siteConfig.childKeys,
+      pageProps: siteConfig.pageProps,
+      containerProps: siteConfig.containerProps,
+      httpMethods: siteConfig.httpMethods,
       rule: 'exactly one child collection per container, nested in schema order products > versions > languages > tabs > dropdowns > groups > pages; pages are objects { title, path | href } or nested groups, never bare strings (schema: dashboard.documentation.ai/documentation.json)',
     },
+    siteConfig: { schema: 'documentation.schema.json', topLevelKeys: siteConfig.topLevelKeys, required: siteConfig.required },
+    icons,
     redirects: {
       supported: { exact: true, namedParam: true, trailingWildcard: false, splat: false },
       defaultStatus: 308,
@@ -193,12 +210,14 @@ function main() {
   };
 
   const outPath = join(pkgRoot, 'contract.json');
+  const schemaPath = join(pkgRoot, 'documentation.schema.json');
   const next = JSON.stringify(contract, null, 2) + '\n';
   if (values.check) {
     if (!existsSync(outPath)) throw new Error('contract.json missing');
     const prev = JSON.parse(readText(outPath));
     const strip = (c: any) => JSON.stringify({ ...c, generatedAt: undefined });
-    if (strip(prev) !== strip(contract)) {
+    const schemaDrift = !existsSync(schemaPath) || readText(schemaPath) !== siteConfig.schemaText;
+    if (strip(prev) !== strip(contract) || schemaDrift) {
       console.error('Contract drift detected between product repos and contract.json');
       process.exit(1);
     }
@@ -206,7 +225,61 @@ function main() {
     return;
   }
   writeFileSync(outPath, next);
-  console.log(`wrote ${outPath}: ${components.length} components, ${emittable.length} emittable`);
+  writeFileSync(schemaPath, siteConfig.schemaText);
+  console.log(`wrote ${outPath}: ${components.length} components, ${emittable.length} emittable, ${icons.names.length} icon names, ${siteConfig.topLevelKeys.length} site settings`);
+}
+
+/**
+ * The navigation grammar and the site settings, read from the platform's own JSON Schema rather
+ * than written by hand: which child collection each container may hold, which properties a page
+ * entry and a container accept, and the HTTP methods a page entry may state.
+ */
+function siteConfigFrom(schemaFile: string): {
+  schemaText: string; topLevelKeys: string[]; required: string[]; rootKeys: string[];
+  childKeys: Record<string, string[]>; pageProps: string[]; containerProps: Record<string, string[]>; httpMethods: string[];
+} {
+  const schemaText = readText(schemaFile);
+  const schema = JSON.parse(schemaText) as { properties: Record<string, unknown>; required?: string[]; $defs: Record<string, any> };
+  const defs = schema.$defs;
+  const COLLECTIONS = ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'];
+  const variants = (def: any): any[] => def?.oneOf ?? def?.allOf?.flatMap((part: any) => part.oneOf ?? []) ?? [def];
+  const childKeys: Record<string, string[]> = {};
+  const containerProps: Record<string, string[]> = {};
+  for (const kind of ['product', 'version', 'language', 'tab', 'dropdown', 'menu', 'group']) {
+    const branches = variants(defs[kind]);
+    const props = new Set<string>();
+    const children = new Set<string>();
+    for (const branch of branches) for (const key of Object.keys(branch.properties ?? {})) (COLLECTIONS.includes(key) ? children : props).add(key);
+    // `dropdown` states its shared properties on a base definition
+    for (const key of Object.keys(defs[`${kind}Base`]?.properties ?? {})) props.add(key);
+    childKeys[kind] = COLLECTIONS.filter((key) => children.has(key));
+    containerProps[kind] = [...props].filter((key) => key !== kind).sort();
+  }
+  const rootKeys = COLLECTIONS.filter((key) => variants(defs.navigation).some((branch) => key in (branch.properties ?? {})));
+  return {
+    schemaText,
+    topLevelKeys: Object.keys(schema.properties),
+    required: schema.required ?? [],
+    rootKeys,
+    childKeys,
+    pageProps: Object.keys(defs.page.properties ?? {}),
+    containerProps,
+    httpMethods: defs.httpMethod.enum as string[],
+  };
+}
+
+/** Every icon name the renderer's installed lucide-react exports a file for, aliases included. */
+function lucideIconsFrom(packageDir: string): { library: string; version: string; names: string[] } {
+  const iconsDir = join(packageDir, 'dist', 'esm', 'icons');
+  if (!existsSync(iconsDir)) {
+    // The app's dependencies are not installed here: keep what the last extraction recorded.
+    const previous = existsSync(join(pkgRoot, 'contract.json')) ? JSON.parse(readText(join(pkgRoot, 'contract.json'))).icons : undefined;
+    if (previous) return previous;
+    throw new Error(`${iconsDir} is missing: run npm install in the app repository so the drawable icon names can be read`);
+  }
+  const version = JSON.parse(readText(join(packageDir, 'package.json'))).version as string;
+  const names = readdirSync(iconsDir).filter((file) => file.endsWith('.js') && file !== 'index.js').map((file) => file.slice(0, -3)).sort();
+  return { library: 'lucide-react', version, names };
 }
 
 main();

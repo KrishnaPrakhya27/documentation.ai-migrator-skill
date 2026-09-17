@@ -34,6 +34,20 @@ export interface ImageNode extends BaseNode {
    * `dark:hidden` are kept; without them both copies show in both themes.
    */
   themeClass?: string;
+  /**
+   * The source draws this picture as decoration rather than as an illustration: it takes no pointer
+   * events, or it is hidden from assistive technology. Presentation only — the picture is carried
+   * either way — and written as a hook the migration's stylesheet acts on.
+   */
+  decorative?: boolean;
+  /**
+   * The source shows this picture with no caption. The platform's renderer falls back to drawing
+   * the alt text as one, so the writer marks the image for the migration's stylesheet to keep the
+   * fallback hidden. Set for every image read from another platform; for a page already in the
+   * platform's own MDX it is set only where that mark is present, so such a page is written back
+   * byte for byte.
+   */
+  captionless?: boolean;
 }
 
 export type Inline = TextNode | InlineCodeNode | StrongNode | EmphasisNode | DeleteNode | LinkNode | BreakNode | KbdNode | InlineHtmlNode | ImageNode | FootnoteReferenceNode;

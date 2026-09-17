@@ -1,0 +1,2387 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://documentation.ai/schemas/documentation.json",
+  "title": "Documentation.AI Configuration",
+  "description": "Configuration schema for Documentation.AI documentation sites",
+  "type": "object",
+  "required": [
+    "name",
+    "navigation"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Site name displayed in browser title, navigation header, and social media previews"
+    },
+    "logo": {
+      "type": "string",
+      "format": "uri-reference",
+      "description": "Single logo used when no theme-specific logo is set. Relative paths are allowed."
+    },
+    "initialRoute": {
+      "type": "string",
+      "description": "Default page path when users visit the root URL. Path to MDX file without .mdx extension"
+    },
+    "template": {
+      "type": "string",
+      "enum": [
+        "classic",
+        "atlas"
+      ],
+      "default": "classic",
+      "description": "Site template that selects the base layout and style"
+    },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Typography and accent overrides applied on top of the template.",
+      "properties": {
+        "primaryColor": {
+          "type": "string",
+          "description": "Accent colour applied to interactive elements."
+        },
+        "font": {
+          "type": "string",
+          "description": "Font family for site text."
+        }
+      }
+    },
+    "favicon": {
+      "type": "string",
+      "format": "uri-reference",
+      "description": "Favicon for browser tabs: an absolute URL or a root-relative path (e.g. /favicon.png)"
+    },
+    "logo-dark": {
+      "type": "string",
+      "format": "uri-reference",
+      "description": "Main logo displayed in dark theme. Absolute URL or root-relative path. Supports PNG, SVG, WEBP"
+    },
+    "logo-light": {
+      "type": "string",
+      "format": "uri-reference",
+      "description": "Main logo displayed in light theme. Absolute URL or root-relative path"
+    },
+    "logo-small-dark": {
+      "type": "string",
+      "format": "uri-reference",
+      "description": "Small logo/favicon for dark theme. Used in browser tabs and mobile view. Absolute URL or root-relative path"
+    },
+    "logo-small-light": {
+      "type": "string",
+      "format": "uri-reference",
+      "description": "Small logo/favicon for light theme. Absolute URL or root-relative path"
+    },
+    "colors": {
+      "$ref": "#/$defs/colors"
+    },
+    "navbar": {
+      "$ref": "#/$defs/navbar"
+    },
+    "navigation": {
+      "$ref": "#/$defs/navigation"
+    },
+    "seo": {
+      "$ref": "#/$defs/seo"
+    },
+    "redirects": {
+      "type": "array",
+      "description": "URL redirects array. First matching redirect takes precedence",
+      "items": {
+        "$ref": "#/$defs/redirect"
+      }
+    },
+    "ai": {
+      "$ref": "#/$defs/ai"
+    },
+    "feedback": {
+      "$ref": "#/$defs/feedback"
+    },
+    "integrations": {
+      "$ref": "#/$defs/integrations"
+    },
+    "customCss": {
+      "type": "array",
+      "description": "Custom CSS files applied to every documentation page. They load after the theme, so their rules win. Entries must be objects; a bare string is skipped at deploy time.",
+      "items": {
+        "type": "object",
+        "required": [
+          "src"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "src": {
+            "type": "string",
+            "description": "A .css file relative to the repository root (e.g. 'styles/brand.css'), or an external https:// URL. Local files are capped at 1 MB each; a missing or oversized file is skipped rather than failing the deploy."
+          }
+        }
+      }
+    },
+    "scripts": {
+      "type": "array",
+      "description": "Custom JavaScript files to load on all documentation pages. Supports local files (.js/.mjs in the repo) and external URLs",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Path or URL (e.g., 'scripts/custom.js')"
+          },
+          {
+            "type": "object",
+            "required": [
+              "src"
+            ],
+            "properties": {
+              "src": {
+                "type": "string",
+                "description": "Path to a local JS file or external URL"
+              },
+              "category": {
+                "type": "string",
+                "description": "Consent category name matching a key in integrations.cookies. Defaults to 'essential' (always loads)."
+              }
+            }
+          }
+        ]
+      }
+    },
+    "auth": {
+      "type": "object",
+      "description": "Site authentication (password, JWT or OAuth). Managed from the Dashboard security settings; edit there rather than by hand",
+      "additionalProperties": true
+    },
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Canonical site URL"
+    }
+  },
+  "$defs": {
+    "icon": {
+      "type": "string",
+      "description": "Icon name from Lucide React icon library"
+    },
+    "httpMethod": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "HEAD",
+        "OPTIONS",
+        "TRACE",
+        "WEBHOOK"
+      ],
+      "description": "HTTP method for API endpoint pages"
+    },
+    "themeColors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "brand": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$",
+          "description": "Primary brand color for buttons, links, and accents. Hex format"
+        },
+        "heading": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$",
+          "description": "Heading and title text color"
+        },
+        "text": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$",
+          "description": "Body text color"
+        }
+      }
+    },
+    "colors": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Brand colors configuration",
+      "properties": {
+        "light": {
+          "$ref": "#/$defs/themeColors",
+          "description": "Color scheme for light mode"
+        },
+        "dark": {
+          "$ref": "#/$defs/themeColors",
+          "description": "Color scheme for dark mode"
+        }
+      }
+    },
+    "navbarLink": {
+      "type": "object",
+      "required": [
+        "title",
+        "link"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Display text for the link"
+        },
+        "link": {
+          "type": "string",
+          "description": "Target URL. Supports mailto: and tel: protocols"
+        }
+      }
+    },
+    "navbarPrimaryAction": {
+      "type": "object",
+      "required": [
+        "title",
+        "link"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Text displayed on the button"
+        },
+        "link": {
+          "type": "string",
+          "description": "Destination URL when clicked"
+        }
+      }
+    },
+    "navbar": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Navbar configuration with action buttons and links",
+      "properties": {
+        "actions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "primary": {
+              "$ref": "#/$defs/navbarPrimaryAction",
+              "description": "Main call-to-action button"
+            },
+            "links": {
+              "type": "array",
+              "description": "Array of secondary navigation links",
+              "items": {
+                "$ref": "#/$defs/navbarLink"
+              }
+            }
+          }
+        }
+      }
+    },
+    "seo": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Search engine optimization settings",
+      "properties": {
+        "robots:index": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow search engines to index pages"
+        },
+        "robots:follow": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow search engines to follow links"
+        },
+        "siteUrl": {
+          "type": "string",
+          "description": "Canonical site URL used in metadata and sitemaps"
+        },
+        "siteName": {
+          "type": "string",
+          "description": "Site name for social previews"
+        },
+        "defaultDescription": {
+          "type": "string",
+          "description": "Fallback meta description"
+        },
+        "defaultImage": {
+          "type": "string",
+          "description": "Fallback social preview image URL"
+        },
+        "og:type": {
+          "type": "string",
+          "description": "Open Graph type"
+        },
+        "og:locale": {
+          "type": "string",
+          "description": "Open Graph locale"
+        },
+        "twitter:card": {
+          "type": "string",
+          "description": "Twitter card type"
+        },
+        "twitter:site": {
+          "type": "string",
+          "description": "Twitter @site handle"
+        },
+        "twitter:creator": {
+          "type": "string",
+          "description": "Twitter @creator handle"
+        },
+        "robots:enabled": {
+          "type": "boolean",
+          "description": "Serve robots.txt"
+        },
+        "robots:url": {
+          "type": "string",
+          "description": "Custom robots.txt URL"
+        },
+        "sitemap:enabled": {
+          "type": "boolean",
+          "description": "Serve sitemap.xml"
+        },
+        "sitemap:url": {
+          "type": "string",
+          "description": "Custom sitemap URL"
+        },
+        "llms-txt:enabled": {
+          "type": "boolean",
+          "description": "Serve llms.txt for AI crawlers"
+        }
+      }
+    },
+    "ai": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "AI assistant and page action configuration",
+      "properties": {
+        "ai-assistant:enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable the AI assistant chat widget"
+        },
+        "ai-assistant:mode": {
+          "type": "string",
+          "enum": [
+            "default",
+            "floating"
+          ],
+          "default": "default",
+          "description": "Deprecated alias of ai-assistant:style"
+        },
+        "ai-assistant:position": {
+          "type": "string",
+          "enum": [
+            "default",
+            "bottom-spaced"
+          ],
+          "default": "default",
+          "description": "Position adjustment for the floating AI assistant. 'bottom-spaced' adds extra bottom margin to avoid overlapping third-party chat widgets"
+        },
+        "page-actions": {
+          "type": "array",
+          "description": "Actions available on each documentation page. Options: 'copy' (copy page content), 'view' (view source), 'claude', 'chatgpt', 'perplexity', 'grok' (open in AI chat), 'mcp' (Model Context Protocol)",
+          "items": {
+            "type": "string",
+            "enum": [
+              "copy",
+              "view",
+              "claude",
+              "chatgpt",
+              "perplexity",
+              "grok",
+              "mcp"
+            ]
+          }
+        },
+        "ai-assistant:style": {
+          "type": "string",
+          "enum": [
+            "default",
+            "floating"
+          ],
+          "default": "default",
+          "description": "Display style. 'default' opens as a side panel, 'floating' opens as a chat bubble popup"
+        },
+        "ai-assistant:default-open": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open the assistant panel on page load"
+        },
+        "ai-assistant:captcha-enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require a captcha before the first assistant message"
+        },
+        "ai-assistant:starter-questions": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "description": "Up to three suggested questions shown before the first message"
+        }
+      }
+    },
+    "feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Feedback widget configuration for documentation pages",
+      "properties": {
+        "reactions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show thumbs up/down reaction buttons on pages"
+        },
+        "survey": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show contextual survey prompt after a reaction"
+        },
+        "github-issues": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show 'Raise an issue' link on pages. Requires github-repo to be set"
+        },
+        "github-repo": {
+          "type": "string",
+          "description": "Public GitHub repository URL for issue creation (e.g., 'https://github.com/org/repo'). Required when github-issues is true"
+        }
+      }
+    },
+    "integrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Third-party analytics, session replay, and chat widget integrations. Each key is a provider name containing its required configuration fields",
+      "properties": {
+        "ga4": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Google Analytics 4",
+          "properties": {
+            "measurementId": {
+              "type": "string",
+              "description": "GA4 Measurement ID (e.g., 'G-XXXXXXXXXX')"
+            }
+          },
+          "required": [
+            "measurementId"
+          ]
+        },
+        "gtm": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Google Tag Manager",
+          "properties": {
+            "tagId": {
+              "type": "string",
+              "description": "GTM Container ID (e.g., 'GTM-XXXXXXX')"
+            }
+          },
+          "required": [
+            "tagId"
+          ]
+        },
+        "posthog": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "PostHog product analytics",
+          "properties": {
+            "apiKey": {
+              "type": "string",
+              "description": "PostHog project API key"
+            },
+            "apiHost": {
+              "type": "string",
+              "description": "PostHog API host. Defaults to 'https://us.i.posthog.com'"
+            }
+          },
+          "required": [
+            "apiKey"
+          ]
+        },
+        "mixpanel": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Mixpanel analytics",
+          "properties": {
+            "projectToken": {
+              "type": "string",
+              "description": "Mixpanel project token"
+            }
+          },
+          "required": [
+            "projectToken"
+          ]
+        },
+        "amplitude": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Amplitude analytics",
+          "properties": {
+            "apiKey": {
+              "type": "string",
+              "description": "Amplitude API key"
+            }
+          },
+          "required": [
+            "apiKey"
+          ]
+        },
+        "segment": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Segment CDP",
+          "properties": {
+            "writeKey": {
+              "type": "string",
+              "description": "Segment write key"
+            }
+          },
+          "required": [
+            "writeKey"
+          ]
+        },
+        "hotjar": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Hotjar behavior analytics",
+          "properties": {
+            "hjid": {
+              "type": "string",
+              "description": "Hotjar Site ID"
+            }
+          },
+          "required": [
+            "hjid"
+          ]
+        },
+        "clarity": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Microsoft Clarity session replay",
+          "properties": {
+            "projectId": {
+              "type": "string",
+              "description": "Clarity project ID"
+            }
+          },
+          "required": [
+            "projectId"
+          ]
+        },
+        "plausible": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Plausible privacy-friendly analytics",
+          "properties": {
+            "domain": {
+              "type": "string",
+              "description": "Site domain registered in Plausible"
+            },
+            "server": {
+              "type": "string",
+              "description": "Custom Plausible server hostname. Defaults to 'plausible.io'"
+            }
+          },
+          "required": [
+            "domain"
+          ]
+        },
+        "fathom": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Fathom privacy-first analytics",
+          "properties": {
+            "siteId": {
+              "type": "string",
+              "description": "Fathom site ID"
+            }
+          },
+          "required": [
+            "siteId"
+          ]
+        },
+        "pirsch": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Pirsch privacy-friendly analytics",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Pirsch identification code"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        "heap": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Heap digital insights",
+          "properties": {
+            "envId": {
+              "type": "string",
+              "description": "Heap environment ID"
+            }
+          },
+          "required": [
+            "envId"
+          ]
+        },
+        "logrocket": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "LogRocket session replay",
+          "properties": {
+            "appId": {
+              "type": "string",
+              "description": "LogRocket app ID (e.g., 'org/app-name')"
+            }
+          },
+          "required": [
+            "appId"
+          ]
+        },
+        "clearbit": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Clearbit data enrichment",
+          "properties": {
+            "publicKey": {
+              "type": "string",
+              "description": "Clearbit public key"
+            }
+          },
+          "required": [
+            "publicKey"
+          ]
+        },
+        "hightouch": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Hightouch Events CDP",
+          "properties": {
+            "writeKey": {
+              "type": "string",
+              "description": "Hightouch write key"
+            },
+            "apiHost": {
+              "type": "string",
+              "description": "Hightouch API host. Defaults to 'us-east-1.hightouch-events.com'"
+            }
+          },
+          "required": [
+            "writeKey"
+          ]
+        },
+        "intercom": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Intercom live chat widget",
+          "properties": {
+            "appId": {
+              "type": "string",
+              "description": "Intercom app/workspace ID"
+            }
+          },
+          "required": [
+            "appId"
+          ]
+        },
+        "crisp": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Crisp live chat widget",
+          "properties": {
+            "websiteId": {
+              "type": "string",
+              "description": "Crisp website ID"
+            }
+          },
+          "required": [
+            "websiteId"
+          ]
+        },
+        "cookies": {
+          "type": "object",
+          "description": "Cookie consent configuration. Each key is a consent category name, and its value defines the cookie/localStorage key-value pair to check for consent. Scripts and integrations assigned to a category only load when the matching value is found in the browser.",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "key",
+              "value"
+            ],
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Cookie or localStorage key to check"
+              },
+              "value": {
+                "type": "string",
+                "description": "Substring to match in the stored value"
+              }
+            }
+          }
+        },
+        "telemetry": {
+          "type": "object",
+          "description": "Controls built-in page view analytics (Documentation.ai telemetry)",
+          "properties": {
+            "enabled": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "Set to 'false' to disable page view tracking. Defaults to enabled."
+            },
+            "category": {
+              "type": "string",
+              "description": "Consent category for telemetry. Defaults to 'analytics'."
+            }
+          }
+        }
+      }
+    },
+    "redirect": {
+      "type": "object",
+      "required": [
+        "source",
+        "destination"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Incoming path pattern to match. Supports dynamic segments with :paramName syntax"
+        },
+        "destination": {
+          "type": "string",
+          "description": "Target path to redirect to. Can include dynamic parameters from source"
+        },
+        "statusCode": {
+          "type": "integer",
+          "enum": [
+            301,
+            302,
+            307,
+            308
+          ],
+          "default": 308,
+          "description": "HTTP status code for the redirect"
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false,
+      "description": "Individual documentation page",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Display name shown in navigation and browser title"
+        },
+        "path": {
+          "type": "string",
+          "description": "Relative path to MDX file without .mdx extension"
+        },
+        "href": {
+          "type": "string",
+          "format": "uri",
+          "description": "External URL for links that open in new tabs. Use instead of path"
+        },
+        "icon": {
+          "$ref": "#/$defs/icon"
+        },
+        "method": {
+          "$ref": "#/$defs/httpMethod"
+        },
+        "tags": {
+          "type": "string",
+          "description": "Categorization tags for organizing related content"
+        },
+        "badge": {
+          "type": "string",
+          "description": "Short label displayed as a colored pill next to the page title in the sidebar (e.g., 'New', 'Beta', 'Deprecated'). Only include when needed"
+        },
+        "show-sidebar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Controls left sidebar visibility. Set to false to hide the sidebar and expand content to full width. Omit or set true for default behavior"
+        },
+        "show-toc": {
+          "type": "boolean",
+          "default": true,
+          "description": "Controls right-side Table of Contents panel visibility. Set to false to hide the TOC. Omit or set true for default behavior"
+        },
+        "show-parent-label": {
+          "type": "boolean",
+          "default": true,
+          "description": "Controls group/parent name label above the page title. Set to false to hide it. Omit or set true for default behavior"
+        },
+        "content-width": {
+          "type": "string",
+          "enum": [
+            "narrow",
+            "normal",
+            "wide"
+          ],
+          "default": "normal",
+          "description": "Controls the max-width of the content area. 'narrow' for focused reading, 'normal' for standard layout, 'wide' for full-width content. Omit for default 'normal'"
+        },
+        "public": {
+          "type": "boolean",
+          "description": "Controls visibility in partial authentication mode"
+        },
+        "access-roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array of role names controlling access with JWT or OAuth authentication. Only users whose token contains at least one matching role can view this page. Inherits from nearest parent if not set"
+        },
+        "openapi": {
+          "type": "string",
+          "description": "Connects a specific OpenAPI endpoint to this page. Format: 'filepath METHOD /endpoint' (e.g., 'api-reference/openapi.yaml GET /users/{id}')"
+        },
+        "openapi-mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "custom"
+          ],
+          "default": "auto",
+          "description": "Controls content injection when using page-level openapi. 'auto' injects full documentation, 'custom' injects only playground and examples"
+        },
+        "show-page-navigation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Controls the previous/next page links at the bottom. Omit or set true for default behavior"
+        },
+        "ask-feedback": {
+          "type": "boolean",
+          "default": true,
+          "description": "Controls the \"Was this helpful?\" feedback widget. Omit or set true for default behavior"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "path"
+          ]
+        },
+        {
+          "required": [
+            "href"
+          ]
+        }
+      ]
+    },
+    "nestedGroup": {
+      "type": "object",
+      "required": [
+        "group"
+      ],
+      "additionalProperties": false,
+      "description": "Nested group within a pages array",
+      "properties": {
+        "group": {
+          "type": "string",
+          "description": "Display name shown in the sidebar navigation"
+        },
+        "icon": {
+          "$ref": "#/$defs/icon"
+        },
+        "expandable": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, renders as an accordion that users can expand/collapse. When false, pages display inline with normal group styling, making pages and groups visually co-exist without accordion behavior."
+        },
+        "openapi": {
+          "type": "string",
+          "description": "OpenAPI spec for auto-generated API pages: a repo-relative path (e.g. 'api-reference/openapi.yaml') or an http(s) URL"
+        },
+        "hidden-apis": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array of API endpoints to exclude from auto-generation. Format: 'METHOD /path' (e.g., ['DELETE /users/{id}', 'POST /admin/reset'])"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pageItem"
+          }
+        },
+        "public": {
+          "type": "boolean",
+          "description": "Controls visibility in partial authentication mode"
+        },
+        "access-roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array of role names controlling access with JWT or OAuth authentication. Inherits from nearest parent if not set"
+        },
+        "path": {
+          "type": "string",
+          "description": "The group's own content page (path without .mdx)"
+        },
+        "href": {
+          "type": "string",
+          "format": "uri",
+          "description": "External link for the group header"
+        },
+        "openapi-output": {
+          "type": "string",
+          "description": "Folder for pages generated from a URL spec (default 'api-reference'). Ignored for repo-relative specs"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "pages"
+          ]
+        },
+        {
+          "required": [
+            "openapi"
+          ]
+        }
+      ]
+    },
+    "pageItem": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/page"
+        },
+        {
+          "$ref": "#/$defs/nestedGroup"
+        }
+      ],
+      "description": "A page or nested group in a pages array"
+    },
+    "group": {
+      "type": "object",
+      "required": [
+        "group"
+      ],
+      "additionalProperties": false,
+      "description": "Content group organizing related pages",
+      "properties": {
+        "group": {
+          "type": "string",
+          "description": "Display name shown in the sidebar navigation"
+        },
+        "icon": {
+          "$ref": "#/$defs/icon"
+        },
+        "expandable": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, renders as an accordion that users can expand/collapse. When false, pages display inline with normal group styling, making pages and groups visually co-exist without accordion behavior."
+        },
+        "openapi": {
+          "type": "string",
+          "description": "OpenAPI spec for auto-generated API pages: a repo-relative path (e.g. 'api-reference/openapi.yaml') or an http(s) URL"
+        },
+        "hidden-apis": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array of API endpoints to exclude from auto-generation. Format: 'METHOD /path' (e.g., ['DELETE /users/{id}', 'POST /admin/reset'])"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pageItem"
+          }
+        },
+        "public": {
+          "type": "boolean",
+          "description": "Controls visibility in partial authentication mode"
+        },
+        "access-roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array of role names controlling access with JWT or OAuth authentication. Inherits from nearest parent if not set"
+        },
+        "path": {
+          "type": "string",
+          "description": "The group's own content page (path without .mdx)"
+        },
+        "href": {
+          "type": "string",
+          "format": "uri",
+          "description": "External link for the group header"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "pages"
+          ]
+        },
+        {
+          "required": [
+            "openapi"
+          ]
+        }
+      ]
+    },
+    "dropdownBase": {
+      "type": "object",
+      "properties": {
+        "dropdown": {
+          "type": "string",
+          "description": "Display name for the dropdown shown in the sidebar"
+        },
+        "icon": {
+          "$ref": "#/$defs/icon"
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional descriptive text shown below the dropdown title"
+        },
+        "public": {
+          "type": "boolean",
+          "description": "Controls visibility in partial authentication mode"
+        },
+        "access-roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Array of role names controlling access with JWT or OAuth authentication. Inherits from nearest parent if not set"
+        }
+      },
+      "required": [
+        "dropdown"
+      ]
+    },
+    "dropdown": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/dropdownBase"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dropdown": {
+                  "type": "string"
+                },
+                "icon": {
+                  "$ref": "#/$defs/icon"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "public": {
+                  "type": "boolean"
+                },
+                "access-roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "tabs": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/tab"
+                  }
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The container's own content page (path without .mdx)"
+                }
+              },
+              "required": [
+                "dropdown",
+                "tabs"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dropdown": {
+                  "type": "string"
+                },
+                "icon": {
+                  "$ref": "#/$defs/icon"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "public": {
+                  "type": "boolean"
+                },
+                "access-roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "dropdowns": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/dropdown"
+                  }
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The container's own content page (path without .mdx)"
+                }
+              },
+              "required": [
+                "dropdown",
+                "dropdowns"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dropdown": {
+                  "type": "string"
+                },
+                "icon": {
+                  "$ref": "#/$defs/icon"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "public": {
+                  "type": "boolean"
+                },
+                "access-roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/group"
+                  }
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The container's own content page (path without .mdx)"
+                }
+              },
+              "required": [
+                "dropdown",
+                "groups"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dropdown": {
+                  "type": "string"
+                },
+                "icon": {
+                  "$ref": "#/$defs/icon"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "public": {
+                  "type": "boolean"
+                },
+                "access-roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "pages": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/pageItem"
+                  }
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The container's own content page (path without .mdx)"
+                }
+              },
+              "required": [
+                "dropdown",
+                "pages"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dropdown": {
+                  "type": "string"
+                },
+                "icon": {
+                  "$ref": "#/$defs/icon"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "public": {
+                  "type": "boolean"
+                },
+                "access-roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "href": {
+                  "type": "string",
+                  "format": "uri",
+                  "description": "External URL for dropdowns that link outside documentation"
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The container's own content page (path without .mdx)"
+                }
+              },
+              "required": [
+                "dropdown",
+                "href"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dropdown": {
+                  "type": "string"
+                },
+                "icon": {
+                  "$ref": "#/$defs/icon"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "public": {
+                  "type": "boolean"
+                },
+                "access-roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "menus": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/menu"
+                  }
+                },
+                "path": {
+                  "type": "string",
+                  "description": "The container's own content page (path without .mdx)"
+                }
+              },
+              "required": [
+                "dropdown",
+                "menus"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "tab": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tab": {
+              "type": "string",
+              "description": "Display name for the tab shown in the navigation bar"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dropdowns": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/dropdown"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "tab",
+            "dropdowns"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tab": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/group"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "tab",
+            "groups"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tab": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/pageItem"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "tab",
+            "pages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tab": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "href": {
+              "type": "string",
+              "format": "uri",
+              "description": "External URL for tabs that link outside documentation"
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "tab",
+            "href"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tab": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "menus": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/menu"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "tab",
+            "menus"
+          ]
+        }
+      ]
+    },
+    "language": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "language": {
+              "type": "string",
+              "description": "Display name for the language"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tabs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/tab"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "language",
+            "tabs"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "language": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dropdowns": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/dropdown"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "language",
+            "dropdowns"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "language": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/group"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "language",
+            "groups"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "language": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/pageItem"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "language",
+            "pages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "language": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "menus": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/menu"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "language",
+            "menus"
+          ]
+        }
+      ]
+    },
+    "version": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string",
+              "description": "Display name for the version"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "languages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/language"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "version",
+            "languages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tabs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/tab"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "version",
+            "tabs"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dropdowns": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/dropdown"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "version",
+            "dropdowns"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/group"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "version",
+            "groups"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/pageItem"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "version",
+            "pages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "menus": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/menu"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "version",
+            "menus"
+          ]
+        }
+      ]
+    },
+    "product": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "product": {
+              "type": "string",
+              "description": "Display name for the product"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "versions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/version"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "product",
+            "versions"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "product": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "languages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/language"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "product",
+            "languages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "product": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tabs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/tab"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "product",
+            "tabs"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "product": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dropdowns": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/dropdown"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "product",
+            "dropdowns"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "product": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/group"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "product",
+            "groups"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "product": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/pageItem"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "product",
+            "pages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "product": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "menus": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/menu"
+              }
+            },
+            "path": {
+              "type": "string",
+              "description": "The container's own content page (path without .mdx)"
+            }
+          },
+          "required": [
+            "product",
+            "menus"
+          ]
+        }
+      ]
+    },
+    "navigation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Navigation starting with products dimension",
+          "properties": {
+            "products": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/product"
+              }
+            }
+          },
+          "required": [
+            "products"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Navigation starting with versions dimension",
+          "properties": {
+            "versions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/version"
+              }
+            }
+          },
+          "required": [
+            "versions"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Navigation starting with languages dimension",
+          "properties": {
+            "languages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/language"
+              }
+            }
+          },
+          "required": [
+            "languages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Navigation starting with tabs (no dimensions)",
+          "properties": {
+            "tabs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/tab"
+              }
+            }
+          },
+          "required": [
+            "tabs"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Navigation starting with dropdowns (no dimensions)",
+          "properties": {
+            "dropdowns": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/dropdown"
+              }
+            }
+          },
+          "required": [
+            "dropdowns"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Navigation starting with groups (no dimensions)",
+          "properties": {
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/group"
+              }
+            }
+          },
+          "required": [
+            "groups"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Navigation starting with pages (no dimensions)",
+          "properties": {
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/pageItem"
+              }
+            }
+          },
+          "required": [
+            "pages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Navigation starting with groups (no dimensions)",
+          "properties": {
+            "menus": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/menu"
+              }
+            }
+          },
+          "required": [
+            "menus"
+          ]
+        }
+      ]
+    },
+    "menu": {
+      "description": "Hierarchical menu container",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "menu": {
+              "type": "string",
+              "description": "Display name for the menu"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "description": {
+              "type": "string",
+              "description": "Tooltip/help text shown for the menu"
+            },
+            "path": {
+              "type": "string",
+              "description": "The menu's own content page (path without .mdx)"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/group"
+              }
+            }
+          },
+          "required": [
+            "menu",
+            "groups"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "menu": {
+              "type": "string",
+              "description": "Display name for the menu"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "description": {
+              "type": "string",
+              "description": "Tooltip/help text shown for the menu"
+            },
+            "path": {
+              "type": "string",
+              "description": "The menu's own content page (path without .mdx)"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/pageItem"
+              }
+            }
+          },
+          "required": [
+            "menu",
+            "pages"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "menu": {
+              "type": "string",
+              "description": "Display name for the menu"
+            },
+            "icon": {
+              "$ref": "#/$defs/icon"
+            },
+            "description": {
+              "type": "string",
+              "description": "Tooltip/help text shown for the menu"
+            },
+            "path": {
+              "type": "string",
+              "description": "The menu's own content page (path without .mdx)"
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "access-roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "href": {
+              "type": "string",
+              "format": "uri",
+              "description": "External URL"
+            }
+          },
+          "required": [
+            "menu",
+            "href"
+          ]
+        }
+      ]
+    }
+  }
+}

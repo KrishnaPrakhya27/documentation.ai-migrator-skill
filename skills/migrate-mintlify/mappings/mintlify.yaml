@@ -256,6 +256,11 @@ rules:
     match: { name: label }
     children: unwrap
     drop: [className]
+  - id: mint/grid-columns
+    tier: T2
+    # a Tailwind grid wrapper is a column layout the platform has a component for; every other div is unwrapped below
+    match: { name: div, class: "layout:grid" }
+    handler: grid-to-columns
   - id: mint/html-div
     tier: T2
     # a layout wrapper: Tailwind classes the target does not carry, around content that it does

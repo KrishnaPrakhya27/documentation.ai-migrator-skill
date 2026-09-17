@@ -45,12 +45,26 @@ export interface DiscoveredUrl {
 }
 
 export type DiscoveredNavigationNode =
-  | { type: 'page'; url: string; title?: string }
+  | {
+      type: 'page'; url: string; title?: string;
+      /** Presentation the source states for the entry: its icon (in the source's icon library), its sidebar tag, its HTTP method, its layout mode. */
+      icon?: string; badge?: string; method?: string; mode?: string;
+      /** Published, and hidden from the source's sidebar. */
+      hidden?: boolean;
+    }
   | {
       type: 'group'; kind?: import('../nav/tree.js').NavigationContainerKind; label: string; children: DiscoveredNavigationNode[];
       /** The page this container itself opens, when the source gives it one: a parent page with subpages. It is the container's own, never a duplicate first entry. */
       pageUrl?: string;
       icon?: string; href?: string; expandable?: boolean; description?: string;
+      /** A container the source states and hides from its sidebar; its label, kind and place are still the source's own. */
+      hidden?: boolean;
+      /**
+       * Internal to merging per-page readings: a container this page names only in its switcher, with
+       * none of its content. It holds the place the source lists the container in until a page inside
+       * it states the content, and never survives into a finished navigation.
+       */
+      stub?: boolean;
     };
 
 /** Site presentation as the source platform declares it. Recorded as evidence; only the name is carried into the migrated site. */
@@ -315,6 +329,9 @@ export function mergeNavigation(into: DiscoveredNavigationNode[], from: Discover
     const at = result.findIndex((existing) => existing.type === 'group' && existing.label === node.label);
     if (at < 0) { result.push(node); continue; }
     const existing = result[at] as Extract<DiscoveredNavigationNode, { type: 'group' }>;
+    // a placeholder takes everything from the first reading that states the container, and keeps its place
+    if (existing.stub) { if (!node.stub) result[at] = node; continue; }
+    if (node.stub) continue;
     const pageUrl = existing.pageUrl ?? node.pageUrl;
     result[at] = { ...existing, ...(pageUrl ? { pageUrl } : {}), children: mergeNavigation(existing.children, node.children) };
   }
@@ -503,7 +520,7 @@ async function fetchLlmsIndex(fetcher: Fetcher, bases: string[], seedHost: strin
  * as content; it is recovered only to retain exact group labels, sidebar
  * labels, descriptions, order, and repeated placements.
  */
-export function extractMintlifyNavigation(html: string, baseUrl: string): MintlifyNavigationExtraction | undefined {
+export function extractMintlifyNavigation(html: string, baseUrl: string, options: { keepStubs?: boolean } = {}): MintlifyNavigationExtraction | undefined {
   // The page states the docs root it is published under; a base without a trailing slash would
   // resolve `quickstart` against the parent of its last segment and drop that prefix.
   const base = new URL(mintlifyNavBase(html, baseUrl));
@@ -551,20 +568,25 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
     if (!value || typeof value !== 'object') return [];
     const node = value as Record<string, unknown>;
     // A tab, group or page the site hides from its navigation is still published: its pages are
-    // discovered and migrate, and are reported as unlisted rather than placed in a sidebar the
-    // source never showed. mintlify.com hides a whole Help center tab this way.
-    if (node.hidden === true) {
-      if (typeof node.href === 'string' && !containerLabel(node)) pages.push({ url: mintlifyNavigationUrl(node.href, base.href), groups, ...(typeof node.title === 'string' ? { title: node.title } : {}) });
-      for (const key of CONTAINER_KEYS) if (Array.isArray(node[key])) walk(node[key] as unknown[], groups);
-      return [];
-    }
+    // discovered and migrate, and are reported as unlisted rather than shown in a sidebar the
+    // source never showed. mintlify.com hides a whole "Help center" tab this way. The entry keeps
+    // the label, kind and place the source gives it, marked hidden: if an operator later decides
+    // unlisted pages are shown, they are shown where and as the source states, not under a name
+    // made from a URL segment.
+    const hidden = node.hidden === true ? { hidden: true as const } : {};
     if (typeof node.href === 'string' && !containerLabel(node)) {
       const url = mintlifyNavigationUrl(node.href, base.href);
       const title = typeof node.title === 'string' ? node.title : undefined;
       const sidebarTitle = typeof node.sidebarTitle === 'string' ? node.sidebarTitle : undefined;
       const description = typeof node.description === 'string' ? node.description : undefined;
       pages.push({ url, title, sidebarTitle, description, groups });
-      return [{ type: 'page' as const, url, title: sidebarTitle ?? title }];
+      // Presentation the source states on the entry itself. `tag` is the pill Mintlify draws beside
+      // the title; an endpoint page names its operation, whose method the sidebar shows.
+      const text = (key: string): string | undefined => (typeof node[key] === 'string' && (node[key] as string).trim() ? (node[key] as string).trim() : undefined);
+      const operation = text('openapi') ?? text('api');
+      const method = operation ? /(?:^|\s)(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|WEBHOOK)\s/i.exec(`${operation} `)?.[1]?.toUpperCase() : undefined;
+      const presentation = Object.fromEntries(Object.entries({ icon: text('icon'), badge: text('tag'), method, mode: text('mode') }).filter((entry) => entry[1] !== undefined));
+      return [{ type: 'page' as const, url, title: sidebarTitle ?? title, ...presentation, ...hidden }];
     }
     // Container kinds survive discovery; flattening switchers changes source structure.
     const label = containerLabel(node);
@@ -576,18 +598,41 @@ export function extractMintlifyNavigation(html: string, baseUrl: string): Mintli
     const switcherStub = (key: string, items: unknown[]): boolean =>
       key === 'pages' && !!label && kindOf(node) !== 'group' && items.length === 1 &&
       !!items[0] && typeof items[0] === 'object' && (items[0] as Record<string, unknown>).title === label;
+    let stubbed = false;
     const children = CONTAINER_KEYS.flatMap((key) => {
       const items = node[key];
-      if (!Array.isArray(items) || switcherStub(key, items)) return [];
+      if (!Array.isArray(items)) return [];
+      if (switcherStub(key, items)) { stubbed = true; return []; }
       return walk(items as unknown[], label ? [...groups, label] : groups);
     });
-    if (!children.length && typeof node.href !== 'string') return [];
     const kind = kindOf(node);
-    const metadata = Object.fromEntries(['icon', 'href', 'expandable', 'description'].filter((key) => node[key] !== undefined).map((key) => [key, node[key]]));
-    return label ? [{ type: 'group' as const, ...(kind && kind !== 'group' ? { kind } : {}), label, ...metadata, children }] : children;
+    // The switcher lists every sibling tab and locale in the order the site shows them. A sibling's
+    // content is stated only by the pages inside it, which the crawl may reach in any order, so the
+    // stub keeps its place: without it the tabs came out in the order the crawl happened to fill
+    // them (Documentation, Learn, API reference) rather than the site's (…, Changelog, Learn).
+    if (!children.length && stubbed && label && typeof node.href !== 'string') return [{ type: 'group' as const, ...(kind && kind !== 'group' ? { kind } : {}), label, ...hidden, stub: true, children: [] }];
+    if (!children.length && typeof node.href !== 'string') return [];
+    // Flight data states an absent value as `null`; only a value of the right type is metadata.
+    const metadata = Object.fromEntries([
+      ...(['icon', 'href', 'description'] as const).filter((key) => typeof node[key] === 'string' && (node[key] as string).trim()).map((key) => [key, node[key]]),
+      ...(typeof node.expandable === 'boolean' ? [['expandable', node.expandable]] : []),
+    ]);
+    if (!label) return node.hidden === true ? children.map((child) => ({ ...child, hidden: true as const })) : children;
+    return [{ type: 'group' as const, ...(kind && kind !== 'group' ? { kind } : {}), label, ...metadata, ...hidden, children }];
   });
-  const navigation = walk(candidate, []);
+  const read = walk(candidate, []);
+  const navigation = options.keepStubs ? read : pruneNavigationStubs(read);
   return navigation.length ? { navigation, pages } : undefined;
+}
+
+/** A finished navigation: the placeholders for containers no page ever filled are gone, and no marker remains. */
+export function pruneNavigationStubs(nodes: DiscoveredNavigationNode[]): DiscoveredNavigationNode[] {
+  return nodes.flatMap((node): DiscoveredNavigationNode[] => {
+    if (node.type === 'page') return [node];
+    if (node.stub) return [];
+    const { stub: _stub, ...rest } = node;
+    return [{ ...rest, children: pruneNavigationStubs(node.children) }];
+  });
 }
 
 /**
@@ -768,10 +813,11 @@ export function navigationFromFrozenPages(pages: readonly FrozenPage[], platform
     let merged: DiscoveredNavigationNode[] | undefined;
     for (const page of pages) {
       if (!page.html) continue;
-      const extracted = extractMintlifyNavigation(page.html, page.url)?.navigation;
+      const extracted = extractMintlifyNavigation(page.html, page.url, { keepStubs: true })?.navigation;
       if (extracted) merged = mergeNavigation(merged ?? [], extracted);
     }
-    if (merged?.length) return { nodes: merged, source: 'platform-metadata' };
+    const finished = pruneNavigationStubs(merged ?? []);
+    if (finished.length) return { nodes: finished, source: 'platform-metadata' };
   }
   // A page states only the section switcher its own section renders: a translated section names
   // itself and its siblings in that locale, never another locale's. Reading the home page alone
@@ -1030,9 +1076,17 @@ export function mergeNavigationTrees(a: DiscoveredNavigationNode[], b: Discovere
 function mergeNavigationNode(a: DiscoveredNavigationNode, b: DiscoveredNavigationNode, placed?: Set<string>): DiscoveredNavigationNode {
   if (a.type === 'group' && b.type === 'group') {
     const pageUrl = a.pageUrl ?? b.pageUrl;
-    return { ...a, ...(pageUrl ? { pageUrl } : {}), href: a.href ?? b.href, icon: a.icon ?? b.icon, description: a.description ?? b.description, children: mergeNavigationTrees(a.children, b.children, placed) };
+    // hidden only where every reading says so: a container one page shows is shown
+    const hidden = a.hidden && b.hidden ? { hidden: true as const } : {};
+    const { hidden: _a, ...rest } = a;
+    return { ...rest, ...(pageUrl ? { pageUrl } : {}), href: a.href ?? b.href, icon: a.icon ?? b.icon, description: a.description ?? b.description, ...hidden, children: mergeNavigationTrees(a.children, b.children, placed) };
   }
-  if (a.type === 'page' && b.type === 'page') return { ...a, title: a.title ?? b.title };
+  if (a.type === 'page' && b.type === 'page') {
+    const hidden = a.hidden && b.hidden ? { hidden: true as const } : {};
+    const { hidden: _a, ...rest } = a;
+    const stated = Object.fromEntries(Object.entries({ title: a.title ?? b.title, icon: a.icon ?? b.icon, badge: a.badge ?? b.badge, method: a.method ?? b.method, mode: a.mode ?? b.mode }).filter((entry) => entry[1] !== undefined));
+    return { ...rest, ...stated, ...hidden };
+  }
   // One rendering collapsed the container to a plain link to its own page, the other expanded it.
   // They are one entry in the source, so the container stands and keeps the subpages it states.
   if (a.type === 'group' && b.type === 'page') return { ...a, children: mergeNavigationTrees(a.children, [], placed) };
@@ -1088,6 +1142,23 @@ function colorsOf(node: Record<string, unknown>): SiteConfig['colors'] {
  * payload. The rendered `<title>` and `og:site_name` are theme-decorated; this
  * is the site's own declaration, so it is what the migrated site carries.
  */
+/** The `docs.json` a live Mintlify page embeds in its Flight payload, as the site's owner wrote it. */
+export function mintlifyDocsConfigObject(html: string): Record<string, unknown> | undefined {
+  for (const payload of flightPayloads(html)) {
+    for (const marker of payload.matchAll(/"docsConfig"\s*:/g)) {
+      const start = payload.indexOf('{', marker.index! + marker[0].length);
+      if (start < 0) continue;
+      const raw = jsonObjectAt(payload, start);
+      if (!raw) continue;
+      try {
+        const node = JSON.parse(raw) as Record<string, unknown>;
+        if (node && typeof node === 'object' && Object.keys(node).length) return node;
+      } catch { /* a reference to the object elsewhere in the payload, not the object */ }
+    }
+  }
+  return undefined;
+}
+
 export function extractMintlifyDocsConfig(html: string): SiteConfig | undefined {
   for (const payload of flightPayloads(html)) {
     for (const marker of payload.matchAll(/"docsConfig"\s*:/g)) {
@@ -1153,6 +1224,8 @@ export async function discoverLiveSite(input: {
   let sidebarOrder = 0;
   let platformOrder = 0;
   let navigation: DiscoveredNavigationNode[] | undefined;
+  /** Mintlify per-page readings, merged with the placeholders that hold each sibling container in the site's own order. */
+  let mintlifyReadings: DiscoveredNavigationNode[] | undefined;
   const navigationCandidates: NonNullable<DiscoveryResult['navigationCandidates']> = {};
   const structuralIssues: string[] = [];
   const helpSystems: HelpSystem[] = [];
@@ -1373,9 +1446,10 @@ export async function discoverLiveSite(input: {
       if (input.profile.platform === 'mintlify') {
         siteConfig ??= extractMintlifyDocsConfig(response.body);
         // Every page states its own slice of the sidebar, so all of them are read and merged.
-        const extracted = extractMintlifyNavigation(response.body, input.seedUrl);
+        const extracted = extractMintlifyNavigation(response.body, input.seedUrl, { keepStubs: true });
         if (extracted) {
-          navigation = mergeNavigation(navigation ?? [], extracted.navigation);
+          mintlifyReadings = mergeNavigation(mintlifyReadings ?? [], extracted.navigation);
+          navigation = pruneNavigationStubs(mintlifyReadings);
           navigationCandidates['platform-metadata'] = navigation;
           for (const page of extracted.pages) add(page.url, 'platform-navigation', input.seedUrl, { title: page.title, description: page.description, sidebarTitle: page.sidebarTitle, groupHint: page.groups });
         }

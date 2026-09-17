@@ -6,7 +6,7 @@ import { gitbookHeadingIds, mintlifyHeadingId } from '../urls/slugger.js';
 import { withinSourceBase, isSourceResource } from '../urls/site-links.js';
 import { readdirSync, readFileSync, existsSync, statSync, lstatSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { validateMdx, validateNavigation } from '@dai/content-contract';
+import { validateMdx, validateNavigation, validateSiteConfig } from '@dai/content-contract';
 import { Ledger, effectiveExclusions, summarize, type LedgerSummary } from '../ledger/dispositions.js';
 import type { Block, DocIR, Inline } from '../ir/types.js';
 import { walkBlocks, mapBlocks, inlineText } from '../ir/types.js';
@@ -35,7 +35,17 @@ import { inapplicableProofs } from '../evidence/applicability.js';
 import { specOutputPath, type SpecManifest } from '../openapi/graph.js';
 
 export type GateStatus = 'pass' | 'fail' | 'not-run' | 'inapplicable';
-export interface GateResult { id: string; status: GateStatus; detail: string; count?: number; samples?: string[] }
+export interface GateResult {
+  id: string; status: GateStatus; detail: string; count?: number; samples?: string[];
+  /**
+   * Differences that are not the migration's to fix and that no reader loses content to: how the
+   * platform's renderer draws a page (a language label on a code block, a "required" pill, a
+   * sideways scroll on a phone). Reported with the gate, in the review queue and the customer
+   * report; they never fail it, because a gate nobody can make pass stops being read.
+   */
+  advisories?: number;
+  advisorySamples?: string[];
+}
 
 /** A proof that cannot exist for this source kind is complete, not skipped. */
 export function gateSatisfied(gate: GateResult): boolean {
@@ -434,7 +444,7 @@ export interface GateInput {
    * output no longer follows the reviewed decisions, so the gate fails; omitting these
    * reports the gate `not-run`, never `pass`.
    */
-  pinnedPlans?: { componentPlan?: string; urlPlan?: string; assetPlan?: string; blockExclusions?: string; scopeDecisions?: string };
+  pinnedPlans?: { componentPlan?: string; urlPlan?: string; assetPlan?: string; sitePlan?: string; blockExclusions?: string; scopeDecisions?: string };
   pinnedSourceManifest?: string;
   pinnedAcquisition?: string;
   pinnedOpenapi?: string;
@@ -593,7 +603,15 @@ export function runGates(input: GateInput): GateResult[] {
     // Block exclusions are pinned by absence too: a file that appears after convert is a change.
     if (hashOf(planFile('block-exclusions.yaml')) !== pinned.blockExclusions) changed.push('block-exclusions.yaml');
     if (hashOf(planFile('scope-decisions.yaml')) !== pinned.scopeDecisions) changed.push('scope-decisions.yaml');
-    gates.push({ id: 'plans-pinned', status: changed.length ? 'fail' : 'pass', detail: changed.length ? `plan changed after conversion: ${changed.join(', ')}; rerun convert` : 'component, URL and asset plans match the converted snapshot', count: changed.length, samples: changed });
+    // The site plan is presentation and is applied by nav, so that is where it is pinned; a workspace
+    // planned before there was one has neither the file nor the pin.
+    const sitePlanChanged = hashOf(planFile('site.yaml')) !== pinned.sitePlan;
+    const detail = [
+      changed.length ? `plan changed after conversion: ${changed.join(', ')}; rerun convert` : '',
+      sitePlanChanged ? 'plan/site.yaml changed after nav wrote documentation.json; rerun nav' : '',
+    ].filter(Boolean).join('; ');
+    if (sitePlanChanged) changed.push('site.yaml');
+    gates.push({ id: 'plans-pinned', status: changed.length ? 'fail' : 'pass', detail: detail || 'component, URL, asset and site plans match the converted snapshot', count: changed.length, samples: changed });
   }
 
   // 1. pages accounted
@@ -689,7 +707,7 @@ export function runGates(input: GateInput): GateResult[] {
 
   const assets = readManifest(input.workspace);
   const unresolvedAssets = Object.values(assets.entries).filter((e) => !e.excluded && (e.status === 'failed' || (assets.provider !== 'none' && (e.status === 'kept-external' || !e.finalUrl))));
-  gates.push({ id: 'assets-ready', status: unresolvedAssets.length ? 'fail' : 'pass', detail: assets.provider === 'none' ? `${Object.values(assets.entries).filter((e) => e.status === 'kept-external').length} assets intentionally remain on source hosts (provider none)` : `${unresolvedAssets.length} assets failed, remain external, or lack a final ingested URL${Object.values(assets.entries).filter((e) => e.excluded).length ? `; ${Object.values(assets.entries).filter((e) => e.excluded).length} excluded by approved decision` : ''}`, count: unresolvedAssets.length, samples: unresolvedAssets.slice(0, 5).flatMap((e) => e.sourceUrls.slice(0, 1)) });
+  gates.push({ id: 'assets-ready', status: unresolvedAssets.length ? 'fail' : 'pass', detail: assets.provider === 'none' ? `${Object.values(assets.entries).filter((e) => e.status === 'kept-external').length} assets remain at the addresses that serve them today (provider none)${assets.keptExternal ? `, by decision of ${assets.keptExternal.by}: they show for as long as those addresses stay online` : ''}` : `${unresolvedAssets.length} assets failed, remain external, or lack a final ingested URL${Object.values(assets.entries).filter((e) => e.excluded).length ? `; ${Object.values(assets.entries).filter((e) => e.excluded).length} excluded by approved decision` : ''}`, count: unresolvedAssets.length, samples: unresolvedAssets.slice(0, 5).flatMap((e) => e.sourceUrls.slice(0, 1)) });
 
   // 3. prose match + code blocks + tables
   // A block the ledger records as excluded was removed by a reviewed decision, so it is not prose the
@@ -806,7 +824,7 @@ export function runGates(input: GateInput): GateResult[] {
   const navFile = join(input.outputDir, 'documentation.json');
   if (existsSync(navFile)) {
     const nav = JSON.parse(readFileSync(navFile, 'utf8'));
-    const navIssues = validateNavigation(nav, (p) => outByPath.has(p.replace(/^\//, '')));
+    const navIssues = [...validateNavigation(nav, (p) => outByPath.has(p.replace(/^\//, ''))), ...validateSiteConfig(nav)];
     gates.push({ id: 'navigation-valid', status: navIssues.length ? 'fail' : 'pass', detail: `${navIssues.length} navigation issues`, count: navIssues.length, samples: navIssues.slice(0, 5).map((i) => i.message) });
     const sortValue = (value: unknown): unknown => value && typeof value === 'object'
       ? Array.isArray(value) ? value.map(sortValue) : Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, sortValue(item)]))

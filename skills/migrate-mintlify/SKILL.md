@@ -26,9 +26,9 @@ A hosted Mintlify site states its own content, and exact mode uses only those st
 - Scans `snippets/`, `components/`, `src/components/` and `custom-blocks/` for component definitions and attaches their hashes to signatures, so custom components cluster per definition.
 
 ## Procedure
-1. `dai-migrate init --workspace <dir> --source <repo> --repo <repo> --target customer-org|demo-org --platform mintlify --remote <connected repo url> --allowed-orgs <owner>`
+1. `dai-migrate init --workspace <dir> --source <repo> --repo <repo> --platform mintlify (--clone <their clone of the Documentation.AI repository> | --remote <git url>) --template <classic|atlas>` (the delivery flow and the template are agreed with the person first; see the router skill)
 2. `dai-migrate discover` → **human gate 1/4**: review `plan/tree.yaml` (scope, version and locale mapping) and `inventory/platform-meta.json` (missing pages, skipped redirects).
 3. `dai-migrate inventory` → `plan` → **human gate 2/4**: review clusters; custom components and non-literal expressions need a decision.
-4. `assets` → `convert` twice (determinism) → `nav` → local `verify` → **human gate 3/4** → `write --push` (waits for the preview) → `verify --preview` → **human gate 4/4** → `release` (writes the immutable cutover certificate) → `report`.
+4. `assets` → `convert` twice (determinism) → `nav` → local `verify` → **human gate 3/4** → `write --push` (or `publish` in the MCP flow) → `verify --preview` (with `--preview-url <url>` read from the dashboard when no API key is configured) → **human gate 4/4** → `release` (writes the immutable cutover certificate) → `report`.
 
 Not implemented: SDK reference generation, `Snippet` components with props, `Icon`/`Tiles`/`Tree`/`Panel` (T7 candidates).

@@ -445,7 +445,9 @@ describe('gates', () => {
     const authored = markdownToIr('---\ntitle: T\n---\n\n![Diagram](/a.png "Overview")\n', { platform: 'mintlify', file: 'p.md', pageId: 'p' });
     expect(authored.children.map((block) => (block.type === 'image' ? { url: block.url, alt: block.alt, title: block.title } : block.type))).toEqual([{ url: '/a.png', alt: 'Diagram', title: 'Overview' }]);
     const mdx = docToMdx(authored);
-    expect(mdx).toBe('---\ntitle: T\n---\n\n<Image src="/a.png" alt="Diagram" title="Overview" />\n');
+    // Markdown has no caption syntax, so the source shows none; the renderer would draw the alt text as
+    // one, and the hook is what the migration's stylesheet keeps that fallback hidden by.
+    expect(mdx).toBe('---\ntitle: T\n---\n\n<Image src="/a.png" alt="Diagram" title="Overview" className="dai-mig-no-caption" />\n');
     const reparsed = markdownToIr(mdx, { platform: 'dai', file: 'p.mdx', pageId: 'p' });
     expect(renderedDocSnapshot(reparsed)).toEqual(renderedDocSnapshot(authored));
   });
@@ -512,14 +514,30 @@ describe('gates', () => {
     const render = async () => '<html><head><title>preview.example</title></head><body class="neterror"><div id="main-frame-error">This site can\u2019t be reached</div></body></html>';
     const res = await runBrowserFragmentGate('https://preview.example/docs', [{ id: 'p', newPath: 'guide', migrate: true }], [{ pageId: 'p', newId: 'requirements', needsShim: false }], render);
     expect(res.status).toBe('fail');
-    expect(res.samples).toEqual([expect.stringMatching(/guide: browser load failed: Chrome showed its network error page/)]);
+    expect(res.samples).toEqual([expect.stringMatching(/guide: page did not load: Chrome showed its network error page/)]);
   });
   it('checks both rendered heading ids and required legacy shims', async () => {
     const render = async () => '<html><body><h2 id="requirements">Requirements</h2><a id="old-req"></a></body></html>';
     const pass = await runBrowserFragmentGate('https://preview.example/docs', [{ id: 'p', newPath: 'guide', migrate: true }], [{ pageId: 'p', newId: 'requirements', oldId: 'old-req', needsShim: true }], render);
     expect(pass.status).toBe('pass');
-    const fail = await runBrowserFragmentGate('https://preview.example/docs', [{ id: 'p', newPath: 'guide', migrate: true }], [{ pageId: 'p', newId: 'missing', needsShim: false }], render);
-    expect(fail.status).toBe('fail');
+    // A deep-link target the platform did not render opens its page at the top: everything on the
+    // page is there, so it is a note with the target named, not a failure nobody can clear.
+    const noted = await runBrowserFragmentGate('https://preview.example/docs', [{ id: 'p', newPath: 'guide', migrate: true }], [{ pageId: 'p', newId: 'missing', needsShim: false }], render);
+    expect(noted.status).toBe('pass');
+    expect(noted.advisories).toBe(1);
+    expect(noted.advisorySamples).toEqual(['guide#missing']);
+  });
+  it('accepts the id the source itself published where the platform slugs a heading that way', async () => {
+    // The platform slugs a heading from everything it draws in it, a badge beside the name included:
+    // "theme - required" is #theme-required on the page, as it was on the source, whatever was predicted.
+    const render = async () => '<html><body><h3 id="theme-required"><code>theme</code> - <span>required</span></h3></body></html>';
+    const pages = [{ id: 'p', newPath: 'settings', migrate: true }];
+    const landed = await runBrowserFragmentGate('https://preview.example/docs', pages, [{ pageId: 'p', newId: 'theme-', oldId: 'theme-required', needsShim: false }], render);
+    expect(landed.status).toBe('pass');
+    expect(landed.advisories).toBeUndefined();
+    // a shim exists because something links by the old id, so there the old spelling itself must be on the page
+    const shimmed = await runBrowserFragmentGate('https://preview.example/docs', pages, [{ pageId: 'p', newId: 'theme-required', oldId: 'theme', needsShim: true }], render);
+    expect(shimmed.advisorySamples).toEqual(['settings#theme']);
   });
   it('fails the rendered-content gate when a description or short paragraph disappears', async () => {
     const doc = markdownToIr(`---\ntitle: Quickstart\ndescription: Exact description.\n---\n\nOne.\n\nTwo.\n`, { platform: 'mintlify', file: 'quickstart.md', pageId: 'p' });
@@ -537,14 +555,18 @@ describe('gates', () => {
     // Joining child nodes with a space would render this as "see docs ." and never find the source segment.
     expect(result.gate.status).toBe('pass');
   });
-  it('fails when the preview renders text no source accounts for', async () => {
+  it('notes text the platform draws of its own, without failing a page that carries all of its source', async () => {
     const doc = markdownToIr(`---\ntitle: T\n---\n\nOne.\n`, { platform: 'mintlify', file: 'a.md', pageId: 'p' });
     const result = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'a', migrate: true, doc }], { render: async () => '<html><body><main><h1>T</h1><p>One.</p><div>\u2318I Ask Assistant</div></main></body></html>' });
-    expect(result.gate.status).toBe('fail');
+    // Nothing the source says is missing, and no change to the migration could remove the platform's
+    // own label: a gate that fails on it fails every well-migrated site and stops being read.
+    expect(result.gate.status).toBe('pass');
+    expect(result.gate.advisories).toBe(1);
+    expect(result.routes[0].advisories?.join(' ')).toContain('ask assistant');
     expect(result.routes[0].residual).toContain('ask assistant');
-    // The target platform's own controls are allowed; anything else is not.
+    // The target platform's own controls are not even noted.
     const allowed = await runBrowserContentGate('https://preview.example/', [{ id: 'p', newPath: 'a', migrate: true, doc }], { render: async () => '<html><body><main><h1>T</h1><p>One.</p><button>Copy</button></main></body></html>' });
-    expect(allowed.gate.status).toBe('pass');
+    expect(allowed.routes).toEqual([{ route: 'a', status: 'pass', problems: [] }]);
   });
   it('reads only the page content on a Documentation.AI preview: tab labels first, collapsed text optional, dropped chrome, step titles, embeds and card covers', async () => {
     const source = [
@@ -574,10 +596,12 @@ describe('gates', () => {
     expect(scoped.routes).toEqual([{ route: 'guide', status: 'pass', problems: [] }]);
     // read as a whole article, the theme's own text and footer link are unaccounted for
     const unscoped = await runBrowserContentGate('https://preview.example/', [page], { render: async () => html });
-    expect(unscoped.routes[0].problems.join(' ')).toMatch(/rendered text with no source.*external link https:\/\/documentation\.ai/);
+    expect(unscoped.routes[0].status).toBe('pass');
+    expect(unscoped.routes[0].advisories?.join(' ')).toMatch(/the platform draws text of its own here.*1 external link\(s\) the source page does not state/);
     // a required segment still fails when it is missing
     const missing = await runBrowserContentGate('https://preview.example/', [page], { render: async () => html.replace('<p>Open settings.</p>', ''), contentSelectors });
-    expect(missing.routes[0].problems).toEqual(['missing or out of order: “open settings.”']);
+    expect(missing.routes[0].status).toBe('fail');
+    expect(missing.routes[0].problems).toEqual(['not on the rendered page: “open settings.”']);
   });
   it('accepts the labels an API field renders from its props: location badge, name, type and allowed values', async () => {
     const operation = { openapi: '3.0.3', info: { title: 'T', version: '1' }, paths: { '/pets': { get: { parameters: [{ name: 'status', in: 'query', description: 'Filter by status.', schema: { type: 'string', enum: ['available', 'sold'] } }], responses: {} } } } };
@@ -587,22 +611,38 @@ describe('gates', () => {
     const page = { id: 'p', newPath: 'pets', migrate: true, doc };
     const labelled = await runBrowserContentGate('https://preview.example/', [page], { render: async () => field('<div><span>Allowed values:</span><span>available</span><span>sold</span></div>'), contentSelectors });
     expect(labelled.routes).toEqual([{ route: 'pets', status: 'pass', problems: [] }]);
-    // a value the source never allowed is still text with no source
+    // a value the source never allowed is still text with no source, and is named
     const invented = await runBrowserContentGate('https://preview.example/', [page], { render: async () => field('<div><span>Allowed values:</span><span>available</span><span>sold</span><span>archived</span></div>'), contentSelectors });
-    expect(invented.routes[0].problems.join(' ')).toContain('archived');
+    expect(invented.routes[0].advisories?.join(' ')).toContain('archived');
   });
-  it('fails a route whose card link, image alt or heading outline differs, and one with no source document', async () => {
+  it('fails a route whose own link leads nowhere or whose heading is gone, and one with no source document', async () => {
     const doc = markdownToIr(`---\ntitle: T\n---\n\n## Section\n\n![Alt text](https://cdn.source/a.png)\n\n[Guide](/guides/setup)\n`, { platform: 'mintlify', file: 'a.md', pageId: 'p' });
     const page = { id: 'p', newPath: 'a', migrate: true, doc };
     const body = (extra: string) => `<html><body><main><h1>T</h1><h2>Section</h2><img src="https://cdn.hosted/a.png" alt="Alt text"><p><a href="/guides/setup">Guide</a></p>${extra}</main></body></html>`;
     const options = { routes: new Set(['a', 'guides/setup']), assetUrls: new Map([['https://cdn.source/a.png', 'https://cdn.hosted/a.png']]) };
     expect((await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('') })).gate.status).toBe('pass');
-    // An internal link that lands on no migrated page.
-    const broken = await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('<p><a href="/missing">Gone</a></p>') });
-    expect(broken.routes[0].problems.join(' ')).toContain('/missing');
-    // An image still served from the source host.
-    const unhosted = await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('').replace('https://cdn.hosted/a.png', 'https://cdn.source/a.png') });
-    expect(unhosted.routes[0].problems.join(' ')).toContain('expected the hosted');
+    // A link the page itself states that lands on no migrated page is a link into nothing.
+    const broken = await runBrowserContentGate('https://preview.example/', [page], { ...options, routes: new Set(['a']), render: async () => body('') });
+    expect(broken.routes[0].status).toBe('fail');
+    expect(broken.routes[0].problems).toEqual(['internal link /guides/setup resolves to no migrated page']);
+    // …unless the site redirects that address, or the source site had the same link broken.
+    expect((await runBrowserContentGate('https://preview.example/', [page], { ...options, routes: new Set(['a']), redirectSources: new Set(['guides/setup']), render: async () => body('') })).routes[0]).toEqual({ route: 'a', status: 'pass', problems: [] });
+    const inherited = await runBrowserContentGate('https://preview.example/', [page], { ...options, routes: new Set(['a']), inheritedBrokenLinks: new Set(['guides/setup']), render: async () => body('') });
+    expect(inherited.routes[0].status).toBe('pass');
+    expect(inherited.routes[0].advisories?.join(' ')).toContain('already broken on the source site');
+    // A link the page's own text never states is one the platform drew (from an API description): named, not failed.
+    const drawn = await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('<p><a href="/missing">Gone</a></p>') });
+    expect(drawn.routes[0].status).toBe('pass');
+    expect(drawn.routes[0].advisories?.join(' ')).toContain('/missing');
+    // A link with no destination at all is broken whoever drew it.
+    const nowhere = await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('<p><a href="/null">Learn</a></p>') });
+    expect(nowhere.routes[0].problems.join(' ')).toContain('a link with no destination');
+    // A heading the reader navigates by that is nowhere on the page.
+    const headless = await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => body('').replace('<h2>Section</h2>', '') });
+    expect(headless.routes[0].problems.join(' ')).toContain('section');
+    // A page that does not load.
+    const down = await runBrowserContentGate('https://preview.example/', [page], { ...options, render: async () => { throw new Error('HTTP 404'); } });
+    expect(down.routes[0].problems).toEqual(['page did not load: HTTP 404']);
     // A migrated page the run cannot judge is a failure, never a silent skip.
     const blind = await runBrowserContentGate('https://preview.example/', [{ id: 'q', newPath: 'b', migrate: true }], { ...options, render: async () => body('') });
     expect(blind.gate.status).toBe('fail');
@@ -939,10 +979,10 @@ describe('exact conversion fidelity', () => {
     '  <Card title="Reference" icon="book" href="/reference/cli">', '    Every command.', '  </Card>',
     '</CardGroup>', '',
     '<CardGroup>',
-    '  <Card title="Alpha" icon="a">', '    One.', '  </Card>', '',
-    '  <Card title="Beta" icon="b">', '    Two.', '  </Card>', '',
-    '  <Card title="Gamma" icon="c">', '    Three.', '  </Card>', '',
-    '  <Card title="Delta" icon="d">', '    Four.', '  </Card>',
+    '  <Card title="Alpha" icon="star">', '    One.', '  </Card>', '',
+    '  <Card title="Beta" icon="bolt">', '    Two.', '  </Card>', '',
+    '  <Card title="Gamma" icon="gear">', '    Three.', '  </Card>', '',
+    '  <Card title="Delta" icon="flag">', '    Four.', '  </Card>',
     '</CardGroup>', '',
     '## Get started', '',
     '<Steps>',
@@ -971,6 +1011,8 @@ describe('exact conversion fidelity', () => {
     expect(daiBlocks(resolved, 'Card').map((card) => [card.props.title ?? null, card.props.href ?? null])).toEqual([
       ['Setup', '/guides/setup'], ['Reference', '/reference/cli'], ['Alpha', null], ['Beta', null], ['Gamma', null], ['Delta', null], [null, null],
     ]);
+    // an icon is written under the name the renderer draws it by: Font Awesome's bolt and gear are Lucide's zap and settings
+    expect(daiBlocks(resolved, 'Card').map((card) => card.props.icon ?? null)).toEqual(['rocket', 'book', 'star', 'zap', 'settings', 'flag', null]);
     // the authored cols is kept; the group without one renders the contract default, not its four-card count
     expect(daiBlocks(resolved, 'Columns').map((columns) => columns.props.cols)).toEqual([2, 2]);
     expect(daiBlocks(resolved, 'Expandable').map((expandable) => expandable.props.title)).toEqual(['Why Acme?', 'Is it free?']);
@@ -1280,7 +1322,7 @@ describe('the rendered-content gate reads the whole source, not only its top lev
       render: async () => html,
       routes: new Set(['guide']),
     });
-    return result.routes[0]?.problems ?? [];
+    return [...(result.routes[0]?.problems ?? []), ...(result.routes[0]?.advisories ?? [])];
   };
 
   it('counts an image the source put inside a link', async () => {
@@ -1306,7 +1348,7 @@ describe('the rendered-content gate reads the whole source, not only its top lev
   it('still reports an external link the source never states', async () => {
     const doc = markdownToIr('---\ntitle: Delete group\n---\n\nSee [Create group](../Create.htm).\n', { platform: 'madcap', file: 'https://learn.example.com/Procedures/Delete.htm', pageId: 'p' });
     const problems = await run(doc, '<html><body><article><p>See <a href="https://elsewhere.example/Create.htm">Create group</a>.</p></article></body></html>');
-    expect(problems.some((problem) => problem.startsWith('external link https://elsewhere.example/Create.htm'))).toBe(true);
+    expect(problems.some((problem) => problem.startsWith('1 external link(s) the source page does not state'))).toBe(true);
   });
 
   it('reads the words inside an inline HTML element the reader sees', async () => {

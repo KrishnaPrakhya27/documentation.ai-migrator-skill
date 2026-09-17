@@ -26,6 +26,8 @@ export const WORKSPACE_DIRS = ['source-cache', 'snapshot', 'inventory', 'plan', 
 export interface SessionTarget {
   /** 'customer-org' (option A) or 'demo-org' (option B) */
   landing: 'customer-org' | 'demo-org';
+  /** The customer's own clone of their Documentation.AI repository (init --clone): `write` builds the migration branch in it, and its `origin` is the remote. */
+  cloneDir?: string;
   organizationId?: string;
   documentationId?: string;
   repoRemote?: string;
@@ -45,6 +47,8 @@ export interface SessionTarget {
   /** Discovered after write --push by polling /api/v1/deployments. */
   previewUrl?: string;
   previewDeploymentId?: string;
+  /** The site template chosen at init (`classic` or `atlas`); proposed in plan/site.yaml, where it can still be changed. */
+  template?: 'classic' | 'atlas';
 }
 
 /**
@@ -105,6 +109,8 @@ export interface Session {
     componentPlan?: string;
     urlPlan?: string;
     assetPlan?: string;
+    /** plan/site.yaml as nav applied it: presentation, so a change asks for nav again, not convert. */
+    sitePlan?: string;
     blockExclusions?: string;
     canonicalOutput?: string;
     /** Inputs (snapshot + plans + asset manifest) of the last convert, and its output hash; a repeat over identical inputs proves determinism. */

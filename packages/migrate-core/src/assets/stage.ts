@@ -18,6 +18,8 @@ export interface AssetsStageOptions {
   provider: AssetProviderOptions;
   fetcher?: Fetcher;
   localResolver?: (url: string) => string | undefined;
+  /** A named person decided the pictures stay at their current addresses (`assets --provider none --keep-external --by`). */
+  keepExternal?: { by: string; at: string };
   /** Assets a named person accepted the migration would not carry (plan/scope-decisions.yaml `assets`). */
   excluded?: ReadonlyArray<{ hash?: string; url?: string; reason: string; approvedBy: string; approvedAt?: string }>;
 }
@@ -29,7 +31,7 @@ export interface AssetsStageResult {
 }
 
 const PROVIDER_HINTS: Partial<Record<string, string>> = {
-  none: 'provider none leaves every asset on its source host; exact mode needs --provider s3 or dai-api',
+  none: 'provider none leaves every asset on its source host; exact mode needs --provider s3 or dai-api, or a named person\'s decision to leave the pictures where they are served today: assets --provider none --keep-external --by "<who>"',
   local: 'provider local downloads assets but assigns no hosted URL; exact mode needs --provider s3 or dai-api',
 };
 
@@ -54,6 +56,9 @@ export function assertAssetsHosted(manifest: AssetManifest, stage: string): void
 export async function runAssetsStage(options: AssetsStageOptions): Promise<AssetsStageResult> {
   const collected = await collectAssets(options.docs, options.workspace, { fetcher: options.fetcher, localResolver: options.localResolver, provider: options.provider.provider });
   const manifest = await ingestAssets(collected, options.provider);
+  // only with provider none: a provider that hosts and fails has a failure to fix, not a decision to record
+  if (options.keepExternal && options.provider.provider === 'none') manifest.keptExternal = options.keepExternal; else delete manifest.keptExternal;
+  if (options.keepExternal || collected.keptExternal) writeManifest(options.workspace, manifest);
   // Applied before the gate: an approved exclusion is what lets an unhostable asset through, and
   // applying it after the check would make the approval decorative.
   if (options.excluded?.length) {

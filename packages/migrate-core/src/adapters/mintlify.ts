@@ -78,15 +78,18 @@ export function readMintlifyRepo(rootIn: string): MintlifyRepo {
     // A menu's `item` is what the platform calls a dropdown.
     const kind = (['group', 'tab', 'dropdown', 'product', 'version', 'language', 'menu'] as const).find((key) => typeof node[key] === 'string') ?? (typeof node.anchor === 'string' ? 'menu' : typeof node.item === 'string' ? 'dropdown' : undefined);
     // Hidden from the navigation is not unpublished: the pages migrate and are reported as unlisted.
-    if (node.hidden === true) { for (const k of DIVISIONS) if (k in node) walk(node[k], next); return []; }
+    // The entry keeps the label, kind and place the config gives it, marked hidden, so an operator
+    // who later decides unlisted pages are shown gets them where and as the source states.
+    const hidden = node.hidden === true ? { hidden: true as const } : {};
     if (typeof node.href === 'string' && !DIVISIONS.some((k) => k in node)) {
       if (!label || !kind) throw new Error(`${configFile}: external navigation entry ${node.href} has no supported container label`);
-      return [{ type: 'group', kind, label, ...navigationMetadata(node), children: [] }];
+      return [{ type: 'group', kind, label, ...navigationMetadata(node), ...hidden, children: [] }];
     }
     const children: SourceNavigationNode[] = [];
     for (const k of DIVISIONS) if (k in node) children.push(...walk(node[k], next));
     if (node.global && typeof node.global === 'object') children.push(...walk(node.global, next));
-    return label && children.length ? [{ type: 'group', kind: kind as NavigationContainerKind, label: String(label), ...navigationMetadata(node), children }] : children;
+    if (!label || !children.length) return node.hidden === true ? children.map((child) => ({ ...child, hidden: true as const })) : children;
+    return [{ type: 'group', kind: kind as NavigationContainerKind, label: String(label), ...navigationMetadata(node), ...hidden, children }];
   };
   const navigation = walk(cfg.navigation ?? {}, { group: [] });
 
@@ -99,7 +102,9 @@ export function readMintlifyRepo(rootIn: string): MintlifyRepo {
     if (typeof data?.title === 'string') p.title = data.title;
     if (typeof data?.sidebarTitle === 'string') p.sidebarTitle = data.sidebarTitle;
     if (typeof data?.description === 'string') p.description = data.description;
-    for (const key of ['icon', 'tags', 'badge', 'method'] as const) if (typeof data?.[key] === 'string') p[key] = data[key];
+    for (const key of ['icon', 'tags', 'badge', 'method', 'mode'] as const) if (typeof data?.[key] === 'string') p[key] = data[key];
+    // `tag` is the pill Mintlify draws beside the sidebar title; the platform calls it a badge.
+    if (typeof data?.tag === 'string' && data.tag.trim() && p.badge === undefined) p.badge = data.tag.trim();
   }
 
   // redirects: Mintlify supports :slug, :slug* and a trailing *; the platform supports exact and :param only

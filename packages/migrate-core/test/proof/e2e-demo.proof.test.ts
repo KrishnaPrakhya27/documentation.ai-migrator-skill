@@ -22,7 +22,6 @@ import { ensureWorkspace } from '../../src/session/workspace.js';
 import { canonicalHash, runGates, REQUIRED_RELEASE_GATE_IDS, type GateResult } from '../../src/verify/gates.js';
 import { walkBlocks, type DaiComponentNode, type DocIR } from '../../src/ir/types.js';
 import type { SourceNavigationNode, TreePage } from '../../src/nav/tree.js';
-import { SOURCE_BRANDING_KEYS } from '../../src/nav/site-settings.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
@@ -126,8 +125,8 @@ describe('end-to-end migration of the saved source', () => {
   it('reproduces the site name, groups, order and the page placed in two groups', () => {
     const nav = JSON.parse(readFileSync(join(run.outputDir, 'documentation.json'), 'utf8')) as Record<string, unknown> & { name: string; navigation: Record<string, NavEntry[]> };
     expect(nav.name).toBe(truth.site.name);
-    // The source's branding is not carried: the migrated site shows Documentation.AI's own logo, favicon, colours and theme.
-    for (const key of SOURCE_BRANDING_KEYS) expect(nav[key], `documentation.json carries the source ${key}`).toBeUndefined();
+    // Branding travels only through a reviewed site plan (plan/site.yaml); this run has none, so none is written.
+    for (const key of ['logo', 'logo-dark', 'logo-light', 'logo-small-dark', 'logo-small-light', 'favicon', 'colors', 'theme']) expect(nav[key], `documentation.json carries ${key} with no site plan`).toBeUndefined();
     const top = nav.navigation.groups ?? nav.navigation.pages ?? [];
     expect(top.filter(isGroup).map((entry) => entry.group)).toEqual(truth.navigationHierarchy.filter(isNavigationGroup).map((entry) => entry.group));
     const placements = top.flatMap((entry) => (isGroup(entry) ? entry.pages : [entry]));

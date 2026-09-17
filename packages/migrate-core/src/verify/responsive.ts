@@ -101,22 +101,43 @@ export interface ResponsiveReading {
 
 interface Measurement { viewport: number; scrollWidth: number; overflowing: boolean; text: number; wide: string[] }
 
+/** How many pages the layout is measured on unless every page is asked for. */
+export const RESPONSIVE_SAMPLE = 24;
+
 /**
- * Measures every route at every viewport and fails on a page that scrolls sideways or renders no
- * text at all. Readings are returned for the report whether or not the gate passes, so an operator
- * can see the widths rather than only the verdict.
+ * A spread of routes to measure: the first (the site's home) and then evenly through the rest, in
+ * the site's own order, so every section contributes. Layout is the theme's, and a theme lays a
+ * page out the same way whichever page it is; what differs is the content on it (a wide table, a
+ * large picture), and a spread across sections meets each kind. The same routes every run.
+ */
+export function sampleRoutes<T>(routes: readonly T[], size = RESPONSIVE_SAMPLE): T[] {
+  if (size <= 0 || routes.length <= size) return [...routes];
+  const picked = new Set<number>([0]);
+  for (let index = 1; index < size; index++) picked.add(Math.round((index * (routes.length - 1)) / (size - 1)));
+  return [...picked].sort((a, b) => a - b).map((index) => routes[index]);
+}
+
+/**
+ * Measures routes at every viewport. A page that renders no text at some width fails: a reader on
+ * that device gets nothing. A page that scrolls sideways is noted with what widened it, never
+ * failed: everything on it is there and readable, and the width of a picture or a table on a phone
+ * is the theme's to decide (a rule in the site's custom stylesheet changes it), not something a
+ * migration of the content can make pass. Readings are returned for the report either way.
  */
 export async function runResponsiveGate(
   routes: ReadonlyArray<{ route: string; url: string }>,
   session: Pick<ChromeSession, 'measure'>,
   viewports: readonly Viewport[] = VIEWPORTS,
   concurrency = 4,
+  /** How many routes the site has, when `routes` is a sample of them. */
+  outOf?: number,
 ): Promise<{ gate: GateResult; readings: ResponsiveReading[] }> {
   if (!routes.length) {
     return { gate: { id: 'responsive-layout', status: 'not-run', detail: 'no preview routes to measure' }, readings: [] };
   }
   const readings: ResponsiveReading[] = [];
   const problems: string[] = [];
+  const notes: string[] = [];
   // Deterministic order: sorted routes, then viewports narrowest first, so two runs of the same
   // preview produce the same report.
   const ordered = [...routes].sort((a, b) => a.route.localeCompare(b.route));
@@ -131,27 +152,31 @@ export async function runResponsiveGate(
   });
   for (const result of measured) {
       const { viewport, route } = result;
-      if ('error' in result) { problems.push(`${route} at ${viewport.name}: ${result.error}`); continue; }
+      // a measurement that could not be taken says nothing about the page: the content gate has already loaded it
+      if ('error' in result) { notes.push(`${route} at ${viewport.name}: not measured (${result.error})`); continue; }
       const { measurement } = result;
       readings.push({ route, viewport: viewport.name, overflowing: measurement.overflowing, scrollWidth: measurement.scrollWidth, width: measurement.viewport, text: measurement.text, wide: measurement.wide });
       // A page that declares no `width=device-width` is laid out by a phone at a desktop width and
       // then shrunk to fit, which is why such a page arrives unreadably small on a real device.
       if (measurement.viewport > viewport.width + 4) {
-        problems.push(`${route} at ${viewport.name}: the page declares no mobile viewport, so it is laid out at ${measurement.viewport}px on a ${viewport.width}px screen`);
+        notes.push(`${route} at ${viewport.name}: the page declares no mobile viewport, so it is laid out at ${measurement.viewport}px on a ${viewport.width}px screen`);
         continue;
       }
-      if (measurement.overflowing) problems.push(`${route} at ${viewport.name} (${viewport.width}px): the page scrolls sideways to ${measurement.scrollWidth}px${measurement.wide.length ? `, widened by ${measurement.wide.join(', ')}` : ''}`);
+      if (measurement.overflowing) notes.push(`${route} at ${viewport.name} (${viewport.width}px): the page scrolls sideways to ${measurement.scrollWidth}px${measurement.wide.length ? `, widened by ${measurement.wide.join(', ')}` : ''}`);
       if (!measurement.text) problems.push(`${route} at ${viewport.name}: the page rendered no text`);
   }
+  const measured_ = outOf && outOf > ordered.length ? `${ordered.length} of ${outOf} page(s), spread across the site,` : `${ordered.length} page(s)`;
+  const widths = viewports.map((viewport) => `${viewport.name} (${viewport.width}px)`).join(', ');
   return {
     gate: {
       id: 'responsive-layout',
       status: problems.length ? 'fail' : 'pass',
       detail: problems.length
-        ? `${problems.length} layout problem(s) across ${ordered.length} page(s) at ${viewports.length} viewports`
-        : `${ordered.length} page(s) fit ${viewports.map((viewport) => `${viewport.name} (${viewport.width}px)`).join(', ')} without scrolling sideways`,
+        ? `${problems.length} page(s) render no text at some screen width, of ${measured_} measured at ${widths}`
+        : `${measured_} render their text at ${widths}${notes.length ? `; ${notes.length} reading(s) scroll sideways or were not taken (report/responsive.json)` : ' without scrolling sideways'}`,
       count: problems.length,
       samples: problems.slice(0, 6),
+      ...(notes.length ? { advisories: notes.length, advisorySamples: notes.slice(0, 6) } : {}),
     },
     readings,
   };

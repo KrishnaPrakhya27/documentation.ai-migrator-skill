@@ -4,11 +4,18 @@ description: "Router for Documentation.AI migrations: fingerprints the source (e
 ---
 # Migrate (router)
 
-You are running an internal Documentation.AI migration. Deterministic code does the work; you orchestrate the four standard human gates below and never publish anything the automated checks or a human reviewer rejects.
+You are migrating someone's documentation onto Documentation.AI. Deterministic code does the work; you orchestrate the four human gates below, explain each in plain words to a person who may never have used git, and never publish anything the automated checks or that person rejects. You never approve a gate or accept a finding yourself: those are decisions a named person makes.
 
 ## Before anything
-1. Ask for or confirm: source (URL, export archive, or repo), landing option (`customer-org` or `demo-org`), and an external workspace path. Refuse to run inside this plugin directory.
-2. Run `dai-migrate init --workspace <path> --source <src> --target <customer-org|demo-org> --remote <git url of the repo connected to the target Documentation.AI project> --fidelity exact [--platform <name>] [--export <archive>] --allowed-orgs <owner>`. `--fidelity exact` is the default and the only mode for a customer migration: it certifies the output against the raw acquired source and stops the run rather than shipping a difference (missing published Markdown, an unhostable asset, an authored exclusion, a lost navigation placement, a title the source never stated). Use `--fidelity permissive` only for exploration; it reports the exact-fidelity gates as `not-run` and will not let a preview be pushed without an explicit acceptance. It proves push access to the remote with a dry-run that changes nothing (a missing credential is reported with the exact fix, never discovered after conversion). With `DAI_API_BASE` and `DAI_API_KEY` set it also settles every platform question now: the API key, that the remote is the repository connected to the project (branch sets compared), the live deployment branch, whether previews have been produced before, the media API, and the asset provider to use. Any failed check stops here with the fix named; nothing is written. `report/preflight.json` keeps the result. Ask the user for the remote URL if they do not give it: it is the repository the dashboard created or connected for the project.
+1. Ask for or confirm, in one message, the four things only the person knows:
+   - **the source**: a site URL, an export archive, or a docs repository. For a live site, confirm they have the owner's written permission to crawl it (`--customer-authorised` records it); otherwise ask for an export or the repository.
+   - **how to deliver** (pick one; say what each needs):
+     - *clone flow*: they cloned the repository Documentation.AI created for their project. Ask for the folder. No API key is needed.
+     - *git flow*: they give the repository's git URL. An API key is optional and finds the preview URL.
+     - *MCP flow*: no git at all. Needs `DAI_API_KEY` for their project in the environment; delivery is `publish` instead of `write --push`.
+   - **the template**: `classic` (sidebar layout, the default) or `atlas` (denser navigation, content on a card).
+   - **a workspace folder** outside this plugin directory. Refuse to run inside it.
+2. Run `dai-migrate init --workspace <path> --source <src> (--clone <folder> | --remote <git url> | neither, for the MCP flow) --template <classic|atlas> [--platform <name>] [--export <archive>]`. `--fidelity exact` is the default and the only mode for a real migration: it certifies the output against the raw acquired source and stops the run rather than shipping a difference. `--target` defaults to `customer-org`; only Documentation.AI's own team passes `demo-org`. A team that migrates for several customers lists the organisations it may write to (`--allowed-orgs`, `MIGRATION_ALLOWED_ORGS`); without a list, a migration may write only to the organisation of the repository named here. `init` proves push access with a dry run that changes nothing. With `DAI_API_BASE` and `DAI_API_KEY` set it also checks the project connection, previews and the media API up front; without them those checks are skipped and said so, which is normal for the clone flow. Any failed check stops here with the fix named.
 3. Run `dai-migrate fingerprint`. Read `plan/fingerprint.json`: platform, confidence, signals. If confidence < 0.7 or two platforms score close and the user did not already select a platform, ask which platform it is; never guess on hybrid sites. An explicit user platform selection resolves this exception.
 
 ## Hand-off
@@ -45,6 +52,12 @@ Three platforms need saying at gate 1, because each states its navigation somewh
 - **Pages added after planning.** `plan` keeps an existing `plan/urls.yaml` as the operator wrote it and adds the default entry for every migrating page the tree gained since (a scope exclusion lifted, a page a rerun discovered). A new page whose default route the plan already gives another page is refused with the route named, not renumbered.
 - **A help centre.** `nav --help-center "<container>" --by "<who>"` opens that container on a hub page the platform renders with `<CollectionList>`: its categories as cards, drawn from its own navigation. The page carries no words of the migration's; it is still a page the source never had, so it is recorded on the tree with its approver, applied identically at verification, and named in the customer report. `--hub-path <route>` places it somewhere other than `<container>/index`.
 
+## The look of the site (`plan/site.yaml`)
+
+`plan` reads what the source says about itself (a Mintlify site's embedded `docs.json`, a GitBook page's header and head) and proposes `plan/site.yaml`: brand colour per colour scheme, logo and favicon, the top bar's button and links, site-level SEO statements, the template chosen at `init`, the migration's finishing stylesheet, and whether old addresses redirect. It is presentation, not content, so the person may change anything in it; review it with the other plans at gate 2. `nav` writes it into `documentation.json` under the platform's own keys (`colors.{light,dark}.brand`, `logo-light`, `logo-dark`, `favicon`, `navbar.actions`, `seo`, `template`, `customCss`, `redirects`) and validates the whole file against the platform's published schema (`packages/content-contract/documentation.schema.json`): an unknown key is an error here, because the platform would silently ignore it. Logos and favicons are hosted by `assets` like any picture; one that cannot be hosted is left out and said so. For a demo of someone else's documentation, set `branding.carry: false`.
+
+Know what the platform has and has not: there is **no** footer, banner, font or search setting, so a source's footer links and fonts are listed under `notCarried`, never invented. Navigation entries carry `icon` (Lucide names only; a Font Awesome name is translated, an untranslatable one is left out with a note), `method` (draws the GET/POST badge; written for every page bound to an OpenAPI operation), `badge`, and the layout switches a Mintlify page `mode` implies. Labels are the source's own, letter for letter; a label the source never states (a group derived from a URL) is written in sentence case. Custom CSS loads through `customCss` and may use the platform's stable `dai-*` classes and `--brand`-family variables; the shipped `styles/migration.css` touches only `dai-mig-*` hooks the migration itself wrote.
+
 ## API reference pages
 
 An endpoint page is rendered from a specification, and Documentation.AI renders it from `openapi: api-reference/<spec> METHOD /path` in the page's frontmatter with the spec under `api-reference/`. A Mintlify site's published Markdown restates that as a trailing "OpenAPI" section holding the spec cut to the one operation; the section is read back into the frontmatter, and the spec file is assembled from every page's fragment at `convert`. GitBook's block-form `{% openapi src="<url>" %}` is read the same way, but its spec is a URL: `acquire --openapi <url>` captures it, and `report/openapi-declared.json` lists any the output still lacks. A source's link to a parameter (`#param-<name>`) follows the parameter to the anchor the platform renders (`query-<name>`, `body-<name>`), and the fragment gate counts those anchors.
@@ -58,24 +71,36 @@ An endpoint page is rendered from a specification, and Documentation.AI renders 
 Stop only at these four standard gates. Missing required inputs, ambiguous platform detection and failed automated checks may still require attention, but they are exceptions rather than additional approval gates. Fold platform-specific decisions into gate 1 or 2. Do not ask again for an action already authorized at the relevant gate unless its reviewed artifacts changed.
 
 ## Release sequence
-Run `assets` before `convert`, and run `convert` twice over identical inputs to prove determinism. Generate navigation, then run local `verify` and stop at gate 3 for the operator's review of the output; a failing check is a finding for that review, not a reason to withhold the preview. `write --push` pushes the migration branch once scope and plan (gates 1 and 2) are approved, recording every open finding and any missing gate-3 sign-off in `report/pushed-with-findings.json`; it clones the remote into the workspace if no `--repo` is given, then waits for the platform to build the preview and records the preview URL in the session (a missing deployment is diagnosed: GitHub App repository access, plan without previews, or wrong remote). Re-run `verify --preview`; the preview URL and contract version come from the session. Gate 4 pins `report/preview-gates.json`, `preview-routes.json` and `responsive.json`. After approval, run `release`: it verifies all four approvals against their immutable evidence and writes `report/release-certificate.json`. No cutover is authorised without that certificate.
+Run `assets` before `convert`, and run `convert` twice over identical inputs to prove determinism. Generate navigation, then run local `verify` and stop at gate 3 for the person's review of the output; a failing check is a finding for that review, not a reason to withhold the preview.
+
+Deliver by the flow chosen at the start:
+- **clone or git flow**: `write --push` pushes the migration branch once scope and plan (gates 1 and 2) are approved, recording every open finding in `report/pushed-with-findings.json`. With an API key it waits for the preview and records its URL. Without one it prints where to read it: ask the person to open the dashboard → Deployments → Preview, copy the URL of the migration branch once ready, and give it to you; pass it as `verify --preview-url <url>` (it is remembered).
+- **MCP flow**: `publish` sends the output through the Authoring MCP server onto a working version `migration/<id>`: every file first, then settings and navigation (in steps the platform's drift guard accepts), one publication, then it asks for the preview. It needs the same approvals as a push. A run that stops continues when run again. It never touches the live version; going live is the person merging the working version. Do not send page content through your own MCP tool calls: `publish` does it byte for byte, which is what makes the result certifiable.
+
+Then `verify --preview`. **What it fails and what it only notes matters**: it fails a route only for something a reader would miss (the page does not load, a source passage or heading is nowhere on it, a link on it leads nowhere, a sidebar entry is missing). How the platform draws a page (a language label on a code block, a "required" pill, a caption, reordered request samples, sideways scroll on a phone) is a note in `report/review-queue.md`, never a failure; do not try to "fix" notes. If a route fails, open it on the preview with the person. Either fix the cause and re-run, or, when they have looked and are satisfied, record their decision: `accept --route <route> --reason "<why>" --by "<their name>"`, then `verify --preview` again. Never accept on your own judgement.
+
+Gate 4 pins `report/preview-gates.json`, `preview-routes.json` and `responsive.json`. After approval, run `release`: it verifies all four approvals against their immutable evidence and writes `report/release-certificate.json`. No cutover is authorised without that certificate.
+
+**No image hosting** (no API key, no bucket) is normal in the clone flow. `assets` then stops in exact mode. Explain the choice to the person: host the pictures (media API or an S3/R2 bucket), or leave them at the addresses that serve them today, which works while the old site stays online. If they choose the latter, run `assets --provider none --keep-external --by "<their name>"`; the report states it.
 
 ## Run sequence
 Run every command from the plugin root as `npx dai-migrate <command>`; `dai-migrate` is not installed globally. Every command after `init` takes `--workspace <path>` (or `MIGRATION_WORKSPACE`). Run them in this order; stop at the gate where one is marked.
 
 ```
-dai-migrate init --workspace <path> --source <src> --target <customer-org|demo-org> --remote <git url> --fidelity exact --allowed-orgs <owner>
+dai-migrate init --workspace <path> --source <src> (--clone <folder> | --remote <git url>) --template <classic|atlas>
 dai-migrate fingerprint --workspace <path>
 dai-migrate discover   --workspace <path>          # → plan/tree.yaml            [human gate 1]
 dai-migrate acquire    --workspace <path>          # live sources only
 dai-migrate inventory  --workspace <path>          # → snapshot/, inventory/
-dai-migrate plan       --workspace <path>          # → plan/*.yaml               [human gate 2]
-dai-migrate assets     --workspace <path> --provider <none|local|s3|dai-api>
+dai-migrate plan       --workspace <path>          # → plan/*.yaml, plan/site.yaml [human gate 2]
+dai-migrate assets     --workspace <path> [--provider <none|local|s3|dai-api>]
 dai-migrate convert    --workspace <path>          # run twice, identical inputs
-dai-migrate nav        --workspace <path>          # → output/documentation.json
+dai-migrate nav        --workspace <path>          # → output/documentation.json, output/styles/migration.css
 dai-migrate verify     --workspace <path>          # local gates                 [human gate 3]
-dai-migrate write      --workspace <path> --push   # migration branch + preview
-dai-migrate verify     --workspace <path> --preview                              # [human gate 4]
+dai-migrate write      --workspace <path> --push   # clone/git flow: migration branch + preview
+dai-migrate publish    --workspace <path>          # MCP flow instead: working version + preview
+dai-migrate verify     --workspace <path> --preview [--preview-url <url>]        # [human gate 4]
+dai-migrate accept     --workspace <path> --route <route> --reason "<why>" --by "<who>"   # only a person's decision
 dai-migrate release    --workspace <path>          # → report/release-certificate.json
 dai-migrate report     --workspace <path>
 ```

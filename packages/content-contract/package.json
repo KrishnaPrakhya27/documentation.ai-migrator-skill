@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
-  "exports": { ".": "./src/index.ts", "./contract.json": "./contract.json" },
-  "description": "Authoritative Documentation.AI content contract (components, props, navigation, redirects, anchors) with strict validators"
+  "exports": {
+    ".": "./src/index.ts",
+    "./contract.json": "./contract.json"
+  },
+  "description": "Authoritative Documentation.AI content contract (components, props, navigation, redirects, anchors) with strict validators",
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1"
+  }
 }

@@ -49,7 +49,8 @@ describe('MDX the platform can compile and render', () => {
 describe('a light and a dark copy of one picture', () => {
   it('keeps only the theme-visibility classes, in a fixed order, and reads them back', () => {
     const { written, back } = roundTrip('<img src="https://x.test/light.svg" alt="Hero" className="block dark:hidden pointer-events-none w-full" />\n\n<img src="https://x.test/dark.svg" alt="Hero" className="dark:block hidden w-full" />\n');
-    expect(written).toContain('className="block dark:hidden"');
+    // the first copy takes no pointer events: the source draws it as decoration, and says so to the stylesheet
+    expect(written).toContain('className="block dark:hidden dai-mig-decorative"');
     expect(written).toContain('className="hidden dark:block"');
     expect(written).not.toContain('pointer-events-none');
     const images: string[] = [];
@@ -58,7 +59,22 @@ describe('a light and a dark copy of one picture', () => {
     expect(images).toEqual(['block dark:hidden', 'hidden dark:block']);
   });
 
-  it('writes no className for an image styled only for layout', () => {
-    expect(roundTrip('<img src="https://x.test/a.png" alt="A" className="rounded-xl w-full" />\n').written).not.toContain('className');
+  it('carries none of an image\'s layout classes', () => {
+    const { written } = roundTrip('<img src="https://x.test/a.png" alt="A" className="rounded-xl w-full" />\n');
+    expect(written).not.toMatch(/rounded-xl|w-full/);
+  });
+
+  it('marks an image the source shows without a caption, so the renderer\'s alt-text fallback stays hidden, and only such an image', () => {
+    // alt text is for screen readers; drawn under every picture it was a caption no source page had
+    const fromMintlify = (markdown: string): string => docToMdx(markdownToIr(markdown, { platform: 'mintlify', file: 'f', pageId: 'p' }));
+    expect(fromMintlify('![Dashboard overview](https://x.test/a.png)\n')).toContain('<Image src="https://x.test/a.png" alt="Dashboard overview" className="dai-mig-no-caption" />');
+    expect(fromMintlify('<img src="https://x.test/a.png" alt="Hero" className="block dark:hidden pointer-events-none" />\n')).toContain('className="block dark:hidden dai-mig-decorative dai-mig-no-caption"');
+    // no alt, nothing to fall back to
+    expect(fromMintlify('![](https://x.test/a.png)\n')).not.toContain('className');
+  });
+
+  it('writes a page already in the platform\'s own MDX back byte for byte: there, the alt-text caption is what the author saw', () => {
+    const authored = '---\ntitle: T\n---\n\n<Image src="https://x.test/a.png" alt="Dashboard" />\n\n<Image src="https://x.test/b.png" alt="Migrated" className="dai-mig-no-caption" />\n';
+    expect(docToMdx(markdownToIr(authored, { platform: 'dai', file: 'p.mdx', pageId: 'p' }))).toBe(authored);
   });
 });

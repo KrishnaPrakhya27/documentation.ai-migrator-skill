@@ -34,7 +34,11 @@ export function writeReviewQueue(workspace: string, gates: GateResult[], cluster
   const lines: string[] = ['# Review queue', ''];
   const failed = gates.filter((g) => !gateSatisfied(g));
   lines.push(`## Gates: ${failed.length ? `${failed.length} failing or not run` : 'all passing'}`, '');
-  for (const g of gates) lines.push(`- **${g.id}** — ${g.status.toUpperCase()}: ${g.detail}${g.samples?.length ? `\n  - ${g.samples.join('\n  - ')}` : ''}`);
+  for (const g of gates) {
+    lines.push(`- **${g.id}** — ${g.status.toUpperCase()}: ${g.detail}${g.samples?.length ? `\n  - ${g.samples.join('\n  - ')}` : ''}`);
+    // how the platform draws a page: listed so it can be looked at, never counted as a failure
+    if (g.advisories) lines.push(`  - _${g.advisories} note(s), not failures:_${g.advisorySamples?.length ? `\n    - ${g.advisorySamples.join('\n    - ')}` : ''}`);
+  }
   lines.push('', '## Component clusters needing review', '');
   const needs = clusters.filter((c) => (planStatus[c.signature.hash] ?? 'needs-review') === 'needs-review');
   if (!needs.length) lines.push('_none_');

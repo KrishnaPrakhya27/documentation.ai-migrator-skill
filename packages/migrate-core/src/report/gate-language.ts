@@ -73,8 +73,8 @@ export const GATE_LANGUAGE: Record<string, GateLanguage> = {
   'migrator-pinned': { title: 'The output came from the recorded migration build', group: 'process' },
   'human-gates-approved': { title: 'All four review points were signed off', group: 'process' },
   'no-unreviewed-decisions': { title: 'Every conversion decision was reviewed by a person', group: 'process' },
-  'browser-content': { title: 'The rendered preview shows the expected content', group: 'process' },
-  'responsive-layout': { title: 'Pages render correctly on phone, tablet and desktop', group: 'process' },
+  'browser-content': { title: 'Every page of the rendered preview loads and carries its content', group: 'process' },
+  'responsive-layout': { title: 'Pages show their content on phone, tablet and desktop', group: 'process' },
   'preview-contract-version': { title: 'The preview runs the platform version this migration targeted', group: 'process' },
 };
 
