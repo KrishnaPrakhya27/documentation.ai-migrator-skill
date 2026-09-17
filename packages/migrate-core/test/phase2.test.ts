@@ -14,7 +14,7 @@ import { markdownAlternateUrl, parseLlmsIndex, parseLlmsTxt, publishedMarkdownPr
 import { acquirePages, acquiredPath, type AcquiredPage } from '../src/scrape/acquire.js';
 import { sha256 } from '../src/session/ids.js';
 import { offlineFetcher, syntheticSiteFetcher } from './helpers/fixture-fetcher.js';
-import { ingestAssets, s3StorageFromEnv, s3StorageProblems, storageFilename, type S3StorageOptions } from '../src/assets/providers.js';
+import { assetFoldersElsewhere, ingestAssets, s3StorageFromEnv, s3StorageProblems, storageFilename, type S3StorageOptions } from '../src/assets/providers.js';
 import { sanitizeSvgBytes, writeManifest, readManifest, rewriteAssetRefs, type AssetManifest } from '../src/assets/manifest.js';
 import { writeCutoverArtifacts, canonicalUrl, runSearchCanary, writeDefaultSeoPlan } from '../src/report/cutover.js';
 import { remoteOrg, assertRemoteAllowed } from '../src/write/migration-branch.js';
@@ -1158,6 +1158,25 @@ describe('asset providers', () => {
     await expect(ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: absent, dai: { baseUrl: 'https://api.example', token: 't' } })).rejects.toThrow(/not available.*404/);
     // no per-asset failure was recorded: the manifest is untouched
     expect(readManifest(w).entries.abc.status).toBe('downloaded');
+  });
+  it('stores an asset again when the migration now goes into another project: storage is filed per project', async () => {
+    // A real MCP-flow run chose its project at publish, after assets had run on whatever
+    // DAI_DOCUMENTATION_ID said: one project's 44 pictures ended up in another project's folder,
+    // where the media library does not list them and deleting that project deletes them.
+    const w = ws(); const sent: any[] = [];
+    const client = { send: async (cmd: any) => { sent.push(cmd.input.Key); return {}; } };
+    let m = await ingestAssets(manifestWith(w), { workspace: w, provider: 's3', s3Client: client, s3: storage() });
+    expect(assetFoldersElsewhere(m, 'o1', 'd1')).toEqual([]);
+    expect(assetFoldersElsewhere(m, 'o1', 'd2')).toEqual(['org-o1/doc-d1']);
+    // same project again: nothing is sent twice
+    m = await ingestAssets(readManifest(w), { workspace: w, provider: 's3', s3Client: client, s3: storage() });
+    expect(sent).toEqual(['org-o1/doc-d1/abc-x.png']);
+    // the project changed: stored again under it, and the page address follows
+    m = await ingestAssets(readManifest(w), { workspace: w, provider: 's3', s3Client: client, s3: { ...storage(), documentationId: 'd2' } });
+    expect(sent).toEqual(['org-o1/doc-d1/abc-x.png', 'org-o1/doc-d2/abc-x.png']);
+    expect(m.entries.abc).toMatchObject({ status: 'ingested', storagePath: 'org-o1/doc-d2/abc-x.png' });
+    expect(m.entries.abc.finalUrl).toContain('/org-o1/doc-d2/');
+    expect(assetFoldersElsewhere(m, 'o1', 'd2')).toEqual([]);
   });
   it('retries a failed entry that still has local bytes, and never leaves the manifest unwritten', async () => {
     const w = ws();

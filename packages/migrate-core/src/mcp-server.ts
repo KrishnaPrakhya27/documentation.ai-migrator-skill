@@ -23,7 +23,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 /** Stages and review commands a host may run. `mcp` itself is not among them. */
-export const RUNNABLE = ['init', 'fingerprint', 'discover', 'approve', 'acquire', 'inventory', 'plan', 'assets', 'convert', 'nav', 'verify', 'write', 'publish', 'accept', 'release', 'report', 'rebase'] as const;
+export const RUNNABLE = ['init', 'project', 'fingerprint', 'discover', 'approve', 'acquire', 'inventory', 'plan', 'assets', 'convert', 'nav', 'verify', 'write', 'publish', 'accept', 'release', 'report', 'rebase'] as const;
 /** Folders of a workspace a host may read for review. The sealed source, the snapshot and the repository clone are not review material. */
 const READABLE = ['plan', 'report', 'quarantine'];
 const MAX_OUTPUT = 24_000;

@@ -125,8 +125,9 @@ npx dai-migrate init --workspace $W --source https://docs.acme.com --remote git@
 
 # MCP flow: no git and no key. init needs no --clone or --remote, and publish replaces write --push
 npx dai-migrate init    --workspace $W --source https://docs.acme.com --customer-authorised
+npx dai-migrate project --workspace $W                 # opens your browser to sign in; records which project this goes into
 #   … the same stages …
-npx dai-migrate publish --workspace $W                 # opens your browser to sign in, then publishes
+npx dai-migrate publish --workspace $W                 # signs in again, then publishes into that project
 ```
 
 `publish` opens your browser so you can sign in to Documentation.AI, exactly as an assistant does when it connects to the MCP server. The sign-in is held in memory for that run and never written anywhere. If your account can edit several projects, name the one you mean with `--project "<name>"`; it is remembered for this migration. Then it sends every file, then the settings and navigation, and publishes a working version `migration/<id>` once. Documentation.AI builds that version's preview by itself: open the project in the dashboard, switch to the working version, copy the preview address from the Save menu (or from Deployments → Preview), and pass it to `verify --preview-url`.
@@ -254,6 +255,7 @@ The report keeps the finding with your name beside it. Options: `--renderer chro
 | Stage | What it does | Writes |
 | --- | --- | --- |
 | `init` | creates the workspace, records the build, checks that you can push | `session.json`, `report/preflight.json` |
+| `project` | MCP flow: signs you in and records which project the migration goes into, so you know at the start that you can edit it, and hosted pictures are filed under it | `session.json` |
 | `fingerprint` | works out which platform the source is | `plan/fingerprint.json` |
 | `discover` | finds every page and the source's own navigation | `plan/tree.yaml`, `source-cache/source-manifest.json` |
 | `acquire` | seals a copy of each page; `--openapi <url>` captures an API specification | `source-cache/acquired/` |

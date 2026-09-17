@@ -24,6 +24,7 @@ The person should be able to run a whole migration by clicking. Wherever your en
    - **Name for the approvals**: the `git config user.name` value first, then "Other".
    Do not ask for the workspace: use `~/migrations/<site-name>` (never inside this plugin directory), say so in one line, and use another folder only if the person says so. For the clone flow, ask for the clone's folder in one plain line afterwards.
 2. Run `dai-migrate init --workspace <path> --source <src> (--clone <folder> | --remote <git url> | neither, for the MCP flow) --template <classic|atlas> [--platform <name>] [--export <archive>]`. `--fidelity exact` is the default and the only mode for a real migration: it certifies the output against the raw acquired source and stops the run rather than shipping a difference. `--target` defaults to `customer-org`; only Documentation.AI's own team passes `demo-org`. A team that migrates for several customers lists the organisations it may write to (`--allowed-orgs`, `MIGRATION_ALLOWED_ORGS`); without a list, a migration may write only to the organisation of the repository named here. `init` proves push access with a dry run that changes nothing. With `DAI_API_KEY` set (the API address defaults to the public platform; `DAI_API_BASE` overrides it) it also checks the project connection, previews and the media API up front; without them those checks are skipped and said so, which is normal for the clone flow. Any failed check stops here with the fix named.
+   **MCP flow only: run `dai-migrate project` straight after `init`.** It opens the person's browser to sign in (tell them to look for it) and records which Documentation.AI project the migration goes into. If it stops and lists several projects, ask which one, with the projects as the options, and run it again with `--project "<name>"`. Doing this first means the person learns now, not after an hour's work, whether their account can edit the project, and it is what files hosted pictures under the right project: storage is filed per project, and `assets --provider s3` refuses to run in the MCP flow until the project is chosen. `publish` later signs in again (the sign-in is never stored) and goes to the same project.
 3. Run `dai-migrate fingerprint`. Read `plan/fingerprint.json`: platform, confidence, signals. If confidence < 0.7 or two platforms score close and the user did not already select a platform, ask which platform it is; never guess on hybrid sites. An explicit user platform selection resolves this exception.
 
 ## Hand-off
@@ -102,6 +103,7 @@ Run every command from the plugin root as `npx dai-migrate <command>`; `dai-migr
 
 ```
 dai-migrate init --workspace <path> --source <src> (--clone <folder> | --remote <git url>) --template <classic|atlas>
+dai-migrate project    --workspace <path>          # MCP flow only: sign in, choose the project
 dai-migrate fingerprint --workspace <path>
 dai-migrate discover   --workspace <path>          # → plan/tree.yaml            [human gate 1]
 dai-migrate acquire    --workspace <path>          # live sources only

@@ -47,6 +47,10 @@ Commands (run in order; the workflow has exactly four standard human gates):
                a branch already pushed is evidence and is never rewritten
                --allow-lossy (permissive sessions) records the unproven exactness gates as waived in report/lossy-push.json
                a failing gate never withholds the push, in any mode: it is recorded in report/pushed-with-findings.json and blocks release
+  project      [--project "<name or id>"]
+               MCP flow, right after init: opens your browser to sign in to Documentation.AI and records which project this
+               migration goes into (the only one you can edit, or the one named). It tells you at the start whether your account
+               can edit the project, and it is what files hosted pictures under the right project.
   publish      [--project "<name or id>"] [--branch <working version>] [--remove-old-pages] [--no-wait] [--preview-timeout min]
                the MCP flow, instead of write --push: sends the output straight into your Documentation.AI project through the
                Authoring MCP server. No git and no API key: it opens your browser to sign in to Documentation.AI, the same way

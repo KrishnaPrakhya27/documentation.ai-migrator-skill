@@ -18,6 +18,27 @@ import { fileURLToPath } from 'node:url';
 const temp = (): string => mkdtempSync(join(tmpdir(), 'dai-clone-flow-'));
 const git = (cwd: string, args: string[], env?: NodeJS.ProcessEnv): string => execFileSync('git', args, { cwd, env: env ?? process.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
+describe('the MCP flow chooses its project before pictures are hosted', () => {
+  it('refuses to file pictures under whichever project the environment names, and says what to run first', () => {
+    const repo = fileURLToPath(new URL('../../../', import.meta.url));
+    const root = temp(); const source = join(root, 'source'); mkdirSync(source);
+    writeFileSync(join(source, 'SUMMARY.md'), '# Table of contents\n\n* [Welcome](README.md)\n');
+    writeFileSync(join(source, 'README.md'), '# Welcome\n\nStart here.\n');
+    const workspace = join(root, 'ws');
+    // storage fully configured, as on the team's machines, with another project's id left in the environment
+    const storageEnv = { CLOUDFLARE_ACCOUNT_ID: 'acct', R2_ACCESS_KEY_ID: 'k', R2_SECRET_ACCESS_KEY: 's', R2_IMAGES_BUCKET_NAME: 'images', MEDIA_IMAGE_CDN_BASE: 'https://img.example', DAI_ORGANIZATION_ID: 'org-from-env', DAI_DOCUMENTATION_ID: 'doc-from-env' };
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(DAI_|MIGRATION_|FIRECRAWL_|README_|R2_|AWS_|CLOUDFLARE_|MEDIA_)/.test(key))), ...storageEnv, MIGRATION_WORKSPACE: workspace };
+    const cli = (...args: string[]): string => {
+      try { return execFileSync(process.execPath, [join(repo, 'node_modules/tsx/dist/cli.mjs'), join(repo, 'packages/migrate-core/src/cli.ts'), ...args], { cwd: repo, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
+      catch (error) { const failed = error as { stdout?: string; stderr?: string }; throw new Error(`${failed.stdout ?? ''}${failed.stderr ?? ''}`); }
+    };
+    // no --clone and no --remote: this migration will be published through the MCP server
+    cli('init', '--source', source, '--platform', 'gitbook');
+    for (const [stage, ...rest] of [['discover'], ['approve', '--gate', '1', '--by', 'owner'], ['acquire'], ['inventory'], ['plan'], ['approve', '--gate', '2', '--by', 'owner']]) cli(stage, ...rest);
+    expect(() => cli('assets', '--provider', 's3')).toThrow(/project this migration goes into is not chosen yet[\s\S]*dai-migrate project --workspace/);
+  }, 240_000);
+});
+
 describe('migrating into your own clone, with no API key', () => {
   it('takes the remote from the clone, scopes the write to its organisation, builds the branch there and says where the preview URL comes from', () => {
     const repo = fileURLToPath(new URL('../../../', import.meta.url));

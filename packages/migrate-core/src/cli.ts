@@ -98,7 +98,7 @@ import { walkBlocks, inlineText, renderedText as anchorText, type Block } from '
 import { applyBlockExclusions, assertExclusionsPermitted, blockExclusionsPath, readBlockExclusions, unmatchedBlockExclusions } from './ir/exclusions.js';
 import { describeUnreadableDimension, unreadableImageDimensions } from './ir/dimensions.js';
 import { readManifest, referenceTally, rewriteAssetRefs, dropExcludedAssets, d360MediaResolver, resolveAssetUrl, SITE_BRANDING_PAGE } from './assets/manifest.js';
-import { s3StorageFromEnv, s3StorageProblems, type AssetProviderOptions } from './assets/providers.js';
+import { assetFoldersElsewhere, s3StorageFromEnv, s3StorageProblems, type AssetProviderOptions } from './assets/providers.js';
 import { assertAssetsHosted, runAssetsStage, UnhostedAssetsError, type AssetsStageResult } from './assets/stage.js';
 import { runGates, canonicalHash, gateSatisfied, previewPushBlockers, releaseBlockers, waivedExactnessGates, type GateResult, type SourceEvidence } from './verify/gates.js';
 import { loadRawSourcePages, rawSourceIr, type RawSourcePage } from './verify/source-truth.js';
@@ -1171,6 +1171,13 @@ async function main() {
         dai: provider === 'dai-api' ? { baseUrl: process.env.DAI_API_BASE ?? '', token: process.env.DAI_API_KEY ?? '' } : undefined,
       };
       if (provider === 's3') {
+        // Hosted pictures are filed per project. In the MCP flow the project is an account's choice,
+        // not something the environment knows: left to DAI_DOCUMENTATION_ID, a real run filed one
+        // project's 44 pictures under another project's folder.
+        const mcpFlow = !s.target.repoRemote && !s.target.cloneDir && !process.env.DAI_API_KEY;
+        if (mcpFlow && !s.target.documentationId) fail(`the project this migration goes into is not chosen yet, so the pictures would be filed under whichever project DAI_DOCUMENTATION_ID names. Choose it first: dai-migrate project --workspace ${workspace}`);
+        const fromSession = !!s.target.organizationId && !!s.target.documentationId;
+        console.log(`· pictures are stored under org-${providerOptions.s3!.organizationId}/doc-${providerOptions.s3!.documentationId} (${fromSession ? `the project chosen for this migration${s.target.projectName ? `, "${s.target.projectName}"` : ''}` : 'from DAI_ORGANIZATION_ID and DAI_DOCUMENTATION_ID'})`);
         const problems = s3StorageProblems(providerOptions.s3!);
         if (problems.length) fail(`s3 provider cannot write Documentation.AI media storage: ${problems.join('; ')}`);
         const unset = (['video', 'files'] as const).filter((kind) => !providerOptions.s3!.buckets[kind]?.bucket);
@@ -1710,6 +1717,30 @@ async function main() {
       if (effectiveBlockers) process.exitCode = 2;
       break;
     }
+    case 'project': {
+      // Which Documentation.AI project this migration goes into, settled at the start of the MCP
+      // flow instead of at `publish`. Two things depend on it long before anything is sent: the
+      // person finds out now, not after an hour's work, whether their account can edit the project;
+      // and hosted pictures are filed per project, so `assets` has to know which one.
+      const workspace = ws(); const s = readSession(workspace);
+      const mcpUrl = process.env.DAI_MCP_URL ?? DEFAULT_MCP_URL;
+      let signedIn: string;
+      try { signedIn = (await signInWithBrowser({ mcpUrl, log: (message) => console.log(`  · ${message}`) })).accessToken; }
+      catch (error) { fail(`could not sign in to Documentation.AI: ${(error as Error).message}`); }
+      const client = new McpClient({ url: mcpUrl, token: signedIn, clientVersion: CORE_VERSION });
+      await client.connect();
+      try {
+        const listing = await client.call<Parameters<typeof writableProjects>[0]>('list_projects', {});
+        const chosen = chooseProject(writableProjects(listing.structured), v.project, s.target.documentationId);
+        const changed = !!s.target.documentationId && s.target.documentationId !== chosen.documentationId;
+        Object.assign(s.target, { organizationId: chosen.organizationId, documentationId: chosen.documentationId, projectName: chosen.name }); writeSession(workspace, s);
+        ok(`this migration goes into "${chosen.name}" in ${chosen.organizationName} (${chosen.documentationId}); your role there: ${chosen.role}`);
+        const elsewhere = assetFoldersElsewhere(readManifest(workspace), chosen.organizationId, chosen.documentationId);
+        if (elsewhere.length) console.log(`  · pictures already hosted for this migration are filed under ${elsewhere.join(', ')}${changed ? ', the project chosen before' : ''}: run assets again so they are stored under this project, then convert, nav and verify`);
+      } catch (error) { fail((error as Error).message); }
+      finally { await client.close(); }
+      break;
+    }
     case 'mcp': {
       // The migrator as a local MCP server (stdio), for hosts without a shell of their own.
       await serveStdio({ pluginRoot: PLUGIN_ROOT, cliEntry: fileURLToPath(import.meta.url), version: CORE_VERSION });
@@ -1747,6 +1778,9 @@ async function main() {
           const chosen = chooseProject(writableProjects(listing.structured), v.project, s.target.documentationId);
           project = { organizationId: chosen.organizationId, documentationId: chosen.documentationId };
           Object.assign(s.target, { organizationId: chosen.organizationId, documentationId: chosen.documentationId, projectName: chosen.name }); writeSession(workspace, s);
+          // pictures filed under another project would show, and would vanish with that project
+          const elsewhere = assetFoldersElsewhere(readManifest(workspace), chosen.organizationId, chosen.documentationId);
+          if (elsewhere.length) throw new Error(`the pictures of this migration are stored under another project's folder (${elsewhere.join(', ')}), not under "${chosen.name}" (doc-${chosen.documentationId}). They would show today and be lost if that project is deleted. The project is now recorded for this migration: run assets again (it stores them under "${chosen.name}"), then convert twice, nav and verify, approve, and publish`);
           console.log(`  · publishing into "${chosen.name}" in ${chosen.organizationName}, on a working version of its own; the live site is not touched`);
         } catch (error) { await client.close(); fail((error as Error).message); }
       }

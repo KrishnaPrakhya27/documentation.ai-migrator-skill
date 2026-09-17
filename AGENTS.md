@@ -38,6 +38,7 @@ In short:
 
 ```
 npm run dai-migrate -- init --workspace <path> --source <url|path> (--clone <folder> | --remote <git url>) --template <classic|atlas>
+npm run dai-migrate -- project     --workspace <path>     # MCP flow only: sign in, choose the project
 npm run dai-migrate -- fingerprint --workspace <path>
 npm run dai-migrate -- discover    --workspace <path>     # human gate 1
 npm run dai-migrate -- acquire     --workspace <path>

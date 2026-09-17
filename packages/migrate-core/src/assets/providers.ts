@@ -226,6 +226,12 @@ async function ingestS3(entry: AssetEntry, opts: S3StorageOptions, s3: Pick<S3Cl
   return { url: platformPublicUrl(target.publicBase, path, media.storage), storagePath: path };
 }
 
+/** The project folders (`org-<id>/doc-<id>`) this migration's hosted assets are filed under, other than the given project's. Empty when everything is where it belongs. */
+export function assetFoldersElsewhere(manifest: AssetManifest, organizationId: string, documentationId: string): string[] {
+  const folder = storagePath(organizationId, documentationId, '');
+  return [...new Set(Object.values(manifest.entries).filter((entry) => entry.status === 'ingested' && !!entry.storagePath && !entry.storagePath.startsWith(folder)).map((entry) => entry.storagePath!.split('/').slice(0, 2).join('/')))].sort();
+}
+
 /** Ingest downloaded assets idempotently and checkpoint after every object. */
 export async function ingestAssets(manifest: AssetManifest, options: AssetProviderOptions): Promise<AssetManifest> {
   manifest.provider = options.provider;
@@ -236,8 +242,14 @@ export async function ingestAssets(manifest: AssetManifest, options: AssetProvid
   }
   if (options.provider === 's3' && !options.s3) throw new Error('S3 provider configuration is missing');
   let s3: Pick<S3Client, 'send'> | undefined = options.s3Client;
+  // Platform storage is filed per project (`org-<id>/doc-<id>/…`): the media library lists a
+  // project's folder, and deleting a project deletes it. An asset stored while this migration
+  // pointed at another project is therefore stored again under the one it goes into now.
+  const folder = options.provider === 's3' && options.s3 ? storagePath(options.s3.organizationId, options.s3.documentationId, '') : undefined;
   for (const entry of Object.values(manifest.entries)) {
-    if (entry.status === 'ingested') continue;
+    const filedElsewhere = !!folder && entry.status === 'ingested' && !!entry.storagePath && !entry.storagePath.startsWith(folder);
+    if (filedElsewhere && !entry.localPath) { entry.status = 'failed'; entry.error = `stored under another project (${entry.storagePath!.split('/').slice(0, 2).join('/')}) and the downloaded original is gone, so it cannot be stored again; run assets with --refresh`; continue; }
+    if (entry.status === 'ingested' && !filedElsewhere) continue;
     if (entry.status === 'failed' && !entry.localPath) continue; // nothing to retry without bytes
     if (options.provider === 'none') { entry.status = 'kept-external'; continue; }
     if (options.provider === 'local') { if (entry.localPath) entry.status = 'downloaded'; continue; }
