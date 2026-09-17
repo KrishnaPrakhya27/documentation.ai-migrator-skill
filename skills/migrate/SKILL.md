@@ -84,7 +84,7 @@ Gate 4 pins `report/preview-gates.json`, `preview-routes.json` and `responsive.j
 **No image hosting** (no API key, no bucket) is normal in the clone flow. `assets` then stops in exact mode. Explain the choice to the person: host the pictures (media API or an S3/R2 bucket), or leave them at the addresses that serve them today, which works while the old site stays online. If they choose the latter, run `assets --provider none --keep-external --by "<their name>"`; the report states it.
 
 ## Run sequence
-Run every command from the plugin root as `npx dai-migrate <command>`; `dai-migrate` is not installed globally. Every command after `init` takes `--workspace <path>` (or `MIGRATION_WORKSPACE`). Run them in this order; stop at the gate where one is marked.
+Run every command from the plugin root as `npx dai-migrate <command>`; `dai-migrate` is not installed globally. The plugin root is the folder that holds `skills/` and `packages/`, two levels above this file; it is not the folder the person has open. If it has no `node_modules`, run `npm install` in it once before the first command. Every command after `init` takes `--workspace <path>` (or `MIGRATION_WORKSPACE`). Run them in this order; stop at the gate where one is marked.
 
 ```
 dai-migrate init --workspace <path> --source <src> (--clone <folder> | --remote <git url>) --template <classic|atlas>

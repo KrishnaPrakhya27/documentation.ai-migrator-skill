@@ -1,6 +1,6 @@
 {
   "name": "documentation-ai-migration",
-  "description": "Internal Documentation.AI migration skills for supported documentation platforms.",
+  "description": "Skills and a deterministic command line for migrating documentation sites onto Documentation.AI.",
   "owner": { "name": "Documentation.AI" },
   "plugins": [
     {
