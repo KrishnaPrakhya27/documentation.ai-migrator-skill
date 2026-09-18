@@ -42,6 +42,8 @@ export interface AssetEntry {
   storagePath?: string;
   status: 'pending' | 'downloaded' | 'ingested' | 'kept-external' | 'failed';
   error?: string;
+  /** Something a reviewer should know about a hosted asset, such as the source serving a newer copy than was captured. */
+  note?: string;
   altMissing: number;
   sanitized?: boolean;
   /**

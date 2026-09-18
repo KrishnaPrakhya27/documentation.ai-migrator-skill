@@ -24,7 +24,7 @@ The person should be able to run a whole migration by clicking. Wherever your en
    - **Name for the approvals**: the `git config user.name` value first, then "Other".
    Do not ask for the workspace: use `~/migrations/<site-name>` (never inside this plugin directory), say so in one line, and use another folder only if the person says so. For the clone flow, ask for the clone's folder in one plain line afterwards.
 2. Run `dai-migrate init --workspace <path> --source <src> (--clone <folder> | --remote <git url> | neither, for the MCP flow) --template <classic|atlas> [--platform <name>] [--export <archive>]`. `--fidelity exact` is the default and the only mode for a real migration: it certifies the output against the raw acquired source and stops the run rather than shipping a difference. `--target` defaults to `customer-org`; only Documentation.AI's own team passes `demo-org`. A team that migrates for several customers lists the organisations it may write to (`--allowed-orgs`, `MIGRATION_ALLOWED_ORGS`); without a list, a migration may write only to the organisation of the repository named here. `init` proves push access with a dry run that changes nothing. With `DAI_API_KEY` set (the API address defaults to the public platform; `DAI_API_BASE` overrides it) it also checks the project connection, previews and the media API up front; without them those checks are skipped and said so, which is normal for the clone flow. Any failed check stops here with the fix named.
-   **MCP flow only: run `dai-migrate project` straight after `init`.** It opens the person's browser to sign in (tell them to look for it) and records which Documentation.AI project the migration goes into. If it stops and lists several projects, ask which one, with the projects as the options, and run it again with `--project "<name>"`. Doing this first means the person learns now, not after an hour's work, whether their account can edit the project, and it is what files hosted pictures under the right project: storage is filed per project, and `assets --provider s3` refuses to run in the MCP flow until the project is chosen. `publish` later signs in again (the sign-in is never stored) and goes to the same project.
+   **MCP flow only: run `dai-migrate project` straight after `init`.** It opens the person's browser to sign in (tell them to look for it) and records which Documentation.AI project the migration goes into. If it stops and lists several projects, ask which one, with the projects as the options, and run it again with `--project "<name>"`. Doing this first means the person learns now, not after an hour's work, whether their account can edit the project, and it is what files hosted pictures under the right project: `assets` hosts them there through the same sign-in, so it needs the project chosen first. `publish` later signs in again (the sign-in is never stored) and goes to the same project.
 3. Run `dai-migrate fingerprint`. Read `plan/fingerprint.json`: platform, confidence, signals. If confidence < 0.7 or two platforms score close and the user did not already select a platform, ask which platform it is; never guess on hybrid sites. An explicit user platform selection resolves this exception.
 
 ## Hand-off
@@ -94,7 +94,7 @@ Then `verify --preview`. **What it fails and what it only notes matters**: it fa
 
 Gate 4 pins `report/preview-gates.json`, `preview-routes.json` and `responsive.json`. After approval, run `release`: it verifies all four approvals against their immutable evidence and writes `report/release-certificate.json`. No cutover is authorised without that certificate.
 
-**No image hosting** (no API key, no bucket) is normal in the clone flow. `assets` then stops in exact mode. Explain the choice to the person: host the pictures (media API or an S3/R2 bucket), or leave them at the addresses that serve them today, which works while the old site stays online. If they choose the latter, run `assets --provider none --keep-external --by "<their name>"`; the report states it.
+**Pictures** are hosted through the person's sign-in by default (`--provider dai-mcp`): tell them their browser opens, as for `project` and `publish`. Documentation.AI fetches each picture from its public address and the migration checks the size against its captured copy. If `assets` stops listing pictures it could not host, each line says why. Offer the choice with options: "Upload the captured copies with the project API key" (set `DAI_API_KEY` and `DAI_API_BASE`, run `assets` again; it only sends what is left), or "Keep those pictures where they are served today" (`assets --provider none --keep-external --by "<their name>"`, which works while the old site stays online). A re-run never sends a picture twice.
 
 ## Run sequence
 Run every command from the plugin root as `npx dai-migrate <command>`; `dai-migrate` is not installed globally. The plugin root is the folder that holds `skills/` and `packages/`, two levels above this file; it is not the folder the person has open. If it has no `node_modules`, run `npm install` in it once before the first command.
@@ -111,7 +111,7 @@ dai-migrate discover   --workspace <path>          # → plan/tree.yaml         
 dai-migrate acquire    --workspace <path>          # live sources only
 dai-migrate inventory  --workspace <path>          # → snapshot/, inventory/
 dai-migrate plan       --workspace <path>          # → plan/*.yaml, plan/site.yaml [human gate 2]
-dai-migrate assets     --workspace <path> [--provider <none|local|s3|dai-api>]
+dai-migrate assets     --workspace <path> [--provider <dai-mcp|dai-api|s3|none|local>]
 dai-migrate convert    --workspace <path>          # run twice, identical inputs
 dai-migrate nav        --workspace <path>          # → output/documentation.json, output/styles/migration.css
 dai-migrate verify     --workspace <path>          # local gates                 [human gate 3]
@@ -150,7 +150,7 @@ would change (different pages), because that is a new capture rather than a new 
 Use this only when the user explicitly asks for a test or exploratory migration, or asks to skip asset hosting or push checks. Never for a customer release.
 
 - `init ... --fidelity permissive` instead of `--fidelity exact`.
-- `assets --provider none` when asset hosting is not available; permissive mode leaves assets on the source host instead of stopping.
+- `assets --provider none --keep-external` only when a named person decides the pictures stay where they are served today; permissive mode leaves unhosted assets on the source host instead of stopping.
 - `write --push --allow-lossy` to push the migration branch and get a preview. It records the exactness gates a permissive run leaves unproven as waived in `report/lossy-push.json`; a gate that failed is recorded in `report/pushed-with-findings.json`, as in every mode, and blocks release rather than the push.
 - Say plainly in your summary that the result is not a certified migration and must not be released to a customer.
 

@@ -124,8 +124,8 @@ export async function preflight(opts: PreflightOptions): Promise<PreflightResult
   // 2. platform, via the API key
   if (!opts.daiApiKey || !opts.daiApiBase) {
     checks.push({ id: 'dai-api', status: 'not-checked', detail: 'DAI_API_KEY not configured; platform checks skipped (repo-branch writer only, no preview discovery)' });
-    target.assetProvider = opts.s3Configured ? 's3' : 'none';
-    checks.push({ id: 'asset-provider', status: 'ok', detail: `assets will use --provider ${target.assetProvider}${target.assetProvider === 'none' ? ' (images keep source URLs; release stays blocked until an ingestion provider exists)' : ''}` });
+    target.assetProvider = opts.s3Configured ? 's3' : 'dai-mcp';
+    checks.push({ id: 'asset-provider', status: 'ok', detail: `assets will use --provider ${target.assetProvider}${target.assetProvider === 'dai-mcp' ? ' (pictures are hosted through your Documentation.AI sign-in; files with no public address need a project API key)' : ''}` });
     return { checks, target };
   }
 
@@ -178,9 +178,9 @@ export async function preflight(opts: PreflightOptions): Promise<PreflightResult
     // media: decides the asset provider
     const media = await api.mediaAvailable();
     target.mediaApiAvailable = media.available;
-    target.assetProvider = media.available ? 'dai-api' : opts.s3Configured ? 's3' : 'none';
-    checks.push({ id: 'media-api', status: media.available ? 'ok' : 'not-checked', detail: media.available ? 'API-key media upload available' : `GET /api/v1/media → ${media.status}; API-key media upload is not available on this environment (platform dependency G7)` });
-    checks.push({ id: 'asset-provider', status: 'ok', detail: `assets will use --provider ${target.assetProvider}${target.assetProvider === 'none' ? ' (images keep source URLs; set the Cloudflare R2 credentials and R2_IMAGES_BUCKET_NAME or wait for the media API to release)' : ''}` });
+    target.assetProvider = media.available ? 'dai-api' : opts.s3Configured ? 's3' : 'dai-mcp';
+    checks.push({ id: 'media-api', status: media.available ? 'ok' : 'not-checked', detail: media.available ? 'API-key media upload available' : `GET /api/v1/media → ${media.status}; API-key media upload is not available on this environment` });
+    checks.push({ id: 'asset-provider', status: 'ok', detail: `assets will use --provider ${target.assetProvider}${target.assetProvider === 'dai-mcp' ? ' (pictures are hosted through your Documentation.AI sign-in)' : ''}` });
   } catch (e) {
     checks.push({ id: 'dai-api', status: 'fail', detail: `cannot reach DAI API: ${(e as Error).message}` });
   }

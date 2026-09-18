@@ -44,7 +44,7 @@ npm run dai-migrate -- discover    --workspace <path>     # human gate 1
 npm run dai-migrate -- acquire     --workspace <path>
 npm run dai-migrate -- inventory   --workspace <path>
 npm run dai-migrate -- plan        --workspace <path>     # human gate 2 (includes plan/site.yaml, the site's look)
-npm run dai-migrate -- assets      --workspace <path> [--provider <none|local|s3|dai-api>]
+npm run dai-migrate -- assets      --workspace <path> [--provider <dai-mcp|dai-api|s3|none|local>]
 npm run dai-migrate -- convert     --workspace <path>     # twice
 npm run dai-migrate -- nav         --workspace <path>
 npm run dai-migrate -- verify      --workspace <path>     # human gate 3

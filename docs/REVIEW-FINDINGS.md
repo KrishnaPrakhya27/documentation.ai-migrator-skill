@@ -36,7 +36,7 @@ Phase 2 modules reviewed in the same pass:
 |---|---|---|
 | asset providers | Failed entries were never retried on a later run | Fixed: retried when local bytes exist |
 | discovery | `truncated` was false when the limit refused candidates but the queue drained | Fixed: counts refusals |
-| dai-api provider | Targets the dashboard's session-authenticated presign and confirm endpoints; an API-key bearer will be rejected until the platform ships a migration credential path. Failures are recorded and the `assets-ready` gate blocks release | Documented boundary |
+| dai-api provider | Rewritten 2026-09-18 for the platform's real `POST /api/v1/media` multipart route; the presign endpoints it targeted were never built. `dai-mcp` (sign-in, `import_media`) is now the key-free default | Resolved, pending platform deploy |
 | discovery | Crawls serially at the fetcher's rate; 5,000 pages at 2 rps is ~40 minutes | Accepted for now |
 
 Open, by design or pending platform work: parser-based contract validation (3), preview search index, `contentContractVersion` exposure, atomic bulk write session, API-key asset ingestion, wildcard redirects, custom heading anchors.

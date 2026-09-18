@@ -1125,37 +1125,58 @@ describe('asset providers', () => {
     expect(failed.entries.clip).toMatchObject({ status: 'failed', error: expect.stringMatching(/set R2_VIDEOS_BUCKET_NAME/) });
     expect(storageFilename({ hash: 'f'.repeat(64), sourceUrls: ['https://cdn.example/'] }, 'png')).toBe(`${'f'.repeat(16)}-asset.png`);
   });
-  it('dai-api: presign → PUT → confirm, and reuses an existing upload on 409', async () => {
-    const w = ws(); const calls: string[] = [];
+  /** A stand-in for POST /api/v1/media: one result per file part, in the order sent. */
+  const mediaApiStandIn = (answer: (names: string[]) => { status: number; results: any[] }) => {
+    const posts: Array<{ names: string[]; auth: string }> = [];
     const fetchImpl = (async (input: any, init?: any) => {
-      const url = String(input); calls.push(`${init?.method ?? 'GET'} ${url}`);
-      if (url === 'https://api.example/api/v1/media?limit=1') return new Response(JSON.stringify({ images: [] }), { status: 200 }); // probe
-      if (url === 'https://api.example/api/v1/media/upload-url') return new Response(JSON.stringify({ uploadUrl: 'https://r2.example/signed', storagePath: 'org-1/doc-1/abc.png' }), { status: 200 });
-      if (url === 'https://r2.example/signed') return new Response('', { status: 200 });
-      if (url === 'https://api.example/api/v1/media/confirm') return new Response(JSON.stringify({ image: { publicUrl: 'https://blob-cdn.example/org-1/doc-1/abc.png' } }), { status: 200 });
-      return new Response('nope', { status: 404 });
-    }) as unknown as typeof fetch;
-    const m = await ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl, dai: { baseUrl: 'https://api.example', token: 't' } });
-    expect(m.entries.abc.finalUrl).toBe('https://blob-cdn.example/org-1/doc-1/abc.png');
-    expect(calls.map((c) => c.split(' ')[0])).toEqual(['GET', 'POST', 'PUT', 'POST']);
-    // 409 on presign → look up the existing object by hash
-    const dup = (async (input: any) => {
       const url = String(input);
-      if (url === 'https://api.example/api/v1/media?limit=1') return new Response(JSON.stringify({ images: [] }), { status: 200 });
-      if (url.endsWith('/upload-url')) return new Response('exists', { status: 409 });
-      if (url.includes('/api/v1/media?search=')) return new Response(JSON.stringify({ images: [{ fileHash: 'abc', publicUrl: 'https://blob-cdn.example/existing.png' }] }), { status: 200 });
+      if (url === 'https://api.example/api/v1/media?limit=1') return new Response(JSON.stringify({ media: [] }), { status: 200 });
+      if (url === 'https://api.example/api/v1/media' && init?.method === 'POST') {
+        const names = [...(init.body as FormData).getAll('files')].map((file: any) => file.name);
+        posts.push({ names, auth: init.headers.authorization });
+        const { status, results } = answer(names);
+        return new Response(JSON.stringify({ results }), { status });
+      }
       return new Response('nope', { status: 404 });
     }) as unknown as typeof fetch;
-    const w2 = ws();
-    const m2 = await ingestAssets(manifestWith(w2), { workspace: w2, provider: 'dai-api', fetchImpl: dup, dai: { baseUrl: 'https://api.example', token: 't' } });
-    expect(m2.entries.abc.finalUrl).toBe('https://blob-cdn.example/existing.png');
+    return { fetchImpl, posts };
+  };
+  const stored = (url: string, status = 'added') => ({ source: 'x', status, media: { url, sizeBytes: 3 } });
+
+  it('dai-api: uploads the captured bytes as multipart form data and records the hosted URL', async () => {
+    const w = ws();
+    const api = mediaApiStandIn(() => ({ status: 200, results: [stored('https://blob-cdn.example/org-o1/doc-d1/1-x.png')] }));
+    const m = await ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: api.fetchImpl, dai: { baseUrl: 'https://api.example', token: 't' }, sleep: async () => {} });
+    expect(api.posts).toEqual([{ names: ['x.png'], auth: 'Bearer t' }]);
+    expect(m.entries.abc).toMatchObject({ status: 'ingested', finalUrl: 'https://blob-cdn.example/org-o1/doc-d1/1-x.png', storagePath: 'org-o1/doc-d1/1-x.png' });
   });
-  it('dai-api: fails fast with the platform-dependency reason when the media API rejects the key or is absent', async () => {
+  it('dai-api: a file the platform already holds comes back reused, and counts as hosted', async () => {
+    const w = ws();
+    const api = mediaApiStandIn(() => ({ status: 200, results: [stored('https://blob-cdn.example/org-o1/doc-d1/existing.png', 'reused')] }));
+    const m = await ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: api.fetchImpl, dai: { baseUrl: 'https://api.example', token: 't' }, sleep: async () => {} });
+    expect(m.entries.abc).toMatchObject({ status: 'ingested', finalUrl: 'https://blob-cdn.example/org-o1/doc-d1/existing.png' });
+  });
+  it('dai-api: records a refused file with the platform\'s reason', async () => {
+    const w = ws();
+    const api = mediaApiStandIn(() => ({ status: 415, results: [{ source: 'x.png', status: 'failed', error: 'Unsupported file type', statusCode: 415 }] }));
+    const m = await ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: api.fetchImpl, dai: { baseUrl: 'https://api.example', token: 't' }, sleep: async () => {} });
+    expect(m.entries.abc).toMatchObject({ status: 'failed', error: 'Unsupported file type' });
+  });
+  it('dai-api: waits and retries a file refused for rate alone', async () => {
+    const w = ws(); let call = 0; const waits: number[] = [];
+    const api = mediaApiStandIn(() => (++call === 1
+      ? { status: 429, results: [{ source: 'x.png', status: 'failed', error: 'Too many files stored for this organization. Retry in 7 seconds.', statusCode: 429 }] }
+      : { status: 200, results: [stored('https://blob-cdn.example/org-o1/doc-d1/1-x.png')] }));
+    const m = await ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: api.fetchImpl, dai: { baseUrl: 'https://api.example', token: 't' }, sleep: async (ms) => { waits.push(ms); } });
+    expect(m.entries.abc.status).toBe('ingested');
+    expect(waits).toContain(7000);
+  });
+  it('dai-api: fails fast with the real reason when the media API rejects the key or is absent', async () => {
     const w = ws();
     const rejects = (async () => new Response('Authentication required', { status: 401 })) as unknown as typeof fetch;
-    await expect(ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: rejects, dai: { baseUrl: 'https://api.example', token: 't' } })).rejects.toThrow(/dashboard sessions only.*G7.*--provider s3/s);
+    await expect(ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: rejects, dai: { baseUrl: 'https://api.example', token: 't' } })).rejects.toThrow(/rejected the API key.*revoked/s);
     const absent = (async () => new Response('', { status: 404 })) as unknown as typeof fetch;
-    await expect(ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: absent, dai: { baseUrl: 'https://api.example', token: 't' } })).rejects.toThrow(/not available.*404/);
+    await expect(ingestAssets(manifestWith(w), { workspace: w, provider: 'dai-api', fetchImpl: absent, dai: { baseUrl: 'https://api.example', token: 't' } })).rejects.toThrow(/not available.*404.*dai-mcp/s);
     // no per-asset failure was recorded: the manifest is untouched
     expect(readManifest(w).entries.abc.status).toBe('downloaded');
   });

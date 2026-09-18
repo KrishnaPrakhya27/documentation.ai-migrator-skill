@@ -256,3 +256,13 @@ migration proposed 53 icons, `verify` passed every gate including `navigation-ex
 failure is `migrator-pinned`, which every re-run against a newer build fails), and a second `nav`
 produced the identical file by sha256. The same pass over the captured 400-page Mintlify workspace
 adds 487 icons beside the 24 the source states, with no schema issue.
+
+## 2026-09-18 — pictures are hosted through the sign-in, with no key and no bucket
+
+Until now only Documentation.AI's own team could host pictures (`--provider s3`, the platform's storage keys). A customer on their own could only leave pictures at their current addresses, because the platform had no upload route for a key or a sign-in and the Authoring MCP server had no media tool. The platform now has both (backend `feature/media-mcp`, not yet deployed), and the migrator uses them.
+
+`assets --provider dai-mcp`, now the default whenever no bucket is configured, signs in as `project` and `publish` do and hosts each picture through the MCP tool `import_media`, ten per call: the platform fetches the file from its public address itself and runs a dashboard upload's checks on it. Each stored file's size is compared with the captured copy; in exact mode a difference is refused, since the hosted file would not be the one certified. A picture with no public https address, a cleaned SVG, a file the platform could not fetch, or a size difference goes as captured bytes through `POST /api/v1/media` when `DAI_API_KEY` and `DAI_API_BASE` are set, and otherwise fails naming the reason. Batches are paced under the platform's 120 files a minute per organisation, and a file refused for rate is retried after the wait the platform names. Hosted URLs record their `org-<id>/doc-<id>` storage path, so a change of project re-hosts them exactly as with `s3`.
+
+`dai-api` targeted presign and confirm endpoints that were never built; it now uses the real multipart route, matching results by order. The backend's `import_media` gained a `source` field on each stored file so results can be matched to what was sent.
+
+Proved through the real CLI on a copy of the 41-page GitBook migration (44 pictures) against a stand-in for the MCP server and the REST route that answers in their real shapes: five batches of at most ten, one rate-limited file retried after the named wait, one changed file and one unfetchable file refused with their reasons; a second run with a key uploaded exactly those two as captured bytes; a third run sent nothing. Convert, nav and verify then passed `assets-ready` with 43 platform-hosted URLs in the pages and none on the source host. **Not yet proven against the live platform**, which does not have the media tools until the backend is deployed.

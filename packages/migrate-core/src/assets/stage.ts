@@ -31,8 +31,9 @@ export interface AssetsStageResult {
 }
 
 const PROVIDER_HINTS: Partial<Record<string, string>> = {
-  none: 'provider none leaves every asset on its source host; exact mode needs --provider s3 or dai-api, or a named person\'s decision to leave the pictures where they are served today: assets --provider none --keep-external --by "<who>"',
-  local: 'provider local downloads assets but assigns no hosted URL; exact mode needs --provider s3 or dai-api',
+  none: 'provider none leaves every asset on its source host; exact mode needs --provider dai-mcp (a sign-in), dai-api (a project API key) or s3, or a named person\'s decision to leave the pictures where they are served today: assets --provider none --keep-external --by "<who>"',
+  local: 'provider local downloads assets but assigns no hosted URL; exact mode needs --provider dai-mcp, dai-api or s3',
+  'dai-mcp': 'dai-mcp hosts what the platform can fetch from a public address; a file with none, or one the source now serves differently, needs a project API key (DAI_API_KEY and DAI_API_BASE) to upload the captured copy',
 };
 
 export class UnhostedAssetsError extends Error {

@@ -57,7 +57,7 @@ In every flow Documentation.AI builds a preview of what was delivered by itself,
 | A Documentation.AI project and an account that can edit it | the target. No API key is needed in any flow; one is optional and only saves you copying the preview address |
 | Permission to read the source | **written permission from the site's owner before crawling a live site**, or use an export or the docs repository instead |
 | Chrome or Chromium (optional) | measures phone and tablet layout on the preview, and prints the PDF report. Everything else works without it |
-| Image hosting (optional) | the Documentation.AI media API or an S3/R2 bucket. Without either, pictures stay at the addresses that serve them today, and the report says so |
+| Nothing extra for pictures | they are hosted in your project through the same sign-in. The project's API key is needed only for a picture with no public address, or one the source now serves differently |
 
 ---
 
@@ -134,7 +134,7 @@ npx dai-migrate publish --workspace $W                 # signs in again, then pu
 
 If `publish` stops half-way, run it again and it continues. Pages your project had before are taken out of the navigation (so they are no longer served) and left in place; `--remove-old-pages` deletes them. Go live by merging the working version in the dashboard. On a machine nobody sits at, set `DAI_API_KEY` to the project's key instead of signing in; with a key the preview address is looked up for you.
 
-**No image hosting?** With no API key and no bucket, run `assets --provider none --keep-external --by "Your Name"`. Pictures stay at the addresses that serve them today and keep working while those stay online. The report reminds you to upload them before the old site is switched off.
+**Pictures.** With no API key, `assets` hosts your pictures in the chosen project through your sign-in (`--provider dai-mcp`, the default): Documentation.AI fetches each one from the address it is published at, ten at a time, and checks it against the copy the migration captured. A picture with no public address, or one the source now serves differently, needs the project's API key (`DAI_API_KEY` and `DAI_API_BASE`) to upload the captured copy; without it, `assets` names those pictures and stops. You can instead keep all the pictures where they are served today with `assets --provider none --keep-external --by "Your Name"`; they keep working while the old site stays online, and the report reminds you to move them before it is switched off.
 
 ---
 
@@ -355,7 +355,7 @@ Keep credentials in the environment. No credential is ever written to a file, lo
 | `refused until scope and plan are approved` | decisions 1 and 2 are not recorded, or lapsed because a plan changed | review, then `approve --gate 1` / `--gate 2 --by "…"` |
 | `human-gates-approved` fails after a re-run | the tree or a plan changed since the approval | review and approve again |
 | `migrator-pinned` fails | this tool changed since `init` | `rebase --reason "…"`, then `discover --offline` and continue |
-| `assets stopped: exact mode requires a hosted URL` | no image hosting is configured | set up the media API or a bucket, or `assets --provider none --keep-external --by "…"` |
+| `assets stopped: exact mode requires a hosted URL` | some pictures could not be hosted through the sign-in | the reason is listed per picture; set `DAI_API_KEY` and `DAI_API_BASE` to upload the captured copies, or `assets --provider none --keep-external --by "…"` |
 | `browser-content` fails | a page of the preview is missing something a reader would look for | open `report/review-queue.md`, look at the page, then fix it or `accept` it |
 | `publish` stops with `duplicate_path` | the platform refuses a navigation that lists one page twice through the MCP server | deliver with `write --push` instead, or place the page once at decision 1 |
 | the "Learn" link in a dropdown opens `/null` | a link-only dropdown or menu item; the platform's renderer needs a fix | the preview check names these; report it to Documentation.AI |

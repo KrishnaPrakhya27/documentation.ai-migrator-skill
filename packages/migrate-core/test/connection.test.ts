@@ -29,7 +29,7 @@ describe('preflight: connection is settled at init', () => {
     expect(byId['connected-repo'].status).toBe('ok');
     expect(byId['contract-version'].status).toBe('ok');
     expect(byId['media-api'].status).toBe('not-checked'); // /media is 404 on this environment
-    expect(r.target).toMatchObject({ repoRemote: base.target.repoRemote, deploymentBranch: 'main', connectedRepoVerified: true, contractVersionAssumed: true, assetProvider: 'none', previewsSeen: false, mediaApiAvailable: false });
+    expect(r.target).toMatchObject({ repoRemote: base.target.repoRemote, deploymentBranch: 'main', connectedRepoVerified: true, contractVersionAssumed: true, assetProvider: 'dai-mcp', previewsSeen: false, mediaApiAvailable: false });
     expect(r.checks.some((c) => c.status === 'fail')).toBe(false);
   });
   it('fails when the remote is a different repository than the one connected to the project', async () => {
@@ -45,7 +45,7 @@ describe('preflight: connection is settled at init', () => {
     const bad = await preflight({ ...base, fetchImpl: api({ '/config': 401 }), listRemote: remote(['main']) });
     expect(bad.checks.find((x) => x.id === 'dai-api')!.detail).toMatch(/invalid, revoked/);
   });
-  it('picks dai-api when the media API answers, s3 when configured, else none; uses the exposed contract version when present', async () => {
+  it('picks dai-api when the media API answers, s3 when configured, else dai-mcp; uses the exposed contract version when present', async () => {
     const withMedia = api({ '/config': { branch: 'main', contentContractVersion: loadContract().contractVersion }, '/branches': { branches: [{ name: 'main' }] }, '/deployments': { deployments: [{ deploymentId: 'p', status: 'ready', isPreview: true, branch: 'migration/x' }] }, '/media': { images: [] } });
     const r = await preflight({ ...base, fetchImpl: withMedia, listRemote: remote(['main']) });
     expect(r.target.assetProvider).toBe('dai-api');

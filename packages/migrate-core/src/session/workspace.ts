@@ -43,7 +43,7 @@ export interface SessionTarget {
   pushAccessVerified?: boolean;
   previewsSeen?: boolean;
   mediaApiAvailable?: boolean;
-  assetProvider?: 'none' | 'local' | 's3' | 'dai-api';
+  assetProvider?: 'none' | 'local' | 's3' | 'dai-api' | 'dai-mcp';
   /** True when the environment does not expose contentContractVersion and the pinned version is assumed at verify. */
   contractVersionAssumed?: boolean;
   /** Discovered after write --push by polling /api/v1/deployments. */

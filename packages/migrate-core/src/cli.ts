@@ -1149,7 +1149,7 @@ async function main() {
       const assetPlanPath = join(workspace, 'plan', 'assets.yaml');
       const assetPlan = existsSync(assetPlanPath) ? (parseYaml(readFileSync(assetPlanPath, 'utf8')) as { provider?: string }) : {};
       const provider = v.provider ?? assetPlan.provider ?? s.target.assetProvider ?? 'local';
-      if (!['none', 'local', 's3', 'dai-api'].includes(provider)) fail(`unsupported asset provider ${provider}`);
+      if (!['none', 'local', 's3', 'dai-api', 'dai-mcp'].includes(provider)) fail(`unsupported asset provider ${provider}`);
       // Asset CDNs are often cross-host. The Fetcher still rejects private
       // addresses and never sends source credentials across origins.
       const fetcher = new Fetcher(networkOptions(workspace, s));
@@ -1169,8 +1169,35 @@ async function main() {
         workspace,
         provider: provider as AssetProviderOptions['provider'],
         s3: provider === 's3' ? s3StorageFromEnv(process.env, s.target) : undefined,
-        dai: provider === 'dai-api' ? { baseUrl: process.env.DAI_API_BASE ?? '', token: process.env.DAI_API_KEY ?? '' } : undefined,
+        dai: provider === 'dai-api' || (provider === 'dai-mcp' && process.env.DAI_API_KEY && process.env.DAI_API_BASE)
+          ? { baseUrl: process.env.DAI_API_BASE ?? '', token: process.env.DAI_API_KEY ?? '' }
+          : undefined,
+        fidelityMode,
       };
+      // dai-mcp: the platform fetches each picture from its public address, signed in as the person
+      // migrating, so no key or bucket is needed. A key, when set, also carries files with no address.
+      let mcpClient: McpClient | undefined;
+      if (provider === 'dai-mcp') {
+        const apiKey = process.env.DAI_API_KEY;
+        if (!apiKey && !s.target.documentationId) fail(`the project these pictures go into is not chosen yet. Choose it first: dai-migrate project --workspace ${workspace}`);
+        const mcpUrl = process.env.DAI_MCP_URL ?? DEFAULT_MCP_URL;
+        let token = apiKey;
+        if (!token) {
+          try { token = (await signInWithBrowser({ mcpUrl, log: (message) => console.log(`  · ${message}`) })).accessToken; }
+          catch (error) { fail(`could not sign in to Documentation.AI: ${(error as Error).message}`); }
+        }
+        mcpClient = new McpClient({ url: mcpUrl, token: token!, clientVersion: CORE_VERSION });
+        await mcpClient.connect();
+        if (!(await mcpClient.listTools()).includes('import_media')) {
+          await mcpClient.close();
+          fail('this Documentation.AI server does not offer media import yet (no import_media tool). Use --provider none --keep-external --by "<who>" to keep the pictures where they are served today, or --provider dai-api with a project API key');
+        }
+        providerOptions.mcp = {
+          client: mcpClient,
+          ...(apiKey ? {} : { project: { organizationId: s.target.organizationId!, documentationId: s.target.documentationId! } }),
+        };
+        console.log(`  · hosting pictures in ${s.target.projectName ? `"${s.target.projectName}"` : 'the project this key belongs to'} through the Authoring MCP server${providerOptions.dai ? '; files it cannot fetch are uploaded from the captured copy with the API key' : ''}`);
+      }
       if (provider === 's3') {
         // Hosted pictures are filed per project. In the MCP flow the project is an account's choice,
         // not something the environment knows: left to DAI_DOCUMENTATION_ID, a real run filed one
@@ -1192,14 +1219,19 @@ async function main() {
         if (!(error instanceof UnhostedAssetsError)) throw error;
         markStage(workspace, 'assets', 'failed', `${error.entries.length} assets without a hosted URL`);
         fail(error.message);
+      } finally {
+        await mcpClient?.close();
       }
       const entries = Object.values(result.manifest.entries);
       markStage(workspace, 'assets', 'done');
       ok(`${entries.length} assets (${referenceTally(result.manifest) || 'no references'}) via ${provider}: ${entries.filter((e) => e.status === 'ingested').length} ingested, ${entries.filter((e) => e.status === 'downloaded').length} local, ${entries.filter((e) => e.status === 'kept-external').length} kept external, ${entries.filter((e) => e.status === 'failed').length} failed; ${entries.reduce((n, e) => n + e.altMissing, 0)} references without alt`);
       const excludedEntries = entries.filter((e) => e.excluded);
       for (const entry of excludedEntries) console.log(redact(`· not carried by decision (${entry.excluded!.approvedBy}): ${entry.sourceUrls[0]} — ${entry.excluded!.reason}`));
-      if (provider === 'local') console.log('· provider local: release remains blocked until dai-api or s3 assigns final URLs');
-      if (result.manifest.keptExternal) console.log(`· pictures stay at the addresses that serve them today, by decision of ${result.manifest.keptExternal.by}: they show for as long as those addresses stay online. Upload them to Documentation.AI (or rerun assets with --provider s3 or dai-api) before the old site is switched off`);
+      if (provider === 'local') console.log('· provider local: release remains blocked until dai-mcp, dai-api or s3 assigns final URLs');
+      const noted = entries.filter((e) => e.note);
+      for (const entry of noted.slice(0, 5)) console.log(redact(`· ${entry.sourceUrls[0]}: ${entry.note}`));
+      if (noted.length > 5) console.log(`· ${noted.length - 5} more notes in plan/assets.json`);
+      if (result.manifest.keptExternal) console.log(`· pictures stay at the addresses that serve them today, by decision of ${result.manifest.keptExternal.by}: they show for as long as those addresses stay online. Host them on Documentation.AI (rerun assets with --provider dai-mcp) before the old site is switched off`);
       break;
     }
     case 'convert': {

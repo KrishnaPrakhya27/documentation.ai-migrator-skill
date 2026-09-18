@@ -112,6 +112,12 @@ export class McpClient {
     await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, false);
   }
 
+  /** The tools this server offers the session, to find out before relying on one whether this server has it. */
+  async listTools(): Promise<string[]> {
+    const result = await this.request('tools/list', {}) as { tools?: Array<{ name: string }> } | undefined;
+    return (result?.tools ?? []).map((tool) => tool.name);
+  }
+
   /** Calls one tool. A tool that reports failure (`isError`) throws with the server's own words, which name what to fix. */
   async call<T = Record<string, unknown>>(tool: string, args: Record<string, unknown>): Promise<ToolResult<T>> {
     const result = await this.request('tools/call', { name: tool, arguments: args }) as { content?: Array<{ type: string; text?: string }>; structuredContent?: T; isError?: boolean } | undefined;

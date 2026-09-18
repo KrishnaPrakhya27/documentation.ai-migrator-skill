@@ -1,87 +1,27 @@
-# Platform dependency G7: API-key media upload
+# Platform dependency G7: hosting pictures without Documentation.AI's own storage keys
 
-Owner: backend (WS-A). **Implemented on 10 September 2026 as a working-tree change in `documentation-ai-backend`** (`src/modules/rest-api/media.routes.ts`, schemas in `restApi.schema.ts`, registered under `/api/v1/media`, tests in `__tests__/media.permissions.vitest.ts`); pending review, commit and deploy. Until it is deployed, migrations use `--provider s3` or `--provider none`; `init` detects availability automatically.
+**Built on 18 September 2026** in `documentation-ai-backend` on `feature/media-mcp`, not yet merged or deployed. Until it is deployed, `assets --provider dai-mcp` stops with a message saying the server has no media import, and `dai-api` reports the media API as unavailable. Use `--provider none --keep-external --by "<who>"` meanwhile.
 
-The same change exposes `contentContractVersion` on `GET /api/v1/config` (constant in `src/config/contentContract.ts`, must match the package's `contractVersion`), which closes the second blocker: `verify --preview` stops assuming the version once the environment reports it.
+The earlier design in this file (an API-key presign and confirm pair, plus `contentContractVersion` on `GET /api/v1/config`) was never merged. The contract version is still not exposed, so `verify --preview` keeps assuming it. What shipped instead:
 
-## The gap, verified
+## What the migrator uses
 
-The backend has two authentication surfaces:
+| Provider | Authenticates with | Platform surface | Carries |
+|---|---|---|---|
+| `dai-mcp` | Browser sign-in (or `DAI_API_KEY`) | Authoring MCP tool `import_media`, 10 URLs per call | Files the platform can fetch from their public https address |
+| `dai-api` | `DAI_API_KEY` + `DAI_API_BASE` | `POST /api/v1/media`, multipart, 10 files per request | The captured bytes, for anything |
 
-| Prefix | Auth | Media routes |
-|---|---|---|
-| `/api/v1/*` | API key (`requireApiKey`, key bound to one documentation, roles viewer/editor/admin) | none |
-| `/organizations/:org/documentation/:doc/images/*` | dashboard session (`requireAuth` via Clerk) | presign, confirm, multipart, list, replace, delete |
+`dai-mcp` falls back to `dai-api` for a file with no public address, a cleaned SVG, a file the platform could not fetch, or (exact mode) one the source now serves at a different size, when a key is set. Without a key those files fail with that reason, and the person decides.
 
-Probing with a valid API key: the session route answers `401 Authentication required`; `/api/v1/...images` answers `404`. No header scheme changes that, because the session route never consults the API-key table.
+## What the platform guarantees
 
-## The change
+- Every path runs the same checks as a dashboard upload: type read from the bytes, SVG screening, the plan's per-file size, the storage quota, and deduplication by content (a re-run gets `reused`, not a second copy).
+- A taken name gets a suffix (`diagram-2.png`) instead of a refusal.
+- One result per file. `import_media` names each stored file's `source` URL; the REST route answers in the order sent, with `207` when some files failed.
+- 120 files a minute per organisation across the API and MCP. A file past that fails with `Retry in N seconds`; the migrator paces itself under it and retries.
 
-Expose the existing image service under the API-key surface. No new storage logic; the service already enforces quota, magic-byte checks, SVG screening and dedupe at `confirm`.
+## How to check a deployment
 
-New file `src/modules/rest-api/media.routes.ts`:
-
-```ts
-import { FastifyInstance } from 'fastify';
-import { requireRole, type ApiKeyRequest } from '../../hooks/apiKeyAuth';
-import { buildUploadRateLimitConfig } from '../../hooks/rateLimit';
-import * as imagesService from '../documentation/images/images.service';
-import { ApiKeysRepository } from '../api-keys/apiKeys.repository';
-import type { GenerateUploadUrlRequest, ConfirmUploadRequest, ListImagesQuery } from '../documentation/images/images.types';
-
-/**
- * API-key media surface. The key is bound to one documentation, so the org and
- * documentation come from the key context, never from the request. Uploads are
- * attributed to the user who created the key.
- */
-export default async function mediaRoutes(fastify: FastifyInstance) {
-  const actor = async (ctx: ApiKeyRequest['apiKeyContext']) => {
-    const key = await ApiKeysRepository.findById(ctx!.keyId);
-    return key!.createdBy;
-  };
-
-  fastify.get('/', async (request: ApiKeyRequest) => {
-    const ctx = request.apiKeyContext!;
-    requireRole(ctx, 'viewer');
-    return imagesService.listImages(ctx.organizationId, ctx.documentationId, request.query as ListImagesQuery);
-  });
-
-  fastify.post('/upload-url', { config: { rateLimit: buildUploadRateLimitConfig() } }, async (request: ApiKeyRequest, reply) => {
-    const ctx = request.apiKeyContext!;
-    requireRole(ctx, 'editor');
-    const result = await imagesService.generateImageUploadUrl(ctx.organizationId, ctx.documentationId, await actor(ctx), request.body as GenerateUploadUrlRequest);
-    return reply.status(200).send(result);
-  });
-
-  fastify.post('/confirm', async (request: ApiKeyRequest, reply) => {
-    const ctx = request.apiKeyContext!;
-    requireRole(ctx, 'editor');
-    const result = await imagesService.confirmImageUpload(ctx.organizationId, ctx.documentationId, await actor(ctx), request.body as ConfirmUploadRequest);
-    return reply.status(201).send(result);
-  });
-}
-```
-
-Register it inside `restApiRoutes` (which already applies `requireApiKey` and the per-key rate limit):
-
-```ts
-// src/modules/rest-api/restApi.routes.ts
-import mediaRoutes from './media.routes';
-// ...inside restApiRoutes, after the preHandler:
-await fastify.register(mediaRoutes, { prefix: '/media' });
-```
-
-Notes for the implementer:
-
-- `buildUploadRateLimitConfig` keys on `params.organizationId`, which is absent here; pass `ctx.organizationId` through a small wrapper or key on `ctx.keyId` so the presign limiter still applies.
-- `ApiKeysRepository.findById` may not exist yet; `findActiveByHash` returns `createdBy`, so either extend the repository or carry `createdBy` in `ApiKeyContext`.
-- The media audit log records `actorUserId`; attributing to the key creator keeps the audit trail honest. If a dedicated "API key" actor type is preferred, add it to `media_audit_log.actor_type` first.
-- Storage quota, plan limits and dedupe are unchanged: they live in `confirmImageUpload`.
-- The migrator calls exactly `GET /api/v1/media?limit=1` (probe), `POST /api/v1/media/upload-url`, `PUT <signed url>`, `POST /api/v1/media/confirm`, and `GET /api/v1/media?search=<name>` on a 409.
-
-## Verification
-
-1. Create an editor API key for a documentation on a Standard plan.
-2. `curl -H "authorization: Bearer $KEY" https://api.documentationai.app/api/v1/media?limit=1` returns 200.
-3. `dai-migrate assets --provider dai-api` on a workspace with downloaded assets reports them as `ingested` with `blob-cdn.documentation.ai` URLs, and the media library in the dashboard shows them under the key's documentation.
-4. A viewer key gets 403 on `upload-url`.
+1. `dai-migrate project --workspace <w>`, then `dai-migrate assets --workspace <w> --provider dai-mcp` on a workspace with downloaded assets: every asset `ingested`, and `plan/assets.json` records `org-<id>/doc-<id>/…` storage paths.
+2. The dashboard's media library for that project lists them, and its Activity panel names the person who signed in.
+3. Running `assets` again sends nothing.
