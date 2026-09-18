@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { parse as parseYaml, stringify as toYaml } from 'yaml';
 import type { NavbarLink, SiteBranding } from '../scrape/site-branding.js';
 import { hexColor } from '../scrape/site-branding.js';
+import { ICON_POLICIES, type IconPolicy } from './icon-suggest.js';
 
 export interface SitePlan {
   branding: {
@@ -29,6 +30,12 @@ export interface SitePlan {
   seo?: Record<string, string | boolean>;
   /** `classic` (sidebar layout) or `atlas` (denser navigation, content on a card). */
   template?: 'classic' | 'atlas';
+  /**
+   * Sidebar icons. `suggested` proposes one from an entry's own title wherever the source states
+   * none, which is how documentation written on the platform reads; `source` writes only what the
+   * source states; `none` writes no icon at all.
+   */
+  icons?: IconPolicy;
   /** Ship `styles/migration.css`: the few rules that finish what the migration wrote (badges, images without captions). */
   stylesheet: boolean;
   /** Old addresses redirect to the pages that replace them, through the platform's own `redirects` setting. */
@@ -49,6 +56,11 @@ const HEADER = `# How the migrated site presents itself. None of this is content
 #   branding.logo / favicon   source URLs; the assets stage hosts them, and nav writes the hosted URL
 #   navbar           primary is the call-to-action button; links are the top bar's other links
 #   template         classic | atlas
+#   icons            sidebar icons: suggested | source | none
+#                    suggested proposes one from each entry's own title where the source states none,
+#                    which is how documentation written on the platform reads. An icon the source
+#                    states is always kept as it states it. Set source to carry only those, or none
+#                    for a sidebar of plain text. Edit any icon below in documentation.json after nav.
 #   stylesheet       ship styles/migration.css with the site (badges, images the source shows without a caption)
 #   redirects        write the old-address redirects into documentation.json
 `;
@@ -66,6 +78,7 @@ export function proposeSitePlan(branding: SiteBranding | undefined, chosen: { te
     ...(navbar ? { navbar } : {}),
     ...(branding?.seo && Object.keys(branding.seo).length ? { seo: branding.seo } : {}),
     template: chosen.template ?? 'classic',
+    icons: 'suggested',
     stylesheet: true,
     redirects: true,
     ...(branding?.unsupported?.length ? { notCarried: branding.unsupported } : {}),
@@ -87,11 +100,14 @@ export function readSitePlan(workspace: string): SitePlan | undefined {
   const parsed = parseYaml(readFileSync(path, 'utf8')) as Partial<SitePlan> | null;
   if (!parsed || typeof parsed !== 'object') throw new Error(`${path} is not a YAML mapping`);
   if (parsed.template !== undefined && parsed.template !== 'classic' && parsed.template !== 'atlas') throw new Error(`${path}: template must be classic or atlas`);
+  if (parsed.icons !== undefined && !ICON_POLICIES.includes(parsed.icons)) throw new Error(`${path}: icons must be ${ICON_POLICIES.join(', ')}`);
   for (const scheme of ['light', 'dark'] as const) {
     const colour = parsed.branding?.colors?.[scheme];
     if (colour !== undefined && !hexColor(colour)) throw new Error(`${path}: branding.colors.${scheme} "${String(colour)}" is not a colour; write it as #rrggbb`);
   }
-  return { ...parsed, branding: { ...parsed.branding, carry: parsed.branding?.carry !== false }, stylesheet: parsed.stylesheet !== false, redirects: parsed.redirects !== false } as SitePlan;
+  // A workspace planned before there was an icons setting reads as `source`: a re-run of nav on it
+  // must write the same file it wrote before, rather than quietly restyling a reviewed sidebar.
+  return { ...parsed, branding: { ...parsed.branding, carry: parsed.branding?.carry !== false }, icons: parsed.icons ?? 'source', stylesheet: parsed.stylesheet !== false, redirects: parsed.redirects !== false } as SitePlan;
 }
 
 /** Every image the plan asks the site to show, so the assets stage can host it with the pages' own media. */

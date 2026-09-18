@@ -84,6 +84,7 @@ import { scanComponentDefinitions, attachDefinitions } from './adapters/definiti
 import { labelFromPathSegment, statedLabelsBySlug } from './nav/labels.js';
 import { writeTree, readTree, buildDocumentationNavigation, pagesWithoutPlacement, placedPageIds, sourceNavigationFromDiscovered, type GroupOpenapiRef, type SourceNavigationNode, type Tree, type TreePage } from './nav/tree.js';
 import { documentationSiteSettings, proposeSitePlan, readSitePlan, sitePlanImages, sitePlanPath, writeSitePlan, MIGRATION_STYLESHEET, MIGRATION_STYLESHEET_CSS } from './nav/site-plan.js';
+import { applyIconPolicy } from './nav/icon-suggest.js';
 import { mintlifyBranding, siteBrandingFromPage, type SiteBranding } from './scrape/site-branding.js';
 import { defaultUrlPlan, extendUrlPlan, writeUrlPlan, readUrlPlan, applyUrlPlan, redirectMaps, anchorMap, type RedirectRule } from './urls/plan.js';
 import { retargetDocLinks, siteLinkResolver, siteLinkTarget, siteLinksFor, type SiteLinks } from './urls/site-links.js';
@@ -1429,6 +1430,13 @@ async function main() {
       // old-address redirects are written where the platform reads them: computing them into a report
       // nobody deploys left every old URL answering 404 after cutover.
       const sitePlan = readSitePlan(workspace);
+      // Sidebar icons. The platform draws one beside every row that carries one, and documentation
+      // written on the platform does carry them; a source with nowhere to state one therefore
+      // migrates into a sidebar that reads plainer than the same pages written in the editor. The
+      // reviewed plan decides whether one is proposed per entry, and an icon the source states is
+      // never replaced.
+      const icons = applyIconPolicy(navigation.navigation, sitePlan?.icons ?? 'source');
+      navigation.navigation = icons.navigation;
       const assetManifest = readManifest(workspace);
       const exactOutput = (s.fidelityMode ?? 'exact') === 'exact';
       const hosted = (sourceUrl: string): string | undefined => {
@@ -1451,6 +1459,8 @@ async function main() {
       else rmSync(stylesheetFile, { force: true });
       if (existsSync(sitePlanPath(workspace))) { const pinned = readSession(workspace); pinned.hashes.sitePlan = fileHash(sitePlanPath(workspace)); writeSession(workspace, pinned); }
       for (const note of site.leftOut) console.log(`· ${note}`);
+      if (icons.added) console.log(`· ${icons.added} sidebar icon(s) proposed from entry titles where the source states none (plan/site.yaml: icons)`);
+      if (icons.removed) console.log(`· ${icons.removed} sidebar icon(s) left out (plan/site.yaml: icons: none)`);
       if (meta.openapi?.length) console.log(`· copied ${meta.openapi.length} OpenAPI spec(s) into output and attached them to their groups`);
       const anchors = existsSync(join(workspace, 'inventory', 'anchors.json')) ? readJson<Array<{ pageId: string; headings: Array<{ id: string; text: string; sourceId?: string }>; titleAnchor?: string }>>(join(workspace, 'inventory', 'anchors.json')) : [];
       const links = existsSync(join(workspace, 'inventory', 'links.json')) ? readJson<Array<{ pageId: string; url: string }>>(join(workspace, 'inventory', 'links.json')) : [];

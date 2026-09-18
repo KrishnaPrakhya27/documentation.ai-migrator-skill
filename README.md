@@ -218,11 +218,14 @@ navbar:
   primary: { title: Get started, link: https://acme.com/start }
   links:   [{ title: Talk to us, link: https://acme.com/contact }]
 template: classic                # or atlas; also settable up front with init --template
+icons: suggested                 # sidebar icons: suggested | source | none
 stylesheet: true                 # ships styles/migration.css: small finishing rules, all scoped to the migration's own markup
 redirects: true                  # old addresses redirect to the pages that replace them
 ```
 
 `nav` writes these into `documentation.json` under the platform's own settings and checks the result against the platform's published schema. Logos and favicons are hosted with the rest of your pictures. Sidebar icons, API method badges (GET, POST…), "new"/"beta" badges, page layout modes and link-only tabs are carried from the source too. What the platform has no setting for (a footer, custom fonts, a banner) is listed under `notCarried` so you know.
+
+**Sidebar icons.** Documentation.AI draws an icon beside every sidebar row that has one, and documentation written in the editor has them. Most sources have nowhere to say it: a GitBook, Docusaurus or ReadMe sidebar states a link and its text and nothing else, so those sites would migrate into a sidebar of plain rows. With `icons: suggested`, the default, each entry the source leaves bare gets an icon read from its own title — "Getting Started" becomes `rocket`, "Billing" becomes `credit-card`, a changelog's year groups become `calendar`. Anything your source does state is kept exactly as it states it, every name is checked against the renderer's icon set so none of them draws a blank, and the pages inside one group either all get an icon or none do, so the rows stay aligned. Change any of them in `documentation.json` afterwards, or set `icons: source` to carry only your own, or `icons: none` for plain text.
 
 ---
 

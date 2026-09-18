@@ -223,3 +223,36 @@ Checked live, read-only: the discovery documents of `api.documentation.ai/mcp` p
 The first real MCP-flow run (41 pages, 44 pictures, released) showed a gap: the project was chosen at `publish`, after `assets` had already stored the pictures under whichever project `DAI_DOCUMENTATION_ID` named. They displayed, and they were filed in another project's storage folder, where that project's media library lists them and deleting that project deletes them. `dai-migrate project` now runs right after `init` in the MCP flow: it signs the person in and records the project. `assets --provider s3` refuses to run in the MCP flow until it has, stores under the chosen project, and stores an asset again when the migration's project changes. `publish` stops, with the steps to take, when hosted assets sit under another project's folder.
 
 What this does not change: only Documentation.AI's own team can host pictures today, because the platform has no upload route for a project key or a sign-in (`/api/v1/media` answers 404) and the Authoring MCP server has no media tool. A customer on their own records the decision to leave pictures at their current addresses.
+
+## 2026-09-18 — the sidebar carries icons a source has nowhere to state
+
+Documentation.AI draws an icon beside every sidebar row that carries one, and the documentation the
+platform itself publishes carries one on every page and every tab. The migrator only ever read icons
+from a Mintlify `docs.json`; navigation discovered from a rendered sidebar captures a link and its
+text and nothing else, so a GitBook, Docusaurus or ReadMe source migrated into a sidebar of plain
+rows that reads plainer than the same pages written in the editor, for a reason no reader can see.
+Measured on two real workspaces: the Mintlify migration wrote 24 icons, the GitBook one wrote none,
+and the GitBook source's own sidebar has none to carry — only a chevron.
+
+`plan/site.yaml` now carries `icons: suggested | source | none`, proposed as `suggested`, and `nav`
+applies it to the built navigation (`src/nav/icon-suggest.ts`). A proposal is read from the entry's
+own title through an ordered phrase table and a word table modelled on the platform's own pairings
+(`Getting Started` → `rocket`, `Billing` → `credit-card`, `Migrate from GitBook` → `book-marked`, a
+changelog's year groups → `calendar`). Four properties make it safe to write before a person sees
+it: an icon the source states is never replaced; every name is checked against the contract's 1,826
+drawable names, so nothing is written that the renderer draws as nothing; the mapping is a table, so
+a re-run writes a byte-identical file; and within one container the pages either all carry an icon
+or none do, since a half-iconed container has ragged rows. A workspace planned before the setting
+existed reads as `source`, so re-running `nav` on it writes what it wrote before.
+
+`navigation-exact` had to change with it. It compared the written navigation byte for byte against
+the reviewed tree, so any proposed icon read as a structural difference and failed gate 3. It now
+compares structure with icons set aside, and compares icons separately in one direction only: every
+icon the source states must arrive, unchanged, at the same entry. A dropped icon, a changed icon and
+a structural difference all still fail, each covered by a test.
+
+Proved on real workspaces, not only in tests: `nav` re-run on a copy of the 41-page GitBook
+migration proposed 53 icons, `verify` passed every gate including `navigation-exact` (the only
+failure is `migrator-pinned`, which every re-run against a newer build fails), and a second `nav`
+produced the identical file by sha256. The same pass over the captured 400-page Mintlify workspace
+adds 487 icons beside the 24 the source states, with no schema issue.

@@ -830,14 +830,18 @@ export function runGates(input: GateInput): GateResult[] {
       ? Array.isArray(value) ? value.map(sortValue) : Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, sortValue(item)]))
       : value;
     const canonical = (value: unknown): string => JSON.stringify(sortValue(value));
-    // The reviewed tree and, when the source can be re-read, a fresh extraction from the frozen
-    // source. Comparing only against the tree the same run produced proves nothing, so a mismatch
-    // with the re-extraction fails even when the tree agrees.
-    const written = canonical((nav as Record<string, unknown>).navigation);
+    // This gate certifies structure: the pages, their containers, their order and their labels are
+    // the source's. An icon is presentation, and the site plan may ask for one on an entry whose
+    // source states none, so a proposed icon is not a structural difference and must not read as
+    // one. It is compared separately and strictly in the other direction: every icon the source
+    // does state has to survive into the output, unchanged and in the same place.
+    const written = canonical(withoutIcons((nav as Record<string, unknown>).navigation));
+    const writtenIcons = iconsByPlace((nav as Record<string, unknown>).navigation);
     const expected = input.expectedNavigation;
-    const matchesTree = !!expected && written === canonical(expected);
+    const keepsStatedIcons = (stated: unknown): boolean => [...iconsByPlace(stated)].every(([place, icon]) => writtenIcons.get(place) === icon);
+    const matchesTree = !!expected && written === canonical(withoutIcons(expected)) && keepsStatedIcons(expected);
     const reExtracted = evidence?.navigation;
-    const matchesSource = !!reExtracted && written === canonical(reExtracted);
+    const matchesSource = !!reExtracted && written === canonical(withoutIcons(reExtracted)) && keepsStatedIcons(reExtracted);
     // A manual tree is itself an explicit source-structure decision pinned by human gate 1. It
     // exists precisely when executable source configuration cannot be re-read safely, so requiring
     // a second machine witness here would make the documented manual recovery path impossible.
@@ -1047,4 +1051,36 @@ function migratorPinnedGate(pinned: MigratorProvenance | undefined, current: Mig
     count: drift.length,
     samples: drift,
   };
+}
+
+const NAV_CONTAINER_KINDS = ['product', 'version', 'language', 'tab', 'dropdown', 'menu', 'group'] as const;
+const NAV_CHILD_KEYS = ['products', 'versions', 'languages', 'tabs', 'dropdowns', 'menus', 'groups', 'pages'] as const;
+
+/**
+ * A navigation with every icon removed, so two trees compare on what they are rather than on how
+ * they are drawn. `navigation-exact` certifies that the output's pages, containers, order and
+ * labels are the source's; an icon the site plan asked this migration to propose is neither.
+ */
+function withoutIcons(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutIcons);
+  if (!value || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) if (key !== 'icon') out[key] = withoutIcons(item);
+  return out;
+}
+
+/**
+ * Every icon a navigation states, keyed by the place in the tree that states it, so an icon the
+ * source states can be required to arrive at the same entry rather than merely to exist somewhere.
+ */
+function iconsByPlace(value: unknown, trail: string[] = [], into = new Map<string, string>()): Map<string, string> {
+  if (Array.isArray(value)) { for (const item of value) iconsByPlace(item, trail, into); return into; }
+  if (!value || typeof value !== 'object') return into;
+  const node = value as Record<string, unknown>;
+  const kind = NAV_CONTAINER_KINDS.find((k) => typeof node[k] === 'string');
+  const named = kind ? `${kind}:${String(node[kind])}` : typeof node.title === 'string' ? `page:${String(node.path ?? node.href ?? node.title)}` : undefined;
+  const here = named ? [...trail, named] : trail;
+  if (named && typeof node.icon === 'string' && node.icon) into.set(here.join('/'), node.icon);
+  for (const key of NAV_CHILD_KEYS) if (Array.isArray(node[key])) iconsByPlace(node[key], here, into);
+  return into;
 }
